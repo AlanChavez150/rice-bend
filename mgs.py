@@ -29,6 +29,7 @@ class MGS():
             z=0,
             dx=rx_spacing
         )
+        tx.make_steer(self.freq, theta_deg=30)
 
         self.scene = SimScene(
             x_min=x_min,

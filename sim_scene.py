@@ -1,4 +1,5 @@
 import numpy as np
+import scipy.constants
 
 class SimAperature():
     def __init__(self, x_min: float, x_max: float, z: float, dx: float):
@@ -10,6 +11,25 @@ class SimAperature():
         num_points = int((x_max - x_min) // dx)
         self.aper_axis = np.linspace(self.x_min, self.x_max, num_points)
         self.aper_profile = np.zeros(len(self.aper_axis), dtype=np.cfloat)
+
+    def _wavenumber(self, freq: float) -> float:
+        return 2 * np.pi / (scipy.constants.c / freq)
+
+    def make_caustic(self, freq: float):
+        pass
+
+    def make_steer(self, freq: float, theta_deg: float):
+        """
+        Implements -k * x * sin(theta).
+        Where theta trajectory of the beam, and k is the wavenumber
+        """
+        k = self._wavenumber(freq)
+        theta_rad = theta_deg / (np.pi / 180)
+        phase = -1.0 * k * self.aper_axis * np.sin(theta_rad)
+        self.aper_profile = 1.0 * np.exp(1j * phase)
+
+    def make_bessel(self, freq: float):
+        pass
 
 class SimScene():
     """
