@@ -1,5 +1,6 @@
 import numpy as np
 import scipy.constants
+import scipy.special
 
 class SimAperature():
     def __init__(self, x_min: float, x_max: float, z: float, dx: float):
@@ -24,12 +25,19 @@ class SimAperature():
         Where theta trajectory of the beam, and k is the wavenumber
         """
         k = self._wavenumber(freq)
-        theta_rad = theta_deg / (np.pi / 180)
-        phase = -1.0 * k * self.aper_axis * np.sin(theta_rad)
+        theta_rad = theta_deg * (np.pi / 180)
+        phase = -1.0  * k * self.aper_axis * np.sin(theta_rad)
         self.aper_profile = 1.0 * np.exp(1j * phase)
 
     def make_bessel(self, freq: float):
         pass
+
+    def make_airy(self, freq: float, x0: float, alpha: float):
+        # is freq really not used for anything?
+        s = self.aper_axis / x0
+        envelope = np.exp(alpha * s)
+        airy_func = scipy.special.airy(s)[0]
+        self.aper_profile = airy_func * envelope
 
 class SimScene():
     """
@@ -55,3 +63,5 @@ class SimScene():
 
         self.tx_ap = tx_ap
         self.rx_ap = rx_ap
+
+        self.data = np.zeros(shape=(len(self.z_axis), len(self.x_axis)), dtype=np.cfloat)
