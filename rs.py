@@ -1,4 +1,3 @@
-
 import numpy as np
 
 import scipy
@@ -7,7 +6,7 @@ import scipy.signal
 
 def kernel_rs(x: np.ndarray, wavelength: float, z: float, n: float = 1.0, kind: str = "x"):
     k = 2 * np.pi  * n / wavelength
-    r = np.sqrt(x**2 + z**2)
+    r = np.sqrt(x**2 + z**2) + 1e-16
     hk = scipy.special.hankel1(1, k * r)
     if kind == "z":
         return (0.5j * k * z / r) * hk
@@ -17,7 +16,7 @@ def kernel_rs(x: np.ndarray, wavelength: float, z: float, n: float = 1.0, kind: 
         raise ValueError(f"Invalid axis {x}")
 
 def kernel_rs_inverse(x: np.ndarray, wavelength: float, z: float, n: float = 1.0, kind: str = "x"):
-    return np.conjugate(kernel_rs(x, wavelength, z, n, kind))
+    return np.conjugate(kernel_rs(x, wavelength, np.abs(z), n, kind))
 
 def rs(x_axis: np.ndarray, z_axis: np.ndarray, u0: np.ndarray, wavelength: float) -> np.ndarray:
     """
