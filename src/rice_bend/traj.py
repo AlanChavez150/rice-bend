@@ -6,6 +6,7 @@ from typing import Tuple
 import coloredlogs
 import numpy as np
 import scipy
+import scipy.constants
 import scipy.integrate
 from matplotlib import pyplot as plt
 
@@ -168,7 +169,7 @@ class Traj():
         plt.show()
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "A",
@@ -207,3 +208,7 @@ if __name__ == "__main__":
         (args.A, args.B, args.C),
         (f_a, f_b, f_c)
     )
+
+
+if __name__ == "__main__":
+    main()

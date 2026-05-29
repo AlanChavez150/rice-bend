@@ -10,8 +10,8 @@ import scipy.constants
 import scipy.interpolate
 import matplotlib.pyplot as plt
 
-import rs
-from sim_scene import SimAperature, SimScene, parse_oscope_rx_data, parse_oscope_heatmap_data
+from rice_bend import rs
+from rice_bend.sim_scene import SimAperature, SimScene, parse_oscope_rx_data, parse_oscope_heatmap_data
 
 class MGS():
     def __init__(self, freq: float):
@@ -643,7 +643,7 @@ class ExpMGS(MGS):
         #self.rec_traj  = None
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(
         description="Program to simulate phase retrieval using a modified gerchberg-saxton algorithm"
     )
@@ -678,10 +678,9 @@ if __name__ == "__main__":
     if bool(args.debug): level = "DEBUG"
     coloredlogs.install(level=level, fmt=fmt)
 
-    rx_path = Path(args.rx_path)
-    heatmap_path = Path(args.heatmap_path)
-
     if args.rx_path is not None and not args.heatmap_path is None:
+        rx_path = Path(args.rx_path)
+        heatmap_path = Path(args.heatmap_path)
         mgs = ExpMGS(rx_path, heatmap_path, args.freq)
         #mgs.run_sim(False, False)
         mgs.run_gerch_sax()
@@ -696,3 +695,7 @@ if __name__ == "__main__":
         mgs.run_sim(True)
         mgs.compute_traj()
         mgs.plot_scene()
+
+
+if __name__ == "__main__":
+    main()
