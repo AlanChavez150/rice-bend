@@ -160,10 +160,12 @@ def _collect_arrays(mgs, is_exp: bool) -> dict:
             out["gs_phase_captured"] = np.asarray(hist.phase_captured, dtype=np.float32)
             out["gs_prop_field_captured"] = _c64(np.asarray(hist.prop_field_captured))
 
+    # scene axes are always saved (cheap, 1D) so a run can be re-illuminated later
+    out["scene_x_axis"] = _f64(scene.x_axis)
+    out["scene_z_axis"] = _f64(scene.z_axis)
+
     # large 2D scene fields (opt-in)
     if mgs.output_cfg.save_scene_fields:
-        out["scene_x_axis"] = _f64(scene.x_axis)
-        out["scene_z_axis"] = _f64(scene.z_axis)
         out["scene_data"] = _c64(scene.data)
         out["gs_rec_scene_data"] = _c64(mgs.gs_rec_scene.data)
 
