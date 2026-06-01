@@ -11,16 +11,23 @@ import scipy.interpolate
 import matplotlib.pyplot as plt
 
 from rice_bend import rs
+from rice_bend.config import SimConfig, load_config
 from rice_bend.sim_scene import SimAperature, SimScene, parse_oscope_rx_data, parse_oscope_heatmap_data
 
+# Default config shipped in the repo's configs/ folder (repo_root/configs/sim_config.yml)
+DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "configs" / "sim_config.yml"
+
 class MGS():
-    def __init__(self, freq: float):
+    def __init__(self, freq: float, config: SimConfig):
         self.log = logging.getLogger()
-        # set up simulation scene
-        x_min = -0.2
-        x_max =  0.2
-        z_min = 0.0
-        z_max = 0.5
+        # set up simulation scene from config
+        scene_cfg = config.sim_scene
+        x_min = scene_cfg.x_min
+        x_max = scene_cfg.x_max
+        z_min = scene_cfg.z_min
+        z_max = scene_cfg.z_max
+        spacing = scene_cfg.spacing
+        self.plot_path = config.plot_path
         self.freq = freq
         self.wavelength = scipy.constants.c / freq
         rx_spacing_ratio = 1 / 20
@@ -58,7 +65,7 @@ class MGS():
             x_max=x_max,
             z_min=z_min,
             z_max=z_max,
-            spacing=0.25e-3,
+            spacing=spacing,
             rx_ap=rx,
             tx_ap=tx
         )
@@ -380,37 +387,40 @@ class MGS():
             label="TX aperture location"
         )
 
-        real_a, real_b, real_c = (1e-3, 1e-3, 1e-3)
-        if len(self.real_traj) > 0:
-            real_a, real_b, real_c = self.real_traj
-        rec_a, rec_b, rec_c = self.rec_traj
         traj_x = self.scene.x_axis.copy()
         # recenter x axis
         traj_x += (self.scene.x_max - self.scene.x_min) / 2.0
         traj_z = np.linspace(self.scene.z_min, self.scene.z_max, len(traj_x))
-        self.log.error(f"{real_a=} {real_b=} {real_c=}")
-        self.log.error(f"{rec_a=} {rec_b=} {rec_c=}")
-        real_traj = (-real_b + np.sqrt( real_b**2 - 4*real_a * ( real_c - traj_z))) / (2 * real_a)
-        rec_traj  = ( -rec_b + np.sqrt(  rec_b**2 - 4* rec_a * (  rec_c - traj_z))) / (2 *  rec_a)
 
-        for idx in range(len(traj_x)):
-            if real_traj[idx] > self.scene.z_max or real_traj[idx] < self.scene.z_min:
-                real_traj[idx] = None
-            if rec_traj[idx] > self.scene.z_max or rec_traj[idx] < self.scene.z_min:
-                rec_traj[idx] = None
+        def _solve_traj(a, b, c):
+            # invert z = a*x^2 + b*x + c for x, masking points outside the scene
+            traj = (-b + np.sqrt(b**2 - 4*a * (c - traj_z))) / (2 * a)
+            for idx in range(len(traj)):
+                if traj[idx] > self.scene.z_max or traj[idx] < self.scene.z_min:
+                    traj[idx] = None
+            return traj
 
-        ax_gs.plot(
-            traj_x,
-            real_traj,
-            linewidth=3,
-            label="Real Trajectory"
-        )
-        ax_gs.plot(
-            traj_x,
-            rec_traj,
-            linewidth=3,
-            label="Recovered Trajectory"
-        )
+        if len(self.real_traj) > 0:
+            real_a, real_b, real_c = self.real_traj
+            self.log.error(f"{real_a=} {real_b=} {real_c=}")
+            ax_gs.plot(
+                traj_x,
+                _solve_traj(real_a, real_b, real_c),
+                linewidth=3,
+                label="Real Trajectory"
+            )
+
+        if len(self.rec_traj) > 0:
+            rec_a, rec_b, rec_c = self.rec_traj
+            self.log.error(f"{rec_a=} {rec_b=} {rec_c=}")
+            ax_gs.plot(
+                traj_x,
+                _solve_traj(rec_a, rec_b, rec_c),
+                linewidth=3,
+                label="Recovered Trajectory"
+            )
+        else:
+            self.log.info("Skipping recovered trajectory plot (trajectory not computed)")
 
         ax_gs.legend()
 
@@ -478,7 +488,8 @@ class MGS():
             label="MGS Reconstructed TX"
         )
         ax_3.legend()
-        fig.savefig("mgs.png")
+        self.log.info(f"Saving scene plot to {self.plot_path}")
+        fig.savefig(self.plot_path)
         plt.show()
 
     def compute_traj(self):
@@ -551,10 +562,12 @@ class MGS():
         return mse
 
 class ExpMGS(MGS):
-    def __init__(self, rx_path: Path, heatmap_path: Path, freq: float):
+    def __init__(self, rx_path: Path, heatmap_path: Path, freq: float, config: SimConfig):
         self.log = logging.getLogger("ExpMGS")
         self.log.info(f"Carrier Frequency: {freq*1e-9: 0.2f} GHz")
         self.freq = freq
+        # ExpMGS derives its scene from measured data, so only plot_path is used
+        self.plot_path = config.plot_path
 
         self.log.info(f"Reading file as RX data: {rx_path}")
         rx = parse_oscope_rx_data(rx_path, freq, 25e9, 6)
@@ -671,6 +684,18 @@ def main():
         help="Path to .mat experimentation data. Expects full heatmap measurements",
         default=None
     )
+    parser.add_argument(
+        "--skip-traj",
+        help="Skip the (slow) trajectory grid search and just plot the reconstruction",
+        action="store_true",
+        default=False
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        help="Path to a simulation config .yml (sim_scene bounds and plot_path)",
+        default=DEFAULT_CONFIG
+    )
     args = parser.parse_args()
 
     fmt = "%(levelname)s: %(message)s"
@@ -678,24 +703,28 @@ def main():
     if bool(args.debug): level = "DEBUG"
     coloredlogs.install(level=level, fmt=fmt)
 
+    config = load_config(args.config)
+
     if args.rx_path is not None and not args.heatmap_path is None:
         rx_path = Path(args.rx_path)
         heatmap_path = Path(args.heatmap_path)
-        mgs = ExpMGS(rx_path, heatmap_path, args.freq)
+        mgs = ExpMGS(rx_path, heatmap_path, args.freq, config)
         #mgs.run_sim(False, False)
         mgs.run_gerch_sax()
         mgs.run_sim(True, False)
-        mgs.compute_traj()
+        if not args.skip_traj:
+            mgs.compute_traj()
         mgs.plot_scene()
 
     else:
-        mgs = MGS(args.freq)
+        mgs = MGS(args.freq, config)
         mgs.run_sim(False)
         mgs.run_gerch_sax()
         mgs.run_sim(True)
-        mgs.compute_traj()
+        if not args.skip_traj:
+            mgs.compute_traj()
         mgs.plot_scene()
-
 
 if __name__ == "__main__":
     main()
+
