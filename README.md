@@ -54,12 +54,20 @@ via ffmpeg):
 
 ```bash
 mgs-animate                              # latest run under results/ -> tx_estimate.mp4
+mgs-animate --mode scene                 # 2D scene re-illuminated by the TX estimate
 mgs-animate results/<run> -o out.mp4     # specific run / output path
 mgs-animate --fps 20 --show
 ```
 
-For a smoother animation, lower `gerchberg_saxton.history_stride` in the config before
-running `mgs` (stride 1 captures every iteration).
+How many frames each mode renders:
+
+- `--mode phase` animates **every captured iteration**, so its frame count is set by
+  `gerchberg_saxton.history_stride` (`1` = every iteration). Capturing more enlarges
+  `run.npz`; raise `mgs-animate --fps` to keep the video short.
+- `--mode scene` recomputes a full Rayleigh-Sommerfeld propagation per frame (expensive),
+  so it **subsamples the captured iterations to ~60 frames by default** regardless of
+  `history_stride`. Use `--frame-stride 1` for every captured iteration (slow), and
+  `--z-stride` to trade scene resolution for speed.
 
 ### `traj`
 
