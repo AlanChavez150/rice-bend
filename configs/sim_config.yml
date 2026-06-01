@@ -12,3 +12,23 @@ sim_scene:
 # Path that plot_scene() writes the output figure to (relative to the
 # current working directory unless absolute).
 plot_path: mgs.png
+
+# Modified Gerchberg-Saxton solver hyperparameters and start/stop conditions.
+gerchberg_saxton:
+  max_iters: 10000
+  convergence_count: 10            # window of recent losses checked for flatness
+  convergence_threshold: -1.0e-8   # converged when mean(diff(recent loss)) > this
+  lr0: 0.05                        # initial backtracking step size
+  bt_shrink: 0.5                   # backtracking shrink factor
+  bt_tries: 8                      # max step reductions per iteration
+  seed: null                       # null -> a seed is drawn at runtime and recorded
+  history_stride: 50               # capture phase/RX field every Nth iteration
+
+# Run-output persistence.
+output:
+  output_dir: results              # base dir; each run -> <output_dir>/<run_name>
+  run_name: data_dump              # run directory name (existing contents are cleared)
+  save_run: true                   # master on/off for persistence
+  save_scene_fields: false         # the big 2D complex scene arrays (~tens of MB)
+  save_gs_history: true            # strided per-iteration phase + RX field history
+

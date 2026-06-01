@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 
 from rice_bend import rs
 from rice_bend.config import SimConfig, load_config
+from rice_bend.data_store import GSHistory, make_run_dir, save_run
 from rice_bend.sim_scene import SimAperature, SimScene, parse_oscope_rx_data, parse_oscope_heatmap_data
 
 # Default config shipped in the repo's configs/ folder (repo_root/configs/sim_config.yml)
@@ -28,6 +29,9 @@ class MGS():
         z_max = scene_cfg.z_max
         spacing = scene_cfg.spacing
         self.plot_path = config.plot_path
+        self.gs_cfg = config.gerchberg_saxton
+        self.output_cfg = config.output
+        self.gs_history = None
         self.freq = freq
         self.wavelength = scipy.constants.c / freq
         rx_spacing_ratio = 1 / 20
@@ -160,8 +164,14 @@ class MGS():
         # rayleigh-sommerfeld code only takes an array for Z values. however only 1 value is needed
         z_axis = np.array([self.scene.rx_ap.z])
 
-        max_iters = int(10e3)
-        cvrg_count = 10
+        # hyperparameters / start conditions (from config)
+        max_iters = self.gs_cfg.max_iters
+        cvrg_count = self.gs_cfg.convergence_count
+        lr0 = self.gs_cfg.lr0            # starting step size (tune: 0.01–0.1)
+        bt_shrink = self.gs_cfg.bt_shrink  # backtracking factor
+        bt_tries = self.gs_cfg.bt_tries    # max reductions per iter
+        conv_threshold = self.gs_cfg.convergence_threshold
+
         # assume incident wave has a magnitude of 1
         orig_aper_amp = np.abs(self.scene.tx_ap.interp_axis(x_axis))
         orig_prop_f  = self.scene.rx_ap.interp_axis(x_axis)
@@ -171,17 +181,34 @@ class MGS():
             if x_val < self.scene.rx_ap.x_min or x_val > self.scene.rx_ap.x_max:
                 error_weighting[idx] = 0.0
 
+        # seeded initial phase for reproducibility; draw + record a seed if none given
+        seed = self.gs_cfg.seed
+        if seed is None:
+            seed = int(np.random.SeedSequence().entropy % (2**32))
+        rng = np.random.default_rng(seed)
+
         # track aperature amplitude and phase seperatly
         curr_aper_amp = np.abs(orig_aper_amp.copy())
-        curr_aper_phase = 2 * np.pi * np.random.rand(size)
+        curr_aper_phase = 2 * np.pi * rng.random(size)
+        initial_phase = curr_aper_phase.copy()
 
         support = np.abs(orig_aper_amp) > 0 # aperature mask
 
-        lr0 = 0.05         # starting step size (tune: 0.01–0.1)
-        bt_shrink = 0.5    # backtracking factor
-        bt_tries = 8       # max reductions per iter
+        # accumulate gradient-descent progress for later re-use (see data_store.GSHistory)
+        history = GSHistory(
+            x_axis=x_axis,
+            orig_prop_f=orig_prop_f,
+            orig_aper_amp=orig_aper_amp,
+            error_weighting=error_weighting,
+            support=support,
+            initial_phase=initial_phase,
+            rx_z=float(z_axis[0]),
+            seed=seed,
+            history_stride=self.gs_cfg.history_stride,
+        )
 
-
+        stop_reason = "max_iters"
+        n_iters_run = max_iters
         hist_error = np.zeros(max_iters, np.float32)
         for iter_idx in range(max_iters):
             # propogate aperature guess to measurement plane
@@ -192,6 +219,8 @@ class MGS():
 
             loss = 0.5 * np.mean(np.abs(r_cx)**2)
             hist_error[iter_idx] = loss
+            # capture per-iteration state (phase + propagated field) on the stride
+            history.record_iter(iter_idx, loss, curr_aper_phase, curr_prop_f)
             g_meas = r_cx
 
             # back propogate
@@ -222,12 +251,21 @@ class MGS():
             if iter_idx > cvrg_count:
                 recent_err = hist_error[iter_idx-cvrg_count: iter_idx]
                 recent_err_flatness = np.mean(np.diff(recent_err))
-                if recent_err_flatness > -1e-10:
+                if recent_err_flatness > conv_threshold:
                     self.log.info(f"MGS has converged after {iter_idx+1} iterations")
+                    stop_reason = "converged"
+                    n_iters_run = iter_idx + 1
                     break
 
             if iter_idx == max_iters-1:
                 self.log.error(f"MGS did not converge after {iter_idx+1} iterations")
+                stop_reason = "max_iters"
+                n_iters_run = max_iters
+
+        # make sure the final iteration's state is captured, then record stop conditions
+        history.capture_final(iter_idx, loss, curr_aper_phase, curr_prop_f)
+        history.finalize(stop_reason, n_iters_run, loss)
+        self.gs_history = history
 
         # interpolate from rx axis to gs axis
         gs_interp_func_amp = scipy.interpolate.interp1d(
@@ -402,7 +440,7 @@ class MGS():
 
         if len(self.real_traj) > 0:
             real_a, real_b, real_c = self.real_traj
-            self.log.error(f"{real_a=} {real_b=} {real_c=}")
+            self.log.debug(f"{real_a=} {real_b=} {real_c=}")
             ax_gs.plot(
                 traj_x,
                 _solve_traj(real_a, real_b, real_c),
@@ -568,6 +606,9 @@ class ExpMGS(MGS):
         self.freq = freq
         # ExpMGS derives its scene from measured data, so only plot_path is used
         self.plot_path = config.plot_path
+        self.gs_cfg = config.gerchberg_saxton
+        self.output_cfg = config.output
+        self.gs_history = None
 
         self.log.info(f"Reading file as RX data: {rx_path}")
         rx = parse_oscope_rx_data(rx_path, freq, 25e9, 6)
@@ -696,6 +737,30 @@ def main():
         help="Path to a simulation config .yml (sim_scene bounds and plot_path)",
         default=DEFAULT_CONFIG
     )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        help="Override output.output_dir from config (base dir for run folders)",
+        default=None
+    )
+    parser.add_argument(
+        "--run-name",
+        type=str,
+        help="Override output.run_name (suffix appended to the run directory name)",
+        default=None
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        help="Override gerchberg_saxton.seed for a reproducible initial phase",
+        default=None
+    )
+    parser.add_argument(
+        "--no-save",
+        help="Disable run persistence for this invocation",
+        action="store_true",
+        default=False
+    )
     args = parser.parse_args()
 
     fmt = "%(levelname)s: %(message)s"
@@ -704,6 +769,16 @@ def main():
     coloredlogs.install(level=level, fmt=fmt)
 
     config = load_config(args.config)
+
+    # apply CLI overrides onto the config
+    if args.output_dir is not None: config.output.output_dir = args.output_dir
+    if args.run_name is not None: config.output.run_name = args.run_name
+    if args.seed is not None: config.gerchberg_saxton.seed = args.seed
+    if args.no_save: config.output.save_run = False
+
+    run_dir = None
+    if config.output.save_run:
+        run_dir = make_run_dir(config.output.output_dir, config.output.run_name)
 
     if args.rx_path is not None and not args.heatmap_path is None:
         rx_path = Path(args.rx_path)
@@ -715,6 +790,8 @@ def main():
         if not args.skip_traj:
             mgs.compute_traj()
         mgs.plot_scene()
+        if run_dir is not None:
+            save_run(mgs, run_dir, config, args.config, args.freq, vars(args), is_exp=True)
 
     else:
         mgs = MGS(args.freq, config)
@@ -724,6 +801,8 @@ def main():
         if not args.skip_traj:
             mgs.compute_traj()
         mgs.plot_scene()
+        if run_dir is not None:
+            save_run(mgs, run_dir, config, args.config, args.freq, vars(args), is_exp=False)
 
 if __name__ == "__main__":
     main()
