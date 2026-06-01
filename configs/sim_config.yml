@@ -1,0 +1,14 @@
+# Configuration for the MGS phase-retrieval simulation (rice_bend.mgs).
+# Used by the pure-simulation path; override with `mgs --config <path>`.
+
+# Bounds and sampling of the 2D (x, z) simulation grid. All units in meters.
+sim_scene:
+  x_min: -0.2
+  x_max: 0.2
+  z_min: 0.0
+  z_max: 0.5
+  spacing: 0.00025   # grid spacing (0.25 mm)
+
+# Path that plot_scene() writes the output figure to (relative to the
+# current working directory unless absolute).
+plot_path: mgs.png

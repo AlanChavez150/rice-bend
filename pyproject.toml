@@ -14,6 +14,8 @@ dependencies = [
     "matplotlib",
     "coloredlogs",
     "h5py",
+    "pyyaml",
+    "pydantic>=2",
 ]
 
 [project.scripts]
