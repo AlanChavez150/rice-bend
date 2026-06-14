@@ -10,40 +10,62 @@ import scipy.constants
 import scipy.interpolate
 import matplotlib.pyplot as plt
 
-import rs
-from sim_scene import SimAperature, SimScene, parse_oscope_rx_data, parse_oscope_heatmap_data
+from rice_bend import rs
+from rice_bend.config import SimConfig, load_config
+from rice_bend.data_store import GSHistory, make_run_dir, save_run
+from rice_bend.sim_scene import SimAperature, SimScene, parse_oscope_rx_data, parse_oscope_heatmap_data
+
+# Default config shipped in the repo's configs/ folder (repo_root/configs/sim_config.yml)
+DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "configs" / "sim_config.yml"
 
 class MGS():
-    def __init__(self, freq: float):
+    def __init__(self, freq: float, config: SimConfig):
         self.log = logging.getLogger()
-        # set up simulation scene
-        x_min = -0.2
-        x_max =  0.2
-        z_min = 0.0
-        z_max = 0.5
+        # set up simulation scene from config
+        scene_cfg = config.sim_scene
+        x_min = scene_cfg.x_min
+        x_max = scene_cfg.x_max
+        z_min = scene_cfg.z_min
+        z_max = scene_cfg.z_max
+        spacing = scene_cfg.spacing
+        self.plot_path = config.plot_path
+        self.gs_cfg = config.gerchberg_saxton
+        self.output_cfg = config.output
+        self.gs_history = None
         self.freq = freq
         self.wavelength = scipy.constants.c / freq
         rx_spacing_ratio = 1 / 20
         rx_spacing = self.wavelength * rx_spacing_ratio
 
+        # Convention: the RX aperture sits at the origin (z=0), the bottom of the
+        # image. The TX aperture sits at the top of the scene (z=z_max) and projects
+        # toward -Z, so its beam travels *down* the full scene height to the RX.
+        # Move the TX around by changing tx.z (height) and its x_min/x_max (lateral).
         rx = SimAperature(
             x_min=x_min+0.1,
             x_max=x_max-0.1,
-            z=0.25,
+            z=0,
             dx=rx_spacing
         )
 
+        # TX aperture location/sampling/trajectory come from config (tx_aperture),
+        # defined independently of the scene grid.
+        tx_cfg = config.tx_aperture
         tx = SimAperature(
-            x_min=x_min + 0.15,
-            #x_max=(x_max - x_min) * 0.75 + x_min,
-            x_max=x_max - 0.15,
-            z=0,
-            dx=0.25e-3
+            x_min=tx_cfg.x_min,
+            x_max=tx_cfg.x_max,
+            z=tx_cfg.z,
+            dx=tx_cfg.dx
         )
+        assert tx.z > z_min, f"tx_aperture.z ({tx.z}) must be above the scene floor z_min ({z_min})"
+        # the caustic is parameterised by *distance from the aperture* along the
+        # beam, so feed it the downstream propagation length (TX plane down to the RX)
+        prop_length = tx.z - z_min
         #tx.make_steer(self.freq, theta_deg=10)
         #tx.make_airy(self.freq, 3.7e-3, 0.1)
-        self.real_traj = [0.3, 0.01, 0.025]
-        tx.make_caustic(self.freq, z_max, self.real_traj[0], self.real_traj[1], self.real_traj[2])
+        # caustic trajectory x(d) = a*d^2 + b*d + c (d = distance from TX)
+        self.real_traj = list(tx_cfg.trajectory)
+        tx.make_caustic(self.freq, prop_length, self.real_traj[0], self.real_traj[1], self.real_traj[2])
 
         self.gs_tx = SimAperature(
             x_min=tx.x_min,
@@ -58,7 +80,7 @@ class MGS():
             x_max=x_max,
             z_min=z_min,
             z_max=z_max,
-            spacing=0.25e-3,
+            spacing=spacing,
             rx_ap=rx,
             tx_ap=tx
         )
@@ -97,7 +119,6 @@ class MGS():
 
         # redefine tx aperature coordinates and interp data.
         #assert self.scene.spacing < self.scene.tx_ap.dx
-        assert np.isclose(tx_ap.z, 0, 0.001) # Currently only works if tx is at z=0.0
         tx_profile_interp_func = scipy.interpolate.interp1d(
             tx_ap.aper_axis,
             tx_ap.aper_profile,
@@ -109,7 +130,12 @@ class MGS():
         tx_profile_interp = tx_profile_interp_func(self.scene.x_axis)
 
         self.log.info("Computing wave propogation across scene")
-        data = rs.rs(self.scene.x_axis, self.scene.z_axis, tx_profile_interp, self.wavelength)
+        data = rs.rs(self.scene.x_axis, self.scene.z_axis, tx_profile_interp, self.wavelength,
+                     z_src=tx_ap.z, forward_dir=-1.0)
+        # the aperture only radiates into the -Z half-space; zero the field behind it
+        # (planes above the TX plane would otherwise show a back-propagated artifact)
+        behind_tx = self.scene.z_axis > tx_ap.z
+        data[behind_tx, :] = 0
         if gs_rec:
             self.gs_rec_scene.data = data
         else:
@@ -151,10 +177,19 @@ class MGS():
         size = len(self.scene.x_axis)
         x_axis  = self.scene.x_axis.copy()
         # rayleigh-sommerfeld code only takes an array for Z values. however only 1 value is needed
-        z_axis = np.array([self.scene.rx_ap.z])
+        tx_z = self.scene.tx_ap.z
+        rx_z = self.scene.rx_ap.z
+        rx_plane = np.array([rx_z])   # measurement (RX) plane target
+        tx_plane = np.array([tx_z])   # aperture (TX) plane target, used by back-prop
 
-        max_iters = int(10e3)
-        cvrg_count = 10
+        # hyperparameters / start conditions (from config)
+        max_iters = self.gs_cfg.max_iters
+        cvrg_count = self.gs_cfg.convergence_count
+        lr0 = self.gs_cfg.lr0            # starting step size (tune: 0.01–0.1)
+        bt_shrink = self.gs_cfg.bt_shrink  # backtracking factor
+        bt_tries = self.gs_cfg.bt_tries    # max reductions per iter
+        conv_threshold = self.gs_cfg.convergence_threshold
+
         # assume incident wave has a magnitude of 1
         orig_aper_amp = np.abs(self.scene.tx_ap.interp_axis(x_axis))
         orig_prop_f  = self.scene.rx_ap.interp_axis(x_axis)
@@ -164,31 +199,50 @@ class MGS():
             if x_val < self.scene.rx_ap.x_min or x_val > self.scene.rx_ap.x_max:
                 error_weighting[idx] = 0.0
 
+        # seeded initial phase for reproducibility; draw + record a seed if none given
+        seed = self.gs_cfg.seed
+        if seed is None:
+            seed = int(np.random.SeedSequence().entropy % (2**32))
+        rng = np.random.default_rng(seed)
+
         # track aperature amplitude and phase seperatly
         curr_aper_amp = np.abs(orig_aper_amp.copy())
-        curr_aper_phase = 2 * np.pi * np.random.rand(size)
+        curr_aper_phase = 2 * np.pi * rng.random(size)
+        initial_phase = curr_aper_phase.copy()
 
         support = np.abs(orig_aper_amp) > 0 # aperature mask
 
-        lr0 = 0.05         # starting step size (tune: 0.01–0.1)
-        bt_shrink = 0.5    # backtracking factor
-        bt_tries = 8       # max reductions per iter
+        # accumulate gradient-descent progress for later re-use (see data_store.GSHistory)
+        history = GSHistory(
+            x_axis=x_axis,
+            orig_prop_f=orig_prop_f,
+            orig_aper_amp=orig_aper_amp,
+            error_weighting=error_weighting,
+            support=support,
+            initial_phase=initial_phase,
+            rx_z=float(rx_z),
+            seed=seed,
+            history_stride=self.gs_cfg.history_stride,
+        )
 
-
+        stop_reason = "max_iters"
+        n_iters_run = max_iters
         hist_error = np.zeros(max_iters, np.float32)
         for iter_idx in range(max_iters):
             # propogate aperature guess to measurement plane
             u0 = curr_aper_amp * np.exp(1j * curr_aper_phase)
             #self.plot_mgs_helper(x_axis, orig_prop_f, u0, f"{iter_idx}")
-            curr_prop_f = rs.rs(x_axis, z_axis, u0, self.wavelength)[0]
+            curr_prop_f = rs.rs(x_axis, rx_plane, u0, self.wavelength, z_src=tx_z, forward_dir=-1.0)[0]
             r_cx = error_weighting * (curr_prop_f - orig_prop_f)
 
             loss = 0.5 * np.mean(np.abs(r_cx)**2)
             hist_error[iter_idx] = loss
+            # capture per-iteration state (phase + propagated field) on the stride
+            history.record_iter(iter_idx, loss, curr_aper_phase, curr_prop_f)
             g_meas = r_cx
 
-            # back propogate
-            g_u0 = rs.rs(x_axis, -1.0 * z_axis, g_meas, self.wavelength)[0]
+            # back propogate the residual from the RX plane to the TX (aperture) plane
+            g_u0 = rs.rs(x_axis, tx_plane, g_meas, self.wavelength, z_src=rx_z, forward_dir=-1.0)[0]
 
             grad_theta = 2.0 * np.imag(g_u0 * np.conj(u0))
             grad_theta[~support] = 0.0
@@ -197,7 +251,7 @@ class MGS():
             for _ in range(bt_tries):
                 theta_trial = curr_aper_phase - step * grad_theta
                 u0_trial = curr_aper_amp * np.exp(1j * theta_trial)
-                um_trial = rs.rs(x_axis, z_axis, u0_trial, self.wavelength)[0]
+                um_trial = rs.rs(x_axis, rx_plane, u0_trial, self.wavelength, z_src=tx_z, forward_dir=-1.0)[0]
                 r_trial = error_weighting * (um_trial - orig_prop_f)
                 loss_trial = 0.5 * np.mean(np.abs(r_trial)**2)
                 if loss_trial < loss:  # sufficient decrease
@@ -215,12 +269,21 @@ class MGS():
             if iter_idx > cvrg_count:
                 recent_err = hist_error[iter_idx-cvrg_count: iter_idx]
                 recent_err_flatness = np.mean(np.diff(recent_err))
-                if recent_err_flatness > -1e-10:
+                if recent_err_flatness > conv_threshold:
                     self.log.info(f"MGS has converged after {iter_idx+1} iterations")
+                    stop_reason = "converged"
+                    n_iters_run = iter_idx + 1
                     break
 
             if iter_idx == max_iters-1:
                 self.log.error(f"MGS did not converge after {iter_idx+1} iterations")
+                stop_reason = "max_iters"
+                n_iters_run = max_iters
+
+        # make sure the final iteration's state is captured, then record stop conditions
+        history.capture_final(iter_idx, loss, curr_aper_phase, curr_prop_f)
+        history.finalize(stop_reason, n_iters_run, loss)
+        self.gs_history = history
 
         # interpolate from rx axis to gs axis
         gs_interp_func_amp = scipy.interpolate.interp1d(
@@ -380,37 +443,42 @@ class MGS():
             label="TX aperture location"
         )
 
-        real_a, real_b, real_c = (1e-3, 1e-3, 1e-3)
+        # Trajectory overlay: the caustic's lateral position follows x(d) = a*d^2 + b*d + c
+        # where d is the distance travelled from the TX aperture along the beam (this is the
+        # same form caustic.generate_aperature builds the beam from). Energy flows toward -Z,
+        # so a distance d maps to the absolute scene z = tx_z - d.
+        tx_z = self.scene.tx_ap.z
+        prop_length = tx_z - self.scene.z_min
+        traj_d = np.linspace(0, prop_length, len(self.scene.x_axis))
+        traj_z = tx_z - traj_d
+
+        def _caustic_x(a, b, c):
+            # lateral caustic position at each distance, masked where it leaves the scene
+            traj = (a * traj_d**2) + (b * traj_d) + c
+            traj[(traj < self.scene.x_min) | (traj > self.scene.x_max)] = np.nan
+            return traj
+
         if len(self.real_traj) > 0:
             real_a, real_b, real_c = self.real_traj
-        rec_a, rec_b, rec_c = self.rec_traj
-        traj_x = self.scene.x_axis.copy()
-        # recenter x axis
-        traj_x += (self.scene.x_max - self.scene.x_min) / 2.0
-        traj_z = np.linspace(self.scene.z_min, self.scene.z_max, len(traj_x))
-        self.log.error(f"{real_a=} {real_b=} {real_c=}")
-        self.log.error(f"{rec_a=} {rec_b=} {rec_c=}")
-        real_traj = (-real_b + np.sqrt( real_b**2 - 4*real_a * ( real_c - traj_z))) / (2 * real_a)
-        rec_traj  = ( -rec_b + np.sqrt(  rec_b**2 - 4* rec_a * (  rec_c - traj_z))) / (2 *  rec_a)
+            self.log.debug(f"{real_a=} {real_b=} {real_c=}")
+            ax_gs.plot(
+                _caustic_x(real_a, real_b, real_c),
+                traj_z,
+                linewidth=3,
+                label="Real Trajectory"
+            )
 
-        for idx in range(len(traj_x)):
-            if real_traj[idx] > self.scene.z_max or real_traj[idx] < self.scene.z_min:
-                real_traj[idx] = None
-            if rec_traj[idx] > self.scene.z_max or rec_traj[idx] < self.scene.z_min:
-                rec_traj[idx] = None
-
-        ax_gs.plot(
-            traj_x,
-            real_traj,
-            linewidth=3,
-            label="Real Trajectory"
-        )
-        ax_gs.plot(
-            traj_x,
-            rec_traj,
-            linewidth=3,
-            label="Recovered Trajectory"
-        )
+        if len(self.rec_traj) > 0:
+            rec_a, rec_b, rec_c = self.rec_traj
+            self.log.error(f"{rec_a=} {rec_b=} {rec_c=}")
+            ax_gs.plot(
+                _caustic_x(rec_a, rec_b, rec_c),
+                traj_z,
+                linewidth=3,
+                label="Recovered Trajectory"
+            )
+        else:
+            self.log.info("Skipping recovered trajectory plot (trajectory not computed)")
 
         ax_gs.legend()
 
@@ -478,7 +546,8 @@ class MGS():
             label="MGS Reconstructed TX"
         )
         ax_3.legend()
-        fig.savefig("mgs.png")
+        self.log.info(f"Saving scene plot to {self.plot_path}")
+        fig.savefig(self.plot_path)
         plt.show()
 
     def compute_traj(self):
@@ -511,7 +580,8 @@ class MGS():
                         z= self.gs_tx.z,
                         dx=self.gs_tx.dx
                     )
-                    test_aper.make_caustic(self.freq, self.scene.z_max, search_a, search_b, search_c)
+                    prop_length = self.scene.tx_ap.z - self.scene.z_min
+                    test_aper.make_caustic(self.freq, prop_length, search_a, search_b, search_c)
                     #gen_plot = attempt_cnt % 10000 == 0
                     gen_plot = False
                     curr_mse = self.compare_aper(self.gs_tx, test_aper, gen_plot)
@@ -551,10 +621,15 @@ class MGS():
         return mse
 
 class ExpMGS(MGS):
-    def __init__(self, rx_path: Path, heatmap_path: Path, freq: float):
+    def __init__(self, rx_path: Path, heatmap_path: Path, freq: float, config: SimConfig):
         self.log = logging.getLogger("ExpMGS")
         self.log.info(f"Carrier Frequency: {freq*1e-9: 0.2f} GHz")
         self.freq = freq
+        # ExpMGS derives its scene from measured data, so only plot_path is used
+        self.plot_path = config.plot_path
+        self.gs_cfg = config.gerchberg_saxton
+        self.output_cfg = config.output
+        self.gs_history = None
 
         self.log.info(f"Reading file as RX data: {rx_path}")
         rx = parse_oscope_rx_data(rx_path, freq, 25e9, 6)
@@ -643,7 +718,7 @@ class ExpMGS(MGS):
         #self.rec_traj  = None
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(
         description="Program to simulate phase retrieval using a modified gerchberg-saxton algorithm"
     )
@@ -671,6 +746,42 @@ if __name__ == "__main__":
         help="Path to .mat experimentation data. Expects full heatmap measurements",
         default=None
     )
+    parser.add_argument(
+        "--skip-traj",
+        help="Skip the (slow) trajectory grid search and just plot the reconstruction",
+        action="store_true",
+        default=False
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        help="Path to a simulation config .yml (sim_scene bounds and plot_path)",
+        default=DEFAULT_CONFIG
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        help="Override output.output_dir from config (base dir for run folders)",
+        default=None
+    )
+    parser.add_argument(
+        "--run-name",
+        type=str,
+        help="Override output.run_name (suffix appended to the run directory name)",
+        default=None
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        help="Override gerchberg_saxton.seed for a reproducible initial phase",
+        default=None
+    )
+    parser.add_argument(
+        "--no-save",
+        help="Disable run persistence for this invocation",
+        action="store_true",
+        default=False
+    )
     args = parser.parse_args()
 
     fmt = "%(levelname)s: %(message)s"
@@ -678,21 +789,42 @@ if __name__ == "__main__":
     if bool(args.debug): level = "DEBUG"
     coloredlogs.install(level=level, fmt=fmt)
 
-    rx_path = Path(args.rx_path)
-    heatmap_path = Path(args.heatmap_path)
+    config = load_config(args.config)
+
+    # apply CLI overrides onto the config
+    if args.output_dir is not None: config.output.output_dir = args.output_dir
+    if args.run_name is not None: config.output.run_name = args.run_name
+    if args.seed is not None: config.gerchberg_saxton.seed = args.seed
+    if args.no_save: config.output.save_run = False
+
+    run_dir = None
+    if config.output.save_run:
+        run_dir = make_run_dir(config.output.output_dir, config.output.run_name)
 
     if args.rx_path is not None and not args.heatmap_path is None:
-        mgs = ExpMGS(rx_path, heatmap_path, args.freq)
+        rx_path = Path(args.rx_path)
+        heatmap_path = Path(args.heatmap_path)
+        mgs = ExpMGS(rx_path, heatmap_path, args.freq, config)
         #mgs.run_sim(False, False)
         mgs.run_gerch_sax()
         mgs.run_sim(True, False)
-        mgs.compute_traj()
+        if not args.skip_traj:
+            mgs.compute_traj()
         mgs.plot_scene()
+        if run_dir is not None:
+            save_run(mgs, run_dir, config, args.config, args.freq, vars(args), is_exp=True)
 
     else:
-        mgs = MGS(args.freq)
+        mgs = MGS(args.freq, config)
         mgs.run_sim(False)
         mgs.run_gerch_sax()
         mgs.run_sim(True)
-        mgs.compute_traj()
+        if not args.skip_traj:
+            mgs.compute_traj()
         mgs.plot_scene()
+        if run_dir is not None:
+            save_run(mgs, run_dir, config, args.config, args.freq, vars(args), is_exp=False)
+
+if __name__ == "__main__":
+    main()
+

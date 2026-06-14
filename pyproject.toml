@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rice-bend"
+version = "0.1.0"
+description = "Phase retrieval of mm-wave beams via a modified Gerchberg-Saxton algorithm"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "coloredlogs",
+    "h5py",
+    "pyyaml",
+    "pydantic>=2",
+]
+
+[project.scripts]
+mgs = "rice_bend.mgs:main"
+traj = "rice_bend.traj:main"
+mgs-animate = "rice_bend.animate:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,2 +1,8 @@
 __pycache__
 *.png
+notes/
+*.egg-info/
+build/
+dist/
+uv.lock
+results/
