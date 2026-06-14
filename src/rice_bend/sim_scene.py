@@ -7,7 +7,7 @@ import scipy.interpolate
 import scipy.special
 import h5py
 
-import caustic
+from rice_bend import caustic
 
 class SimAperature():
     def __init__(self, x_min: float, x_max: float, z: float, dx: float):

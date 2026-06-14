@@ -1,0 +1,44 @@
+# Configuration for the MGS phase-retrieval simulation (rice_bend.mgs).
+# Used by the pure-simulation path; override with `mgs --config <path>`.
+
+# Bounds and sampling of the 2D (x, z) simulation grid. All units in meters.
+sim_scene:
+  x_min: -0.3
+  x_max: 0.3
+  z_min: 0.0     # RX aperture plane (origin) — bottom of the image
+  z_max: 1.0     # top of the scene
+  spacing: 0.00025   # grid spacing (0.25 mm)
+
+# TX aperture location and emitted beam, defined independently of the scene grid.
+# The TX sits at height `z` and projects -Z (down) onto the RX fixed at z=0.
+# Move the TX around by editing these values. All units in meters.
+tx_aperture:
+  x_min: -0.20
+  x_max: 0.20
+  z: 0.75                       # TX plane height (beam travels this far down to the RX
+  dx: 0.00025                   # aperture sampling spacing (0.25 mm)
+  trajectory: [0.20, 0.0, 0.0] # caustic x(d) = a*d^2 + b*d + c, d = distance from TX
+
+# Path that plot_scene() writes the output figure to (relative to the
+# current working directory unless absolute).
+plot_path: mgs.png
+
+# Modified Gerchberg-Saxton solver hyperparameters and start/stop conditions.
+gerchberg_saxton:
+  max_iters: 10000
+  convergence_count: 10            # window of recent losses checked for flatness
+  convergence_threshold: -1.0e-8   # converged when mean(diff(recent loss)) > this
+  lr0: 0.05                        # initial backtracking step size
+  bt_shrink: 0.5                   # backtracking shrink factor
+  bt_tries: 8                      # max step reductions per iteration
+  seed: null                       # null -> a seed is drawn at runtime and recorded
+  history_stride: 1                # capture phase/RX field every Nth iteration
+
+# Run-output persistence.
+output:
+  output_dir: results              # base dir; each run -> <output_dir>/<run_name>
+  run_name: data_dump              # run directory name (existing contents are cleared)
+  save_run: true                   # master on/off for persistence
+  save_scene_fields: false         # the big 2D complex scene arrays (~tens of MB)
+  save_gs_history: true            # strided per-iteration phase + RX field history
+
