@@ -37,24 +37,35 @@ class MGS():
         rx_spacing_ratio = 1 / 20
         rx_spacing = self.wavelength * rx_spacing_ratio
 
+        # Convention: the RX aperture sits at the origin (z=0), the bottom of the
+        # image. The TX aperture sits at the top of the scene (z=z_max) and projects
+        # toward -Z, so its beam travels *down* the full scene height to the RX.
+        # Move the TX around by changing tx.z (height) and its x_min/x_max (lateral).
         rx = SimAperature(
             x_min=x_min+0.1,
             x_max=x_max-0.1,
-            z=0.25,
+            z=0,
             dx=rx_spacing
         )
 
+        # TX aperture location/sampling/trajectory come from config (tx_aperture),
+        # defined independently of the scene grid.
+        tx_cfg = config.tx_aperture
         tx = SimAperature(
-            x_min=x_min + 0.15,
-            #x_max=(x_max - x_min) * 0.75 + x_min,
-            x_max=x_max - 0.15,
-            z=0,
-            dx=0.25e-3
+            x_min=tx_cfg.x_min,
+            x_max=tx_cfg.x_max,
+            z=tx_cfg.z,
+            dx=tx_cfg.dx
         )
+        assert tx.z > z_min, f"tx_aperture.z ({tx.z}) must be above the scene floor z_min ({z_min})"
+        # the caustic is parameterised by *distance from the aperture* along the
+        # beam, so feed it the downstream propagation length (TX plane down to the RX)
+        prop_length = tx.z - z_min
         #tx.make_steer(self.freq, theta_deg=10)
         #tx.make_airy(self.freq, 3.7e-3, 0.1)
-        self.real_traj = [0.3, 0.01, 0.025]
-        tx.make_caustic(self.freq, z_max, self.real_traj[0], self.real_traj[1], self.real_traj[2])
+        # caustic trajectory x(d) = a*d^2 + b*d + c (d = distance from TX)
+        self.real_traj = list(tx_cfg.trajectory)
+        tx.make_caustic(self.freq, prop_length, self.real_traj[0], self.real_traj[1], self.real_traj[2])
 
         self.gs_tx = SimAperature(
             x_min=tx.x_min,
@@ -108,7 +119,6 @@ class MGS():
 
         # redefine tx aperature coordinates and interp data.
         #assert self.scene.spacing < self.scene.tx_ap.dx
-        assert np.isclose(tx_ap.z, 0, 0.001) # Currently only works if tx is at z=0.0
         tx_profile_interp_func = scipy.interpolate.interp1d(
             tx_ap.aper_axis,
             tx_ap.aper_profile,
@@ -120,7 +130,12 @@ class MGS():
         tx_profile_interp = tx_profile_interp_func(self.scene.x_axis)
 
         self.log.info("Computing wave propogation across scene")
-        data = rs.rs(self.scene.x_axis, self.scene.z_axis, tx_profile_interp, self.wavelength)
+        data = rs.rs(self.scene.x_axis, self.scene.z_axis, tx_profile_interp, self.wavelength,
+                     z_src=tx_ap.z, forward_dir=-1.0)
+        # the aperture only radiates into the -Z half-space; zero the field behind it
+        # (planes above the TX plane would otherwise show a back-propagated artifact)
+        behind_tx = self.scene.z_axis > tx_ap.z
+        data[behind_tx, :] = 0
         if gs_rec:
             self.gs_rec_scene.data = data
         else:
@@ -162,7 +177,10 @@ class MGS():
         size = len(self.scene.x_axis)
         x_axis  = self.scene.x_axis.copy()
         # rayleigh-sommerfeld code only takes an array for Z values. however only 1 value is needed
-        z_axis = np.array([self.scene.rx_ap.z])
+        tx_z = self.scene.tx_ap.z
+        rx_z = self.scene.rx_ap.z
+        rx_plane = np.array([rx_z])   # measurement (RX) plane target
+        tx_plane = np.array([tx_z])   # aperture (TX) plane target, used by back-prop
 
         # hyperparameters / start conditions (from config)
         max_iters = self.gs_cfg.max_iters
@@ -202,7 +220,7 @@ class MGS():
             error_weighting=error_weighting,
             support=support,
             initial_phase=initial_phase,
-            rx_z=float(z_axis[0]),
+            rx_z=float(rx_z),
             seed=seed,
             history_stride=self.gs_cfg.history_stride,
         )
@@ -214,7 +232,7 @@ class MGS():
             # propogate aperature guess to measurement plane
             u0 = curr_aper_amp * np.exp(1j * curr_aper_phase)
             #self.plot_mgs_helper(x_axis, orig_prop_f, u0, f"{iter_idx}")
-            curr_prop_f = rs.rs(x_axis, z_axis, u0, self.wavelength)[0]
+            curr_prop_f = rs.rs(x_axis, rx_plane, u0, self.wavelength, z_src=tx_z, forward_dir=-1.0)[0]
             r_cx = error_weighting * (curr_prop_f - orig_prop_f)
 
             loss = 0.5 * np.mean(np.abs(r_cx)**2)
@@ -223,8 +241,8 @@ class MGS():
             history.record_iter(iter_idx, loss, curr_aper_phase, curr_prop_f)
             g_meas = r_cx
 
-            # back propogate
-            g_u0 = rs.rs(x_axis, -1.0 * z_axis, g_meas, self.wavelength)[0]
+            # back propogate the residual from the RX plane to the TX (aperture) plane
+            g_u0 = rs.rs(x_axis, tx_plane, g_meas, self.wavelength, z_src=rx_z, forward_dir=-1.0)[0]
 
             grad_theta = 2.0 * np.imag(g_u0 * np.conj(u0))
             grad_theta[~support] = 0.0
@@ -233,7 +251,7 @@ class MGS():
             for _ in range(bt_tries):
                 theta_trial = curr_aper_phase - step * grad_theta
                 u0_trial = curr_aper_amp * np.exp(1j * theta_trial)
-                um_trial = rs.rs(x_axis, z_axis, u0_trial, self.wavelength)[0]
+                um_trial = rs.rs(x_axis, rx_plane, u0_trial, self.wavelength, z_src=tx_z, forward_dir=-1.0)[0]
                 r_trial = error_weighting * (um_trial - orig_prop_f)
                 loss_trial = 0.5 * np.mean(np.abs(r_trial)**2)
                 if loss_trial < loss:  # sufficient decrease
@@ -425,25 +443,27 @@ class MGS():
             label="TX aperture location"
         )
 
-        traj_x = self.scene.x_axis.copy()
-        # recenter x axis
-        traj_x += (self.scene.x_max - self.scene.x_min) / 2.0
-        traj_z = np.linspace(self.scene.z_min, self.scene.z_max, len(traj_x))
+        # Trajectory overlay: the caustic's lateral position follows x(d) = a*d^2 + b*d + c
+        # where d is the distance travelled from the TX aperture along the beam (this is the
+        # same form caustic.generate_aperature builds the beam from). Energy flows toward -Z,
+        # so a distance d maps to the absolute scene z = tx_z - d.
+        tx_z = self.scene.tx_ap.z
+        prop_length = tx_z - self.scene.z_min
+        traj_d = np.linspace(0, prop_length, len(self.scene.x_axis))
+        traj_z = tx_z - traj_d
 
-        def _solve_traj(a, b, c):
-            # invert z = a*x^2 + b*x + c for x, masking points outside the scene
-            traj = (-b + np.sqrt(b**2 - 4*a * (c - traj_z))) / (2 * a)
-            for idx in range(len(traj)):
-                if traj[idx] > self.scene.z_max or traj[idx] < self.scene.z_min:
-                    traj[idx] = None
+        def _caustic_x(a, b, c):
+            # lateral caustic position at each distance, masked where it leaves the scene
+            traj = (a * traj_d**2) + (b * traj_d) + c
+            traj[(traj < self.scene.x_min) | (traj > self.scene.x_max)] = np.nan
             return traj
 
         if len(self.real_traj) > 0:
             real_a, real_b, real_c = self.real_traj
             self.log.debug(f"{real_a=} {real_b=} {real_c=}")
             ax_gs.plot(
-                traj_x,
-                _solve_traj(real_a, real_b, real_c),
+                _caustic_x(real_a, real_b, real_c),
+                traj_z,
                 linewidth=3,
                 label="Real Trajectory"
             )
@@ -452,8 +472,8 @@ class MGS():
             rec_a, rec_b, rec_c = self.rec_traj
             self.log.error(f"{rec_a=} {rec_b=} {rec_c=}")
             ax_gs.plot(
-                traj_x,
-                _solve_traj(rec_a, rec_b, rec_c),
+                _caustic_x(rec_a, rec_b, rec_c),
+                traj_z,
                 linewidth=3,
                 label="Recovered Trajectory"
             )
@@ -560,7 +580,8 @@ class MGS():
                         z= self.gs_tx.z,
                         dx=self.gs_tx.dx
                     )
-                    test_aper.make_caustic(self.freq, self.scene.z_max, search_a, search_b, search_c)
+                    prop_length = self.scene.tx_ap.z - self.scene.z_min
+                    test_aper.make_caustic(self.freq, prop_length, search_a, search_b, search_c)
                     #gen_plot = attempt_cnt % 10000 == 0
                     gen_plot = False
                     curr_mse = self.compare_aper(self.gs_tx, test_aper, gen_plot)

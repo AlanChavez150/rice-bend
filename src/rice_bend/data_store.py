@@ -210,6 +210,8 @@ def _collect_metadata(mgs, run_dir: Path, config, freq: float,
             "z_min": scene.z_min, "z_max": scene.z_max,
             "spacing": scene.spacing,
             "nx": int(len(scene.x_axis)), "nz": int(len(scene.z_axis)),
+            # source plane for re-illumination (TX projects toward -Z from here)
+            "tx_z": float(scene.tx_ap.z),
         },
         "trajectory": {
             "has_real_traj": len(real_traj) > 0,

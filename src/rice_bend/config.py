@@ -1,7 +1,7 @@
 """Pydantic models for the simulation configuration .yml. See configs/sim_config.yml."""
 
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
@@ -21,6 +21,29 @@ class SimSceneConfig(BaseModel):
             raise ValueError(f"x_max ({self.x_max}) must be greater than x_min ({self.x_min})")
         if self.z_max <= self.z_min:
             raise ValueError(f"z_max ({self.z_max}) must be greater than z_min ({self.z_min})")
+        return self
+
+
+class TxApertureConfig(BaseModel):
+    """TX aperture geometry, sampling and emitted caustic trajectory, defined
+    independently of the scene grid. All units in meters.
+
+    The aperture sits at height `z` and projects toward -Z (down) onto the RX at
+    z=0; move it around by editing `z` (height) and `x_min`/`x_max` (lateral span)."""
+    x_min: float = -0.35
+    x_max: float = 0.35
+    z: float = Field(default=2.0, description="TX plane height (beam travels -Z to the RX at z=0)")
+    dx: float = Field(default=0.25e-3, gt=0, description="Aperture sampling spacing in meters")
+    # caustic trajectory x(d) = a*d^2 + b*d + c, where d is the distance from the TX
+    trajectory: List[float] = Field(default_factory=lambda: [0.075, 0.0, 0.0],
+        description="Caustic coefficients [a, b, c] for x(d) = a*d^2 + b*d + c")
+
+    @model_validator(mode="after")
+    def _check(self) -> "TxApertureConfig":
+        if self.x_max <= self.x_min:
+            raise ValueError(f"x_max ({self.x_max}) must be greater than x_min ({self.x_min})")
+        if len(self.trajectory) != 3:
+            raise ValueError(f"trajectory must be [a, b, c] (3 values), got {self.trajectory}")
         return self
 
 
@@ -56,6 +79,7 @@ class OutputConfig(BaseModel):
 class SimConfig(BaseModel):
     """Top-level simulation config."""
     sim_scene: SimSceneConfig
+    tx_aperture: TxApertureConfig = Field(default_factory=TxApertureConfig)
     plot_path: Path = Field(description="Path that plot_scene() writes the output figure to")
     gerchberg_saxton: GerchbergSaxtonConfig = Field(default_factory=GerchbergSaxtonConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)

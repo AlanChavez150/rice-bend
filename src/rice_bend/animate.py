@@ -183,6 +183,9 @@ def animate_scene_reillumination(run_dir: Path, out_path: Path, fps: int = 15,
     wavelength = meta["wavelength_m"]
     sc = meta["scene"]
     extent = [sc["x_min"], sc["x_max"], sc["z_min"], sc["z_max"]]
+    # source (TX) plane; energy flows toward -Z. Fall back to z_max (the TX plane)
+    # for runs saved before tx_z was persisted.
+    tx_z = sc.get("tx_z", sc["z_max"])
 
     # subsample captured iterations (a full-scene propagation per frame is expensive)
     K = phases.shape[0]
@@ -205,10 +208,14 @@ def animate_scene_reillumination(run_dir: Path, out_path: Path, fps: int = 15,
 
     log.info(f"Re-illuminating scene for {len(fsel)} frames over {len(z_axis)} z-planes "
              f"(frame_stride={frame_stride}, z_stride={z_stride})")
+    # the aperture only radiates into the -Z half-space; zero the field behind the TX plane
+    behind_tx = z_axis > tx_z
     frames = []
     for j, k in enumerate(fsel):
         u0 = amp * np.exp(1j * phases[k])
-        frames.append(np.abs(rs.rs(x, z_axis, u0, wavelength)))
+        frame = np.abs(rs.rs(x, z_axis, u0, wavelength, z_src=tx_z, forward_dir=-1.0))
+        frame[behind_tx, :] = 0
+        frames.append(frame)
         if j % 10 == 0:
             log.info(f"  propagated frame {j + 1}/{len(fsel)} (iteration {int(iters[k])})")
     vmax = max(float(f.max()) for f in frames)
