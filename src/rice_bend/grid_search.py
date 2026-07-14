@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import shutil
+import warnings
 from collections import namedtuple
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -24,7 +25,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import scipy.constants
 from matplotlib.animation import FuncAnimation
-from matplotlib.colors import Normalize
+from matplotlib.cm import ScalarMappable
+from matplotlib.colors import LogNorm, Normalize, SymLogNorm
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers the 3d projection)
 
 from rice_bend import __version__, rs
 from rice_bend.animate import _write_mp4
@@ -477,20 +480,123 @@ def summary_from_manifest(run_dir: Path) -> ResidualSummary:
     return _assemble_summary(zs, xs, cand, gt["real_tx_z"], real_x_center)
 
 
+def _hc_norm(losses: np.ndarray) -> LogNorm:
+    """Fresh high-contrast colour norm: log scale with a data-driven floor.
+
+    vmin is the data's own minimum finite loss rounded down to the nearest decade
+    (capped so at least one decade sits below the fixed 0.06 ceiling), so every
+    populated decade gets colormap share and the lowest (best-fit) residuals in
+    each run differentiate maximally. Because the floor adapts per plot, hc colours
+    are NOT comparable across runs — the linear [0, 0.06] plots are the comparable
+    view. A new instance per plot — norms are stateful.
+    """
+    finite = np.asarray(losses)[np.isfinite(losses)]
+    lo = float(finite.min()) if finite.size else 1e-5
+    vmin = 10.0 ** np.floor(np.log10(max(lo, 1e-12)))
+    vmin = min(vmin, 6e-3)               # keep >= 1 decade of range below the ceiling
+    return LogNorm(vmin=vmin, vmax=0.06)
+
+
+def average_summary(summaries: List[Tuple[float, ResidualSummary]]) -> ResidualSummary:
+    """Average a multi-frequency run's residual grids into one ResidualSummary.
+
+    Each grid cell becomes the mean residual over the frequencies where that
+    candidate actually ran (NaN layers are ignored per cell); `best` is recomputed
+    as the argmin of the averaged grid. The grid axes and ground truth are shared
+    across frequencies, so they are taken from the first summary.
+    """
+    first = summaries[0][1]
+    stack = np.stack([s.loss_grid for _, s in summaries])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)  # all-NaN cells
+        avg = np.nanmean(stack, axis=0)
+    best: Optional[dict] = None
+    if np.isfinite(avg).any():
+        flat = int(np.nanargmin(avg))
+        z_idx, x_idx = divmod(flat, avg.shape[1])
+        best = {"index": flat, "z": float(first.z_values[z_idx]),
+                "x_center": float(first.x_values[x_idx]),
+                "final_loss": float(avg[z_idx, x_idx])}
+    return ResidualSummary(first.z_values, first.x_values, avg,
+                           first.real_tx_z, first.real_tx_x_center, best)
+
+
+# --------------------------------------------------------------------------- #
+# Multi-frequency run layout
+# --------------------------------------------------------------------------- #
+FREQ_INDEX_NAME = "frequencies.json"
+
+
+def _resolve_frequencies(config: SimConfig, cli_freqs: Optional[List[float]]) -> List[float]:
+    """Resolve the frequency list: CLI override -> config.frequencies -> [150e9].
+
+    Duplicates are dropped (order-preserving): repeated frequencies would map to the
+    same freq_<GHz> subdir, clobbering the earlier sweep and double-counting the layer
+    in the averaged/3D plots.
+    """
+    if cli_freqs:
+        freqs = [float(f) for f in cli_freqs]
+    elif config.frequencies:
+        freqs = [float(f) for f in config.frequencies]
+    else:
+        return [150e9]
+    return list(dict.fromkeys(freqs))
+
+
+def _freq_dir_name(freq: float) -> str:
+    """Per-frequency subdirectory name, e.g. 140e9 -> 'freq_140GHz'."""
+    return f"freq_{freq / 1e9:g}GHz"
+
+
+def write_frequencies_index(base_dir: Path, entries: List[dict],
+                            real_tx_z: float, real_tx_x_center: float) -> Path:
+    """Write the top-level index tying a multi-frequency run's per-frequency subdirs together.
+
+    `entries` is a list of {freq_hz, wavelength_m, dir} dicts (one per frequency).
+    """
+    out = Path(base_dir) / FREQ_INDEX_NAME
+    payload = {
+        "schema_version": 1,
+        "frequencies": entries,
+        "ground_truth": {"real_tx_z": float(real_tx_z),
+                         "real_tx_x_center": float(real_tx_x_center)},
+    }
+    with open(out, "w") as f:
+        json.dump(payload, f, indent=2)
+    return out
+
+
+def load_frequencies_index(base_dir: Path) -> Optional[dict]:
+    """Load a multi-frequency run's frequencies.json, or None if this is a flat single-freq run."""
+    idx = Path(base_dir) / FREQ_INDEX_NAME
+    if not idx.exists():
+        return None
+    with open(idx) as f:
+        return json.load(f)
+
+
 def plot_residual_heatmap(summary: ResidualSummary, out_path: Path,
-                          title: str = "Candidate residual over speculative TX locations") -> None:
+                          title: str = "Candidate residual over speculative TX locations",
+                          norm: Optional[Normalize] = None) -> None:
     """Render the residual heatmap with the true TX location and best candidate marked.
 
-    The residual colour scale is fixed to [0, 0.06] so the map is directly comparable
-    across runs.
+    By default the residual colour scale is fixed to [0, 0.06] so the map is directly
+    comparable across runs; pass `norm=_hc_norm(loss_grid)` for the high-contrast
+    log-scale variant (data-driven floor: low residuals spread over the colormap,
+    high residuals compress).
     """
     fig, ax = plt.subplots(figsize=(9, 6), layout="constrained")
-    grid = np.ma.masked_invalid(summary.loss_grid)
+    if norm is None:
+        # Fixed residual scale [0, 0.06] + reversed colormap (low residual = bright
+        # yellow), matching plot_residual_scatter's fixed residual axis.
+        norm = Normalize(vmin=0.0, vmax=0.06)
+    loss_grid = summary.loss_grid
+    if isinstance(norm, LogNorm):
+        # Log scale can't take zeros; clip up to the norm's floor (NaNs propagate, stay masked).
+        loss_grid = np.maximum(loss_grid, norm.vmin)
+    grid = np.ma.masked_invalid(loss_grid)
     mesh_x, mesh_z = np.meshgrid(summary.x_values, summary.z_values)
 
-    # Fixed residual scale [0, 0.06] + reversed colormap (low residual = bright yellow),
-    # matching plot_residual_scatter's fixed residual axis.
-    norm = Normalize(vmin=0.0, vmax=0.06)
     mesh = ax.pcolormesh(mesh_x, mesh_z, grid, shading="nearest", cmap="viridis_r", norm=norm)
     fig.colorbar(mesh, ax=ax, label="GS residual (lower = better fit)")
 
@@ -531,13 +637,16 @@ def _candidate_points(summary: ResidualSummary):
 
 
 def plot_residual_scatter(summary: ResidualSummary, out_path: Path, *,
-                          title: str = "Candidate residual distribution") -> None:
+                          title: str = "Candidate residual distribution",
+                          log_scale: bool = False) -> None:
     """Render a residual-vs-distance scatter that complements the (z, x_center) heatmap.
 
     Every candidate's GS residual is plotted against its distance to the true TX. A
     rising trend validates the premise that a lower GS residual marks a candidate
     closer to the real transmitter. The residual axis is fixed to [0, 0.06] so the
-    plot is directly comparable across runs.
+    plot is directly comparable across runs; `log_scale=True` is the high-contrast
+    variant — a log residual axis whose floor adapts to the data's own minimum
+    (rounded down to a decade), spreading the lowest residuals apart.
     """
     _, _, loss, dist = _candidate_points(summary)
     fig, ax = plt.subplots(figsize=(9, 6), layout="constrained")
@@ -550,14 +659,89 @@ def plot_residual_scatter(summary: ResidualSummary, out_path: Path, *,
         plt.close(fig)
         return
 
+    floor = _hc_norm(loss).vmin if log_scale else 0.0   # data-driven decade floor
+    if log_scale:
+        loss = np.maximum(loss, floor)   # keep sub-floor losses visible on the log axis
     ax.scatter(dist, loss, s=40, color="C0", edgecolor="black", linewidth=0.3, zorder=3)
     ax.set_xlabel("distance from candidate to true TX (m)")
     ax.set_ylabel("GS residual")
-    ax.set_ylim(0.0, 0.06)           # fixed residual range -> comparable across runs
+    if log_scale:
+        ax.set_yscale("log")
+        ax.set_ylim(floor, 0.06)     # floor adapts to the data's own minimum
+    else:
+        ax.set_ylim(0.0, 0.06)       # fixed residual range -> comparable across runs
     ax.set_title("Residual vs. distance to true TX")
     ax.grid(True, alpha=0.3)
 
     fig.suptitle(title)
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
+
+
+# --------------------------------------------------------------------------- #
+# 3D residual scatter (the 2D residual data, stacked along a frequency axis)
+# --------------------------------------------------------------------------- #
+def plot_residual_scatter_3d(summaries: List[Tuple[float, ResidualSummary]], out_path: Path, *,
+                             title: str = "Candidate residual across frequency",
+                             norm: Optional[Normalize] = None) -> None:
+    """Render every candidate as a 3D point at (x_center, z, frequency), coloured by residual.
+
+    This is the multi-frequency view of the 2D residual heatmap: the spatial (x_center, z)
+    plane lies flat on the bottom and frequency rises on the vertical axis, one layer of
+    candidate dots per frequency. Points share the heatmap's fixed [0, 0.06] `viridis_r`
+    colour scale by default (pass `norm=_hc_norm(losses)` for the high-contrast log-scale
+    variant with a data-driven floor); low residual = bright yellow. Dot size falls off cubically as the residual
+    grows, so only genuinely low-residual candidates stay large and the high-residual
+    bulk shrinks to near-invisible dots the eye can see through. The true TX location is
+    marked on every frequency layer and joined by a vertical guide line.
+    """
+    if norm is None:
+        norm = Normalize(vmin=0.0, vmax=0.06)
+    cmap = "viridis_r"
+    s_min, s_max = 1.5, 60.0            # dot-size range; largest = lowest residual
+    fig = plt.figure(figsize=(11, 8), layout="constrained")
+    ax = fig.add_subplot(projection="3d")
+
+    freqs_ghz = sorted(f / 1e9 for f, _ in summaries)
+    real_x = real_z = None
+    for freq_hz, summary in summaries:
+        f_ghz = freq_hz / 1e9
+        z, x, loss, _ = _candidate_points(summary)
+        if loss.size:
+            # Cubic falloff: size collapses quickly as the residual (MSE) rises, so
+            # high-MSE dots are tiny and the layers stay see-through.
+            loss_norm = np.clip(loss / 0.06, 0.0, 1.0)
+            sizes = s_min + ((1.0 - loss_norm) ** 3) * (s_max - s_min)
+            # Clip colours up to the norm's floor so a LogNorm never sees zero
+            # (a no-op under the default linear norm, whose vmin is 0).
+            ax.scatter(x, z, np.full_like(x, f_ghz), c=np.maximum(loss, norm.vmin),
+                       cmap=cmap, norm=norm, s=sizes, depthshade=False, edgecolor="none")
+        real_x, real_z = summary.real_tx_x_center, summary.real_tx_z
+        ax.scatter([summary.real_tx_x_center], [summary.real_tx_z], [f_ghz], marker="X",
+                   s=90, c="red", edgecolor="white", linewidth=1.0, depthshade=False,
+                   zorder=6)
+
+    # Vertical guide connecting the true-TX markers up the frequency axis.
+    if real_x is not None and len(freqs_ghz) > 1:
+        ax.plot([real_x, real_x], [real_z, real_z], [min(freqs_ghz), max(freqs_ghz)],
+                color="red", linestyle="--", linewidth=1.0, alpha=0.6)
+
+    ax.set_xlabel("x_center (m)")
+    ax.set_ylabel("z (m)")
+    ax.set_zlabel("frequency (GHz)")
+    ax.set_zticks(freqs_ghz)
+    ax.set_title(title)
+    ax.text2D(0.02, 0.02, "dot size shrinks cubically as residual grows",
+              transform=ax.transAxes, fontsize=8, alpha=0.7)
+    ax.view_init(elev=22, azim=-60)
+
+    sm = ScalarMappable(norm=norm, cmap=cmap)
+    fig.colorbar(sm, ax=ax, shrink=0.6, pad=0.1,
+                 label="GS residual (lower = better fit)")
+    # A proxy handle so the legend documents the red X without duplicating it per layer.
+    ax.scatter([], [], [], marker="X", s=90, c="red", edgecolor="white",
+               linewidth=1.0, label="True TX location")
+    ax.legend(loc="upper left")
     fig.savefig(out_path, dpi=120)
     plt.close(fig)
 
@@ -1024,6 +1208,239 @@ def animate_candidate_beams(ctx: SceneContext, out_path: Path, *, z_planes: int 
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
+def _emit_heatmaps(summary: ResidualSummary, out_dir: Path, log) -> None:
+    """Write the residual heatmap plus its high-contrast (log-scale) twin."""
+    heat_out = out_dir / "residual_heatmap.png"
+    plot_residual_heatmap(summary, heat_out)
+    plot_residual_heatmap(summary, out_dir / "residual_heatmap_hc.png",
+                          title="Candidate residual (high contrast, log scale)",
+                          norm=_hc_norm(summary.loss_grid))
+    log.info(f"Wrote residual heatmap (+hc) to {heat_out}")
+
+
+def _emit_scatters(summary: ResidualSummary, out_dir: Path, log) -> None:
+    """Write the residual scatter plus its high-contrast (log-y) twin."""
+    sc_out = out_dir / "residual_scatter.png"
+    plot_residual_scatter(summary, sc_out)
+    plot_residual_scatter(summary, out_dir / "residual_scatter_hc.png",
+                          title="Candidate residual distribution (high contrast)",
+                          log_scale=True)
+    log.info(f"Wrote residual scatter (+hc) to {sc_out}")
+
+
+def plot_residual_scatter_3d_diff(summaries: List[Tuple[float, ResidualSummary]],
+                                  out_path: Path, *,
+                                  baseline_freq: Optional[float] = None) -> None:
+    """3D scatter of per-candidate residual DIFFERENCES from a baseline frequency.
+
+    The baseline defaults to the center frequency (middle element of the sorted
+    list). Each layer shows loss(f) − loss(baseline) on a symmetric `viridis_r`
+    scale matching the other difference plots: bright yellow = fits BETTER than the
+    baseline, dark purple = worse, mid-teal = unchanged (the baseline layer itself
+    is uniformly zero). Dot size grows with the magnitude of the deviation, so
+    candidates that behave like the baseline stay tiny and see-through.
+    """
+    ordered = sorted(summaries, key=lambda t: t[0])
+    freqs = [f for f, _ in ordered]
+    if baseline_freq is None:
+        baseline_freq = freqs[len(freqs) // 2]
+    base_grid = next(s for f, s in ordered if f == baseline_freq).loss_grid
+
+    diffs = [(f, s, s.loss_grid - base_grid) for f, s in ordered]
+    finite_all = np.concatenate([d[np.isfinite(d)].ravel() for _, _, d in diffs])
+    vlim = float(np.abs(finite_all).max()) if finite_all.size else 1e-6
+    vlim = max(vlim, 1e-12)
+    norm = Normalize(vmin=-vlim, vmax=vlim)
+    cmap = "viridis_r"
+    s_min, s_max = 1.5, 60.0            # dot-size range; largest = biggest deviation
+
+    fig = plt.figure(figsize=(11, 8), layout="constrained")
+    ax = fig.add_subplot(projection="3d")
+    freqs_ghz = [f / 1e9 for f in freqs]
+    real_x = real_z = None
+    for f, s, d in diffs:
+        f_ghz = f / 1e9
+        # Reuse the flattening helper on a summary carrying the difference grid.
+        tmp = ResidualSummary(s.z_values, s.x_values, d,
+                              s.real_tx_z, s.real_tx_x_center, None)
+        z, x, dval, _ = _candidate_points(tmp)
+        if dval.size:
+            sizes = s_min + (np.abs(dval) / vlim) * (s_max - s_min)
+            ax.scatter(x, z, np.full_like(x, f_ghz), c=dval, cmap=cmap, norm=norm,
+                       s=sizes, depthshade=False, edgecolor="none")
+        real_x, real_z = s.real_tx_x_center, s.real_tx_z
+        ax.scatter([s.real_tx_x_center], [s.real_tx_z], [f_ghz], marker="X", s=90,
+                   c="red", edgecolor="white", linewidth=1.0, depthshade=False, zorder=6)
+
+    if real_x is not None and len(freqs_ghz) > 1:
+        ax.plot([real_x, real_x], [real_z, real_z], [min(freqs_ghz), max(freqs_ghz)],
+                color="red", linestyle="--", linewidth=1.0, alpha=0.6)
+
+    ax.set_xlabel("x_center (m)")
+    ax.set_ylabel("z (m)")
+    ax.set_zlabel("frequency (GHz)")
+    ax.set_zticks(freqs_ghz)
+    ax.set_title(f"Candidate residual difference vs. {baseline_freq / 1e9:g} GHz baseline")
+    ax.text2D(0.02, 0.02, "dot size grows with deviation from the baseline",
+              transform=ax.transAxes, fontsize=8, alpha=0.7)
+    ax.view_init(elev=22, azim=-60)
+
+    sm = ScalarMappable(norm=norm, cmap=cmap)
+    fig.colorbar(sm, ax=ax, shrink=0.6, pad=0.1,
+                 label=f"residual difference vs. {baseline_freq / 1e9:g} GHz "
+                       "(yellow = better than baseline)")
+    ax.scatter([], [], [], marker="X", s=90, c="red", edgecolor="white",
+               linewidth=1.0, label="True TX location")
+    ax.legend(loc="upper left")
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
+
+
+def plot_residual_freq_vs_avg(freq_hz: float, summary: ResidualSummary,
+                              avg: ResidualSummary, out_path: Path, *,
+                              hc: bool = False) -> None:
+    """Compare one frequency's residual heatmap against the all-frequency average.
+
+    Three panels: this frequency's residuals and the frequency-averaged residuals
+    (shared linear [0, 0.06] scale), then their difference (frequency − average) on a
+    symmetric scale using the same `viridis_r` colormap as every other residual plot —
+    bright yellow where this frequency fits BETTER than the average, dark purple where
+    worse. The true TX is marked on each. With `hc=True` the two heatmaps use the
+    data-driven log scale (shared floor across both grids) and the difference panel a
+    symmetric log, spreading the smallest residuals/deviations apart.
+    """
+    f_ghz = freq_hz / 1e9
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5.5), layout="constrained")
+    mesh_x, mesh_z = np.meshgrid(avg.x_values, avg.z_values)
+    if hc:
+        # One data-driven log norm shared by both panels so they stay inter-comparable.
+        norm = _hc_norm(np.stack([summary.loss_grid, avg.loss_grid]))
+    else:
+        norm = Normalize(vmin=0.0, vmax=0.06)
+
+    mesh = None
+    for ax, s, sub_title in ((axes[0], summary, f"{f_ghz:g} GHz"),
+                             (axes[1], avg, "average across frequencies")):
+        loss_grid = np.maximum(s.loss_grid, norm.vmin) if hc else s.loss_grid
+        grid = np.ma.masked_invalid(loss_grid)
+        mesh = ax.pcolormesh(mesh_x, mesh_z, grid, shading="nearest",
+                             cmap="viridis_r", norm=norm)
+        ax.set_title(sub_title)
+    fig.colorbar(mesh, ax=list(axes[:2]), label="GS residual (lower = better fit)",
+                 shrink=0.9)
+
+    diff = summary.loss_grid - avg.loss_grid
+    vlim = float(np.nanmax(np.abs(diff))) if np.isfinite(diff).any() else 1e-6
+    vlim = max(vlim, 1e-12)
+    if hc:
+        # Symmetric log: two decades of log range each side of a linear core, so
+        # small deviations from the average spread instead of washing out at teal.
+        dnorm = SymLogNorm(linthresh=vlim / 100.0, vmin=-vlim, vmax=vlim, base=10)
+    else:
+        dnorm = Normalize(vmin=-vlim, vmax=vlim)
+    dmesh = axes[2].pcolormesh(mesh_x, mesh_z, np.ma.masked_invalid(diff),
+                               shading="nearest", cmap="viridis_r", norm=dnorm)
+    axes[2].set_title(f"difference ({f_ghz:g} GHz − average)")
+    fig.colorbar(dmesh, ax=axes[2],
+                 label="residual difference (yellow = better than average)", shrink=0.9)
+
+    for ax in axes:
+        ax.scatter([avg.real_tx_x_center], [avg.real_tx_z], marker="X", s=120, c="red",
+                   edgecolor="white", linewidth=1.2, zorder=5, label="True TX location")
+        ax.set_xlabel("x_center (m)")
+    axes[0].set_ylabel("z (m)")
+    axes[0].legend(loc="upper right", framealpha=0.9)
+    suffix = " (high contrast, log scale)" if hc else ""
+    fig.suptitle(f"Residual: {f_ghz:g} GHz vs. frequency average{suffix}")
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
+
+
+def _emit_multifreq_plots(summaries: List[Tuple[float, ResidualSummary]],
+                          base_dir: Path, log) -> None:
+    """Top-level plots for a multi-frequency run: the frequency-averaged residual
+    heatmap and the 3D residual scatter, each with a high-contrast (log-scale) twin."""
+    avg = average_summary(summaries)
+    avg_out = base_dir / "residual_heatmap_avg.png"
+    plot_residual_heatmap(avg, avg_out, title="Average residual across frequencies")
+    plot_residual_heatmap(avg, base_dir / "residual_heatmap_avg_hc.png",
+                          title="Average residual across frequencies (high contrast, log scale)",
+                          norm=_hc_norm(avg.loss_grid))
+    log.info(f"Wrote frequency-averaged residual heatmap (+hc) to {avg_out}")
+    out3d = base_dir / "residual_scatter_3d.png"
+    plot_residual_scatter_3d(summaries, out3d)
+    plot_residual_scatter_3d(summaries, base_dir / "residual_scatter_3d_hc.png",
+                             title="Candidate residual across frequency (high contrast, log scale)",
+                             norm=_hc_norm(np.stack([s.loss_grid for _, s in summaries])))
+    log.info(f"Wrote 3D residual scatter (+hc) to {out3d}")
+    if len(summaries) > 1:
+        out3d_diff = base_dir / "residual_scatter_3d_diff.png"
+        plot_residual_scatter_3d_diff(summaries, out3d_diff)
+        log.info(f"Wrote 3D residual-difference scatter to {out3d_diff}")
+    # Per-frequency vs-average comparison (freq | average | difference) in each freq dir.
+    for freq_hz, s in summaries:
+        sub = base_dir / _freq_dir_name(freq_hz)
+        if sub.is_dir():
+            plot_residual_freq_vs_avg(freq_hz, s, avg, sub / "residual_heatmap_vs_avg.png")
+            plot_residual_freq_vs_avg(freq_hz, s, avg,
+                                      sub / "residual_heatmap_vs_avg_hc.png", hc=True)
+    log.info(f"Wrote {len(summaries)} per-frequency vs-average comparison(s) (+hc) under {base_dir}")
+
+
+def _replot_one_dir(run_dir: Path, args, log) -> ResidualSummary:
+    """Regenerate one saved run dir's plots from disk: residual heatmap + scatter with
+    their high-contrast twins (cheap, manifest-only), the baseline true-MGS scene (one
+    full solve; skipped with --skip-true-mgs), and — when --scenes/--anim are set — the
+    per-candidate scenes/animation. Returns the ResidualSummary."""
+    run_dir = Path(run_dir)
+    summary = summary_from_manifest(run_dir)
+    _emit_heatmaps(summary, run_dir, log)
+    _emit_scatters(summary, run_dir, log)
+    # Baseline single "true" MGS run at the known TX (recomputes one MGS solve).
+    if not args.skip_true_mgs:
+        make_true_mgs_plot(run_dir, log=log)
+    if args.scenes or args.anim:
+        ctx = scenes_from_manifest(run_dir)
+        if args.scenes:
+            make_candidate_scenes(ctx, run_dir, z_planes=args.scene_z_planes,
+                                  top=args.scene_top, jobs=args.jobs, log=log)
+        if args.anim:
+            animate_candidate_beams(ctx, run_dir / "candidate_beams.mp4",
+                                    z_planes=args.scene_z_planes, top=args.scene_top,
+                                    fps=args.fps, jobs=args.jobs, log=log)
+    return summary
+
+
+def _run_one_frequency(config: SimConfig, freq: float, make_out_dir, args, log):
+    """Run the whole sweep at one frequency, save it into make_out_dir(), emit its per-run
+    2D plots (and scenes/anim when requested), and return (run, ResidualSummary).
+
+    Used for both the single-frequency flat run and each layer of a multi-frequency run,
+    so the two paths stay behaviourally identical per frequency. `make_out_dir` is a
+    callable invoked only AFTER the sweep completes — creating (and clearing) the run
+    directory is deferred so an interrupted sweep leaves prior saved results intact.
+    """
+    run = run_grid_search(config, freq, limit=args.limit, jobs=args.jobs, log=log)
+    out_dir = make_out_dir()
+    save_grid_run(run, out_dir, config, args.config, vars(args))
+    log.info(f"Saved {len(run.candidates)} candidate beam(s) to {out_dir}")
+    summary = summary_from_run(run)
+    if args.summary:
+        _emit_heatmaps(summary, out_dir, log)
+    if args.scatter:
+        _emit_scatters(summary, out_dir, log)
+    if args.scenes or args.anim:
+        ctx = scenes_from_run(run)
+        if args.scenes:
+            make_candidate_scenes(ctx, out_dir, z_planes=args.scene_z_planes,
+                                  top=args.scene_top, jobs=args.jobs, log=log)
+        if args.anim:
+            animate_candidate_beams(ctx, out_dir / "candidate_beams.mp4",
+                                    z_planes=args.scene_z_planes, top=args.scene_top,
+                                    fps=args.fps, jobs=args.jobs, log=log)
+    return run, summary
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Grid search over speculative TX locations, running MGS at each "
@@ -1031,7 +1448,10 @@ def main():
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG,
                         help="Path to a simulation config .yml with a grid_search block")
-    parser.add_argument("--freq", "-f", type=float, default=150e9, help="Frequency in Hz")
+    parser.add_argument("--freq", "-f", type=float, nargs="+", default=None,
+                        help="One or more frequencies in Hz (overrides config `frequencies`). "
+                             "Multiple values run the whole sweep independently per frequency. "
+                             "Default: config `frequencies`, else 150e9.")
     parser.add_argument("--output-dir", type=Path, default=None,
                         help="Override output.output_dir (base dir for the run folder)")
     parser.add_argument("--run-name", type=str, default=None,
@@ -1055,6 +1475,9 @@ def main():
                         help="Write a residual-vs-distance-to-true-TX scatter plot (residual_scatter.png)")
     parser.add_argument("--replot", type=Path, default=None,
                         help="Re-plot the residual heatmap from a saved run dir, then exit")
+    parser.add_argument("--skip-true-mgs", action="store_true",
+                        help="[replot] skip recomputing the true-MGS baseline scene "
+                             "(a full MGS solve per run dir); existing plots are left as-is")
     parser.add_argument("--scenes", action="store_true",
                         help="Render one PNG per candidate beam (scenes/) plus an averaged scene (scene_average.png)")
     parser.add_argument("--scene-top", type=int, default=None,
@@ -1072,27 +1495,19 @@ def main():
     log = logging.getLogger()
 
     if args.replot is not None:
-        # The two residual plots are cheap (manifest-only). The true MGS run recomputes one
-        # full solve; the averaged scene + per-candidate scenes (re-illuminating every
-        # candidate from its npz) are heavier still and gated behind --scenes.
-        summary = summary_from_manifest(args.replot)
-        heat_out = Path(args.replot) / "residual_heatmap.png"
-        plot_residual_heatmap(summary, heat_out)
-        log.info(f"Wrote residual heatmap to {heat_out}")
-        sc_out = Path(args.replot) / "residual_scatter.png"
-        plot_residual_scatter(summary, sc_out)
-        log.info(f"Wrote residual scatter to {sc_out}")
-        # Baseline single "true" MGS run at the known TX (recomputes one MGS solve).
-        make_true_mgs_plot(Path(args.replot), log=log)
-        if args.scenes or args.anim:
-            ctx = scenes_from_manifest(args.replot)
-            if args.scenes:
-                make_candidate_scenes(ctx, Path(args.replot), z_planes=args.scene_z_planes,
-                                      top=args.scene_top, jobs=args.jobs, log=log)
-            if args.anim:
-                animate_candidate_beams(ctx, Path(args.replot) / "candidate_beams.mp4",
-                                        z_planes=args.scene_z_planes, top=args.scene_top,
-                                        fps=args.fps, jobs=args.jobs, log=log)
+        base = Path(args.replot)
+        freq_index = load_frequencies_index(base)
+        if freq_index is not None:
+            # Multi-frequency run: replot every per-frequency subdir, then the
+            # top-level frequency-averaged heatmap + 3D scatter (each with hc twins).
+            summaries = []
+            for entry in freq_index["frequencies"]:
+                sub = base / entry["dir"]
+                summaries.append((float(entry["freq_hz"]), _replot_one_dir(sub, args, log)))
+            _emit_multifreq_plots(summaries, base, log)
+            return
+        # Single-frequency (flat) run.
+        _replot_one_dir(base, args, log)
         return
 
     config = load_config(args.config)
@@ -1107,10 +1522,16 @@ def main():
         config.grid_search.gs_overrides.max_iters = args.max_iters
     if args.output_dir is not None:
         config.output.output_dir = args.output_dir
-    run_name = args.run_name or "grid_search"
+    run_name = args.run_name or config.output.run_name or "grid_search"
+    freqs = _resolve_frequencies(config, args.freq)
 
     if args.dry_run:
-        wavelength = scipy.constants.c / args.freq
+        # The grid enumeration only depends on frequency via the RS-undersampling check;
+        # report at the first frequency (the others differ only in that check).
+        if len(freqs) > 1:
+            log.info(f"Dry run: enumerating grid at {freqs[0] / 1e9:g} GHz "
+                     f"(of {len(freqs)} frequencies)")
+        wavelength = scipy.constants.c / freqs[0]
         points = enumerate_grid(config.grid_search, config.sim_scene, wavelength)
         log.info(grid_summary(points))
         for p in points:
@@ -1122,39 +1543,65 @@ def main():
                             f"SKIP: {p.skip_reason}")
         return
 
-    run = run_grid_search(config, args.freq, limit=args.limit, jobs=args.jobs, log=log)
+    persist = not (args.no_save or not config.output.save_run)
 
-    run_dir = None
-    if args.no_save or not config.output.save_run:
-        log.info("Persistence disabled; not writing candidates")
-    else:
-        run_dir = make_run_dir(config.output.output_dir, run_name)
-        save_grid_run(run, run_dir, config, args.config, vars(args))
-        log.info(f"Saved {len(run.candidates)} candidate beam(s) to {run_dir}")
+    if len(freqs) == 1:
+        # Single frequency: original flat layout (results/<run_name>/...).
+        freq = freqs[0]
+        if not persist:
+            log.info("Persistence disabled; not writing candidates")
+            run = run_grid_search(config, freq, limit=args.limit, jobs=args.jobs, log=log)
+            summary = summary_from_run(run)
+            if args.summary:
+                _emit_heatmaps(summary, Path("."), log)
+            if args.scatter:
+                _emit_scatters(summary, Path("."), log)
+            if args.scenes or args.anim:
+                ctx = scenes_from_run(run)
+                if args.scenes:
+                    make_candidate_scenes(ctx, Path("."), z_planes=args.scene_z_planes,
+                                          top=args.scene_top, jobs=args.jobs, log=log)
+                if args.anim:
+                    animate_candidate_beams(ctx, Path("candidate_beams.mp4"),
+                                            z_planes=args.scene_z_planes, top=args.scene_top,
+                                            fps=args.fps, jobs=args.jobs, log=log)
+            return
+        _run_one_frequency(config, freq,
+                           lambda: make_run_dir(config.output.output_dir, run_name),
+                           args, log)
+        return
 
-    if args.summary or args.scatter:
-        summary = summary_from_run(run)
-        if args.summary:
-            out = (run_dir / "residual_heatmap.png") if run_dir is not None \
-                else Path("residual_heatmap.png")
-            plot_residual_heatmap(summary, out)
-            log.info(f"Wrote residual heatmap to {out}")
-        if args.scatter:
-            sc_out = (run_dir / "residual_scatter.png") if run_dir is not None \
-                else Path("residual_scatter.png")
-            plot_residual_scatter(summary, sc_out)
-            log.info(f"Wrote residual scatter to {sc_out}")
+    # Multiple frequencies: one full sweep per frequency into results/<run_name>/freq_<GHz>/,
+    # then a top-level 3D residual scatter aggregating them.
+    if not persist:
+        log.warning("Multi-frequency runs require saving; --no-save / save_run=false is ignored")
+    base_path = Path(config.output.output_dir) / run_name
+    log.info(f"Multi-frequency run: {len(freqs)} frequencies "
+             f"({', '.join(f'{f / 1e9:g}' for f in freqs)} GHz) -> {base_path}")
+    # The base dir is created (clearing any previous run) only when the FIRST sweep
+    # finishes, and each freq subdir only after its own sweep — so an interrupted run
+    # never destroys prior results without producing new ones.
+    base: Optional[Path] = None
 
-    if args.scenes or args.anim:
-        ctx = scenes_from_run(run)
-        out_dir = run_dir if run_dir is not None else Path(".")
-        if args.scenes:
-            make_candidate_scenes(ctx, out_dir, z_planes=args.scene_z_planes,
-                                  top=args.scene_top, jobs=args.jobs, log=log)
-        if args.anim:
-            animate_candidate_beams(ctx, out_dir / "candidate_beams.mp4",
-                                    z_planes=args.scene_z_planes, top=args.scene_top,
-                                    fps=args.fps, jobs=args.jobs, log=log)
+    def _get_base() -> Path:
+        nonlocal base
+        if base is None:
+            base = make_run_dir(config.output.output_dir, run_name)
+        return base
+
+    entries, summaries = [], []
+    real_x = real_z = 0.0
+    for freq in freqs:
+        log.info(f"=== frequency {freq / 1e9:g} GHz ===")
+        run, summary = _run_one_frequency(
+            config, freq, lambda f=freq: make_run_dir(_get_base(), _freq_dir_name(f)),
+            args, log)
+        entries.append({"freq_hz": float(freq), "wavelength_m": float(run.wavelength),
+                        "dir": _freq_dir_name(freq)})
+        summaries.append((freq, summary))
+        real_x, real_z = summary.real_tx_x_center, summary.real_tx_z
+    write_frequencies_index(_get_base(), entries, real_z, real_x)
+    _emit_multifreq_plots(summaries, _get_base(), log)
 
 
 if __name__ == "__main__":

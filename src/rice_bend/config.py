@@ -173,6 +173,20 @@ class SimConfig(BaseModel):
     output: OutputConfig = Field(default_factory=OutputConfig)
     grid_search: Optional[GridSearchConfig] = Field(default=None,
         description="Optional speculative TX-location sweep (used by grid-search-mgs)")
+    frequencies: Optional[List[float]] = Field(default=None,
+        description="Frequencies (Hz) to run the grid search at; null -> single --freq/150e9. "
+                    "More than one runs the whole sweep independently per frequency.")
+
+    @model_validator(mode="after")
+    def _check_frequencies(self) -> "SimConfig":
+        if self.frequencies is not None:
+            if len(self.frequencies) == 0:
+                raise ValueError("frequencies, if set, must be a non-empty list")
+            if any(f <= 0 for f in self.frequencies):
+                raise ValueError(f"all frequencies must be positive (got {self.frequencies})")
+            if len(set(self.frequencies)) != len(self.frequencies):
+                raise ValueError(f"frequencies must be unique (got {self.frequencies})")
+        return self
 
 
 def load_config(path: Path) -> SimConfig:
