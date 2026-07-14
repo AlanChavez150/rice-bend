@@ -27,6 +27,11 @@ rx_aperture:
 
 plot_path: scenario_caustic_hit_sparse.png
 
+# Frequencies (Hz) to run the grid search at. More than one runs the whole sweep
+# independently per frequency; results land in results/<run_name>/freq_<GHz>/ and a
+# top-level residual_scatter_3d.png stacks the candidate residuals along frequency.
+frequencies: [100.0e9, 110.0e9, 120.0e9, 130.0e9, 140.0e9, 150.0e9, 160.0e9, 170.0e9, 180.0e9, 190.0e9]
+
 gerchberg_saxton:
   max_iters: 800
   convergence_count: 10
