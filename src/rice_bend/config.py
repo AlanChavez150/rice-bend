@@ -1,7 +1,8 @@
-"""Pydantic models for the simulation configuration .yml. See configs/sim_config.yml."""
+"""Pydantic models for the simulation configuration .yml.
+See configs/caustic_config.yml and configs/directional_config.yml."""
 
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
@@ -24,27 +25,63 @@ class SimSceneConfig(BaseModel):
         return self
 
 
+class BeamConfig(BaseModel):
+    """The beam emitted by the TX aperture and its type-specific parameters.
+
+    - `caustic`: an accelerating beam following x(d) = a*d^2 + b*d + c, where d is
+      the distance travelled from the TX aperture along the beam. Requires
+      `trajectory = [a, b, c]`.
+    - `directional`: a steered plane wave at `steer_angle_deg` off the -Z axis
+      (phase ramp -k*x*sin(theta)). Requires `steer_angle_deg`."""
+    type: Literal["caustic", "directional"] = "caustic"
+    trajectory: Optional[List[float]] = Field(default=None,
+        description="Caustic coefficients [a, b, c] for x(d)=a*d^2+b*d+c (caustic only)")
+    steer_angle_deg: Optional[float] = Field(default=None,
+        description="Steering angle in degrees off the -Z axis (directional only)")
+
+    @model_validator(mode="after")
+    def _check(self) -> "BeamConfig":
+        if self.type == "caustic":
+            if self.trajectory is None or len(self.trajectory) != 3:
+                raise ValueError(
+                    f"caustic beam requires trajectory = [a, b, c] (3 values), got {self.trajectory}")
+        elif self.type == "directional":
+            if self.steer_angle_deg is None:
+                raise ValueError("directional beam requires steer_angle_deg")
+        return self
+
+
 class TxApertureConfig(BaseModel):
-    """TX aperture geometry, sampling and emitted caustic trajectory, defined
-    independently of the scene grid. All units in meters.
+    """TX aperture geometry, sampling and emitted beam, defined independently of
+    the scene grid. All units in meters.
 
     The aperture sits at height `z` and projects toward -Z (down) onto the RX at
-    z=0; move it around by editing `z` (height) and `x_min`/`x_max` (lateral span)."""
+    z=0; move it around by editing `z` (height) and `x_min`/`x_max` (lateral span).
+    The emitted beam (caustic or directional) is configured in the `beam` block."""
     x_min: float = -0.35
     x_max: float = 0.35
     z: float = Field(default=2.0, description="TX plane height (beam travels -Z to the RX at z=0)")
     dx: float = Field(default=0.25e-3, gt=0, description="Aperture sampling spacing in meters")
-    # caustic trajectory x(d) = a*d^2 + b*d + c, where d is the distance from the TX
-    trajectory: List[float] = Field(default_factory=lambda: [0.075, 0.0, 0.0],
-        description="Caustic coefficients [a, b, c] for x(d) = a*d^2 + b*d + c")
+    beam: BeamConfig = Field(default_factory=BeamConfig,
+        description="The emitted beam (type: caustic | directional) and its parameters")
 
     @model_validator(mode="after")
     def _check(self) -> "TxApertureConfig":
         if self.x_max <= self.x_min:
             raise ValueError(f"x_max ({self.x_max}) must be greater than x_min ({self.x_min})")
-        if len(self.trajectory) != 3:
-            raise ValueError(f"trajectory must be [a, b, c] (3 values), got {self.trajectory}")
         return self
+
+
+class RxApertureConfig(BaseModel):
+    """RX aperture geometry: a window of the given lateral `width` centered at
+    `x_center`, sitting at the scene origin (z=0). All units in meters.
+
+    Shrink `width` to model a smaller receiver. `dx` defaults to wavelength/20 at
+    runtime when left null (matching the historical RX sampling)."""
+    x_center: float = Field(default=0.0, description="Lateral center of the RX window (m)")
+    width: float = Field(default=0.05, gt=0, description="Lateral span of the RX window (m)")
+    dx: Optional[float] = Field(default=None, gt=0,
+        description="RX sampling spacing (m); null -> wavelength/20 at runtime")
 
 
 class GerchbergSaxtonConfig(BaseModel):
@@ -76,13 +113,66 @@ class OutputConfig(BaseModel):
         description="Persist strided per-iteration GS history arrays")
 
 
+class AxisSweep(BaseModel):
+    """A linear sweep from `min` to `max` over `num` inclusive points."""
+    min: float
+    max: float
+    num: int = Field(gt=0, description="Number of points (1 yields just `min`)")
+
+    @model_validator(mode="after")
+    def _check(self) -> "AxisSweep":
+        if self.max < self.min:
+            raise ValueError(f"max ({self.max}) must be >= min ({self.min})")
+        return self
+
+    def values(self) -> List[float]:
+        """Inclusive linspace from min..max (matches numpy.linspace endpoints)."""
+        if self.num == 1:
+            return [float(self.min)]
+        step = (self.max - self.min) / (self.num - 1)
+        return [float(self.min + i * step) for i in range(self.num)]
+
+
+class GridApertureConfig(BaseModel):
+    """The fixed speculative aperture placed at each grid point: a window of the
+    given lateral `width` and sampling `dx`, with amplitude assumed uniform across
+    it (the unknown real amplitude is not used by the search)."""
+    width: float = Field(gt=0, description="Lateral span of the assumed aperture (m)")
+    dx: float = Field(gt=0, description="Aperture sampling spacing (m)")
+
+
+class GridGSOverrides(BaseModel):
+    """GS hyperparameter overrides applied only during the grid sweep (e.g. fewer
+    iterations for a cheaper search). Unset fields fall back to gerchberg_saxton."""
+    max_iters: Optional[int] = Field(default=None, gt=0,
+        description="Override gerchberg_saxton.max_iters during the sweep")
+
+
+class GridSearchConfig(BaseModel):
+    """Speculative (z, x_center) sweep for `grid-search-mgs`.
+
+    The TX location is treated as unknown. At each grid point a fixed-width
+    aperture (uniform assumed amplitude) is centered at `x_center` and placed at
+    height `z`; MGS then reconstructs its phase against the single shared measured
+    RX field. Each result is saved as a candidate beam."""
+    z: AxisSweep
+    x_center: AxisSweep
+    aperture: GridApertureConfig
+    seed: Optional[int] = Field(default=0,
+        description="Fixed GS seed reused across every candidate so residuals are comparable")
+    gs_overrides: GridGSOverrides = Field(default_factory=GridGSOverrides)
+
+
 class SimConfig(BaseModel):
     """Top-level simulation config."""
     sim_scene: SimSceneConfig
     tx_aperture: TxApertureConfig = Field(default_factory=TxApertureConfig)
+    rx_aperture: RxApertureConfig = Field(default_factory=RxApertureConfig)
     plot_path: Path = Field(description="Path that plot_scene() writes the output figure to")
     gerchberg_saxton: GerchbergSaxtonConfig = Field(default_factory=GerchbergSaxtonConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
+    grid_search: Optional[GridSearchConfig] = Field(default=None,
+        description="Optional speculative TX-location sweep (used by grid-search-mgs)")
 
 
 def load_config(path: Path) -> SimConfig:

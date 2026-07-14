@@ -1,0 +1,66 @@
+# Configuration for the MGS phase-retrieval simulation (rice_bend.mgs) with a
+# CAUSTIC (accelerating) beam. This is the default config for `mgs`.
+# Override with `mgs --config <path>`.
+
+# Bounds and sampling of the 2D (x, z) simulation grid. All units in meters.
+sim_scene:
+  x_min: -0.6
+  x_max: 0.6
+  z_min: 0.0     # RX aperture plane (origin) — bottom of the image
+  z_max: 2.0     # top of the scene (scene window grown 2x in each dim -> 4x area)
+  spacing: 0.00025   # grid spacing (0.25 mm)
+
+# TX aperture location and emitted beam, defined independently of the scene grid.
+# The TX sits at height `z` and projects -Z (down) onto the RX fixed at z=0.
+# Move the TX around by editing these values. All units in meters.
+tx_aperture:
+  x_min: -0.20
+  x_max: 0.20
+  z: 0.75                       # TX plane height (beam travels this far down to the RX)
+  dx: 0.00025                   # aperture sampling spacing (0.25 mm)
+  beam:
+    type: caustic               # accelerating beam following x(d) = a*d^2 + b*d + c
+    trajectory: [0.20, 0.0, 0.0]  # caustic coefficients [a, b, c], d = distance from TX
+
+# RX aperture: a small receive window centered at x_center with the given width,
+# sitting at the scene origin (z=0). Shrink `width` for a smaller receiver.
+# `dx` defaults to wavelength/20 when omitted/null.
+rx_aperture:
+  x_center: 0.0
+  width: 0.065                  # 6.5 cm receive aperture (grown 30% from 5 cm)
+  dx: null                      # null -> wavelength/20 at runtime
+
+# Path that plot_scene() writes the output figure to (relative to the
+# current working directory unless absolute).
+plot_path: mgs.png
+
+# Modified Gerchberg-Saxton solver hyperparameters and start/stop conditions.
+gerchberg_saxton:
+  max_iters: 10000
+  convergence_count: 10            # window of recent losses checked for flatness
+  convergence_threshold: -1.0e-8   # converged when mean(diff(recent loss)) > this
+  lr0: 0.05                        # initial backtracking step size
+  bt_shrink: 0.5                   # backtracking shrink factor
+  bt_tries: 8                      # max step reductions per iteration
+  seed: null                       # null -> a seed is drawn at runtime and recorded
+  history_stride: 1                # capture phase/RX field every Nth iteration
+
+# Run-output persistence.
+output:
+  output_dir: results              # base dir; each run -> <output_dir>/<run_name>
+  run_name: data_dump              # run directory name (existing contents are cleared)
+  save_run: true                   # master on/off for persistence
+  save_scene_fields: false         # the big 2D complex scene arrays (~tens of MB)
+  save_gs_history: true            # strided per-iteration phase + RX field history
+
+# Speculative TX-location sweep for `grid-search-mgs` (ignored by plain `mgs`).
+# The real TX location/trajectory above is used only to synthesize the shared RX
+# measurement; the search itself treats the TX location as unknown. At each grid
+# point a fixed-width aperture (uniform assumed amplitude) is placed at height z,
+# centered at x_center, and MGS reconstructs its phase against that measurement.
+grid_search:
+  z:        {min: 0.40, max: 0.95, num: 20}   # speculative TX height sweep (m)
+  x_center: {min: -0.10, max: 0.10, num: 20}   # speculative lateral center sweep (m)
+  aperture: {width: 0.20, dx: 0.00025}        # assumed aperture span + sampling (m)
+  seed: 0                                      # one fixed GS seed for comparable residuals
+  gs_overrides: {max_iters: 3000}             # cheaper GS during the sweep
