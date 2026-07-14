@@ -1,0 +1,52 @@
+# Test scenario: Directional beam SMALLER than the RX aperture, HITS it (short stand-off)
+# RX window: centered x=0, width 0.065 m. RX at z=0; TX projects -Z. Shared symmetric
+# scene across all scenarios. TX width 0.030 m, height z=0.2. Verified (150 GHz):
+# beam_peak_x=+0.000, FWHM=0.019 (< rx 0.065), rx_peak/peak=1.00 -> HIT
+
+sim_scene:
+  x_min: -0.3
+  x_max: 0.3
+  z_min: 0.0
+  z_max: 0.85
+  spacing: 0.00025
+
+tx_aperture:
+  x_min: -0.015
+  x_max: 0.015
+  z: 0.2
+  dx: 0.00025
+  beam:
+    type: directional
+    steer_angle_deg: 0
+
+rx_aperture:
+  x_center: 0.0
+  width: 0.065
+  dx: null
+
+plot_path: scenario_directional_smaller_hit.png
+
+gerchberg_saxton:
+  max_iters: 800
+  convergence_count: 10
+  convergence_threshold: -1.0e-8
+  lr0: 0.05
+  bt_shrink: 0.5
+  bt_tries: 8
+  seed: 0
+  history_stride: 50
+
+output:
+  output_dir: results
+  run_name: scenario_directional_smaller_hit
+  save_run: true
+  save_scene_fields: false
+  save_gs_history: false
+
+# Speculative TX-location sweep for grid-search-mgs (ignored by plain mgs).
+grid_search:
+  z:        {min: 0.15, max: 0.80, num: 12}
+  x_center: {min: -0.15, max: 0.15, num: 12}
+  aperture: {width: 0.10, dx: 0.00025}
+  seed: 0
+  gs_overrides: {max_iters: 800}

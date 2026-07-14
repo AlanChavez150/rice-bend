@@ -119,13 +119,6 @@ def _f64(a: np.ndarray) -> np.ndarray:
     return np.asarray(a, dtype=np.float64)
 
 
-def _traj_array(traj) -> np.ndarray:
-    """[a, b, c] -> float64 (3,); empty list -> float64 (0,)."""
-    if traj is None or len(traj) == 0:
-        return np.empty(0, dtype=np.float64)
-    return np.asarray(traj, dtype=np.float64)
-
-
 def _collect_arrays(mgs, is_exp: bool) -> dict:
     """Build the dict of arrays for run.npz. Guards every optional array."""
     out = {}
@@ -139,10 +132,6 @@ def _collect_arrays(mgs, is_exp: bool) -> dict:
     out["rx_aper_profile"] = _c64(scene.rx_ap.aper_profile)
     out["gs_tx_aper_axis"] = _f64(gs_tx.aper_axis)
     out["gs_tx_aper_profile"] = _c64(gs_tx.aper_profile)
-
-    # trajectories (may be empty)
-    out["real_traj"] = _traj_array(getattr(mgs, "real_traj", []))
-    out["rec_traj"] = _traj_array(getattr(mgs, "rec_traj", []))
 
     # gradient-descent history
     hist = mgs.gs_history
@@ -180,9 +169,6 @@ def _collect_metadata(mgs, run_dir: Path, config, freq: float,
     gs_cfg = mgs.gs_cfg
     out_cfg = mgs.output_cfg
 
-    real_traj = list(getattr(mgs, "real_traj", []))
-    rec_traj = list(getattr(mgs, "rec_traj", []))
-
     meta = {
         "schema_version": 1,
         "run_dir": str(run_dir),
@@ -212,12 +198,6 @@ def _collect_metadata(mgs, run_dir: Path, config, freq: float,
             "nx": int(len(scene.x_axis)), "nz": int(len(scene.z_axis)),
             # source plane for re-illumination (TX projects toward -Z from here)
             "tx_z": float(scene.tx_ap.z),
-        },
-        "trajectory": {
-            "has_real_traj": len(real_traj) > 0,
-            "real_traj": real_traj if len(real_traj) > 0 else None,
-            "rec_traj": rec_traj if len(rec_traj) > 0 else None,
-            "rec_traj_computed": len(rec_traj) > 0,
             "has_real_tx": (not is_exp),
         },
         "outputs": {

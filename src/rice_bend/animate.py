@@ -12,6 +12,9 @@ Only the phase is optimized (amplitude is held fixed), so the phase is what anim
 import argparse
 import json
 import logging
+import os
+from collections import namedtuple
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import coloredlogs
@@ -20,6 +23,28 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, FFMpegWriter, writers
 
 from rice_bend import rs
+
+
+# Per-worker shared state for parallel scene-frame re-illumination (set by the pool
+# initializer so the read-only arrays are not re-pickled for every frame).
+_SceneAnimShared = namedtuple("_SceneAnimShared", "x amp phases z_axis wavelength tx_z behind_tx")
+_SCENE_ANIM = None
+
+
+def _init_scene_anim_worker(shared: "_SceneAnimShared") -> None:
+    global _SCENE_ANIM
+    for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        os.environ.setdefault(var, "1")
+    _SCENE_ANIM = shared
+
+
+def _reilluminate_frame(k: int) -> np.ndarray:
+    """Re-illuminate the scene with the TX estimate at captured iteration k (worker task)."""
+    s = _SCENE_ANIM
+    u0 = s.amp * np.exp(1j * s.phases[k])
+    frame = np.abs(rs.rs(s.x, s.z_axis, u0, s.wavelength, z_src=s.tx_z, forward_dir=-1.0))
+    frame[s.behind_tx, :] = 0
+    return frame.astype(np.float32)
 
 
 def find_latest_run(base: Path) -> Path:
@@ -154,7 +179,7 @@ def animate_tx_estimate(run_dir: Path, out_path: Path, fps: int = 15,
 
 def animate_scene_reillumination(run_dir: Path, out_path: Path, fps: int = 15,
                                  frame_stride: int = None, z_stride: int = None,
-                                 show: bool = False) -> Path:
+                                 jobs: int = 1, show: bool = False) -> Path:
     """Animate the 2D scene field re-illuminated by the TX aperture estimate at each
     captured iteration. The scene is NOT stored per iteration, so it is recomputed here
     via Rayleigh-Sommerfeld propagation of estimate = gs_fixed_aper_amp * exp(1j*phase[k])."""
@@ -210,14 +235,26 @@ def animate_scene_reillumination(run_dir: Path, out_path: Path, fps: int = 15,
              f"(frame_stride={frame_stride}, z_stride={z_stride})")
     # the aperture only radiates into the -Z half-space; zero the field behind the TX plane
     behind_tx = z_axis > tx_z
-    frames = []
-    for j, k in enumerate(fsel):
-        u0 = amp * np.exp(1j * phases[k])
-        frame = np.abs(rs.rs(x, z_axis, u0, wavelength, z_src=tx_z, forward_dir=-1.0))
-        frame[behind_tx, :] = 0
-        frames.append(frame)
-        if j % 10 == 0:
-            log.info(f"  propagated frame {j + 1}/{len(fsel)} (iteration {int(iters[k])})")
+    n_jobs = max(1, int(jobs))
+    if n_jobs == 1 or len(fsel) <= 1:
+        frames = []
+        for j, k in enumerate(fsel):
+            u0 = amp * np.exp(1j * phases[k])
+            frame = np.abs(rs.rs(x, z_axis, u0, wavelength, z_src=tx_z, forward_dir=-1.0))
+            frame[behind_tx, :] = 0
+            frames.append(frame)
+            if j % 10 == 0:
+                log.info(f"  propagated frame {j + 1}/{len(fsel)} (iteration {int(iters[k])})")
+    else:
+        # each frame's full-scene RS propagation is independent -> render across workers
+        n_workers = min(n_jobs, len(fsel))
+        log.info(f"  propagating {len(fsel)} frames across {n_workers} worker process(es)")
+        shared = _SceneAnimShared(x=x, amp=amp, phases=phases, z_axis=z_axis,
+                                  wavelength=wavelength, tx_z=tx_z, behind_tx=behind_tx)
+        with ProcessPoolExecutor(max_workers=n_workers, initializer=_init_scene_anim_worker,
+                                 initargs=(shared,)) as ex:
+            # map preserves input order, so frames line up with fsel
+            frames = list(ex.map(_reilluminate_frame, fsel))
     vmax = max(float(f.max()) for f in frames)
 
     dpi = 100
@@ -280,6 +317,8 @@ def main():
     parser.add_argument("--fps", type=int, default=15, help="Frames per second")
     parser.add_argument("--frame-stride", type=int, default=None,
                         help="[scene] use every Nth captured iteration (default: ~60 frames total)")
+    parser.add_argument("--jobs", "-j", type=int, default=1,
+                        help="[scene] worker processes for frame re-illumination (1 = serial)")
     parser.add_argument("--z-stride", type=int, default=None,
                         help="[scene] subsample output z-planes (default: ~300 planes)")
     parser.add_argument("--show", action="store_true", default=False, help="Also display interactively")
@@ -293,7 +332,7 @@ def main():
         out_path = args.out if args.out is not None else run_dir / "scene_reillum.mp4"
         animate_scene_reillumination(run_dir, out_path, fps=args.fps,
                                      frame_stride=args.frame_stride, z_stride=args.z_stride,
-                                     show=args.show)
+                                     jobs=args.jobs, show=args.show)
     else:
         out_path = args.out if args.out is not None else run_dir / "tx_estimate.mp4"
         animate_tx_estimate(run_dir, out_path, fps=args.fps, show=args.show)

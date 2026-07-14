@@ -18,6 +18,25 @@ def kernel_rs(x: np.ndarray, wavelength: float, z: float, n: float = 1.0, kind: 
 def kernel_rs_inverse(x: np.ndarray, wavelength: float, z: float, n: float = 1.0, kind: str = "x"):
     return np.conjugate(kernel_rs(x, wavelength, np.abs(z), n, kind))
 
+def sampling_quality(x_axis: np.ndarray, z_targets: np.ndarray, wavelength: float,
+                     z_src: float = 0.0, forward_dir: float = -1.0,
+                     background: float = 1.0) -> float:
+    """Ratio of the ideal-to-actual transverse sampling for an RS propagation.
+
+    The densest sampling requirement is set by the nearest target plane; the
+    propagation is adequately sampled when this ratio is >= 1. rs() raises if it
+    drops below 1, so callers can pre-screen geometries (e.g. a grid of candidate
+    TX planes) without triggering that error mid-run.
+    """
+    prop = forward_dir * (np.asarray(z_targets, dtype=float) - z_src)
+    dx = x_axis[1] - x_axis[0]
+    dr_real = np.sqrt(dx**2)
+    rmax = np.sqrt(x_axis**2).max()
+    wave_ratio = wavelength / background
+    nearest = np.min(np.abs(prop))
+    dr_ideal = np.sqrt(wave_ratio**2 + rmax**2 + 2 * wave_ratio * np.sqrt(rmax**2 + nearest**2)) - rmax
+    return dr_ideal / dr_real
+
 def rs(x_axis: np.ndarray, z_targets: np.ndarray, u0: np.ndarray, wavelength: float,
        z_src: float = 0.0, forward_dir: float = -1.0) -> np.ndarray:
     """
@@ -36,18 +55,12 @@ def rs(x_axis: np.ndarray, z_targets: np.ndarray, u0: np.ndarray, wavelength: fl
 
     # signed propagation distance from the source plane to each target plane
     prop = forward_dir * (np.asarray(z_targets, dtype=float) - z_src)
-
     dx = x_axis[1] - x_axis[0]
-    dr_real = np.sqrt(dx**2)
-    rmax = np.sqrt(x_axis**2).max()
-    background = 1.0
-    wave_ratio = wavelength / background
+
     # worst-case (densest) sampling requirement is set by the nearest target plane
-    nearest = np.min(np.abs(prop))
-    dr_ideal = np.sqrt(wave_ratio**2 + rmax**2 + 2 * wave_ratio * np.sqrt(rmax**2 + nearest**2)) - rmax
-    quality = dr_ideal / dr_real
+    quality = sampling_quality(x_axis, z_targets, wavelength, z_src=z_src, forward_dir=forward_dir)
     if quality < 1:
-        raise RuntimeError(f"needs denser sampling. {quality=} {dr_ideal=} {dr_real=} {dx} {wavelength}")
+        raise RuntimeError(f"needs denser sampling. {quality=} {dx=} {wavelength=}")
 
     s_mat = np.zeros(shape=(len(prop), len(x_axis)), dtype=np.complex64)
     for z_idx, curr_prop in enumerate(prop):

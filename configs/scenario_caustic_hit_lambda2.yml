@@ -1,0 +1,54 @@
+# Test scenario: Caustic beam HITS the RX aperture (big arc curves into the window)
+# Copy of scenario_caustic_hit.yml but with the RX aperture sampled at LAMBDA/2 spacing
+# instead of the default lambda/20. RX window: centered x=0, width 0.04 m. RX at z=0;
+# TX projects -Z. Verified (150 GHz): big-arc caustic (a=0.8) curves into the RX -> HIT.
+# Dense 48x48 grid_search (2304 candidate spots).
+# NOTE: rx dx is a fixed metres value = lambda/2 at 150 GHz; it does NOT auto-scale if --freq changes.
+
+sim_scene:
+  x_min: -0.3
+  x_max: 0.3
+  z_min: 0.0
+  z_max: 0.85
+  spacing: 0.00025
+
+tx_aperture:
+  x_min: -0.167
+  x_max: -0.035
+  z: 0.3
+  dx: 0.00025
+  beam:
+    type: caustic
+    trajectory: [0.8, 0.0, -0.065]   # x(d)=a*d^2+b*d+c; c offsets the beam laterally
+
+rx_aperture:
+  x_center: 0.0
+  width: 0.04
+  dx: 0.000999308          # lambda/2 at 150 GHz (lambda = 1.99862 mm)
+
+plot_path: scenario_caustic_hit_lambda2.png
+
+gerchberg_saxton:
+  max_iters: 800
+  convergence_count: 10
+  convergence_threshold: -1.0e-8
+  lr0: 0.05
+  bt_shrink: 0.5
+  bt_tries: 8
+  seed: 0
+  history_stride: 50
+
+output:
+  output_dir: results
+  run_name: scenario_caustic_hit_lambda2
+  save_run: true
+  save_scene_fields: false
+  save_gs_history: false
+
+# Speculative TX-location sweep for grid-search-mgs (ignored by plain mgs).
+grid_search:
+  z:        {min: 0.15, max: 0.80, num: 48}
+  x_center: {min: -0.15, max: 0.15, num: 48}
+  aperture: {width: 0.10, dx: 0.00025}
+  seed: 0
+  gs_overrides: {max_iters: 800}
