@@ -24,7 +24,7 @@ from rice_bend import rs
 from rice_bend.config import GridSearchConfig, SimConfig, SimSceneConfig
 from rice_bend.data_store import (c64, f64, provenance, save_config_snapshot,
                                   write_json)
-from rice_bend.interp import interp_amp_phase
+from rice_bend.interp import interp_real_imag
 from rice_bend.mgs import MGS, gs_reconstruct
 from rice_bend.parallel import map_workers, worker_shared
 from rice_bend.sim_scene import SimAperature, sampled_axis
@@ -112,7 +112,9 @@ def _reconstruct_candidate(p: "GridPoint", shared: "SharedMeasurement") -> "Cand
         wavelength=shared.wavelength, params=shared.params,
         capture=False, log=None,
     )
-    aper_profile = interp_amp_phase(x_axis, result.curr_aper_f, hyp.aper_axis)
+    # the converged aperture is a FIELD, and across this window it wraps dozens of
+    # times, so cartesian: polar resampling destroyed 13.7% of its energy
+    aper_profile = interp_real_imag(x_axis, result.curr_aper_f, hyp.aper_axis)
     return CandidateResult(
         point=p,
         aper_axis=hyp.aper_axis.copy(),
@@ -329,7 +331,7 @@ def save_grid_run(run: GridSearchRun, run_dir: Path, config: SimConfig,
     n_usable = sum(1 for p in run.grid_points if p.ok)
 
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "run_dir": str(run_dir),
         "freq_hz": run.freq,
         "wavelength_m": run.wavelength,
@@ -387,7 +389,7 @@ def write_frequencies_index(base_dir: Path, entries: List[dict],
     `entries` is a list of {freq_hz, wavelength_m, dir} dicts (one per frequency).
     """
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "frequencies": entries,
         "ground_truth": {"real_tx_z": float(real_tx_z),
                          "real_tx_x_center": float(real_tx_x_center)},

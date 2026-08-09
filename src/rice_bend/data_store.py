@@ -302,7 +302,7 @@ def _collect_metadata(mgs, run_dir: Path, freq: float,
     out_cfg = mgs.output_cfg
 
     meta = {
-        "schema_version": 1,
+        "schema_version": 2,
         "run_dir": str(run_dir),
         "is_experimental": bool(is_exp),
         "freq_hz": float(freq),
