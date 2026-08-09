@@ -201,12 +201,24 @@ def run_grid_search(config: SimConfig, freq: float, *, limit: Optional[int] = No
     mgs = MGS(freq, config)
     mgs.measure()
 
-    # 2. apply grid-only GS overrides (cheaper sweep + one fixed seed for comparability)
+    # 2. Apply the grid-only GS overrides (cheaper sweep + one fixed seed so residuals
+    #    are comparable). Written to config.gerchberg_saxton DIRECTLY and not through
+    #    mgs.gs_cfg, which is an alias for the same object -- so these overrides always
+    #    did mutate the caller's SimConfig, and that mutated object is what
+    #    save_grid_run dumps to config_snapshot.json. That is why the snapshot records
+    #    effective sweep values while config_source.yml records the file's.
+    #
+    #    The mutation is intentional (the snapshot SHOULD record what actually ran);
+    #    only the action-at-a-distance was not. Threading a model_copy through instead
+    #    would patch max_iters and forget seed, and since load_run_config falls back to
+    #    the snapshot when config_source.yml is absent, reverting the seed would change
+    #    true_mgs_scene.png's numerics.
+    gs_cfg = config.gerchberg_saxton
     if grid_cfg.gs_overrides.max_iters is not None:
-        mgs.gs_cfg.max_iters = grid_cfg.gs_overrides.max_iters
+        gs_cfg.max_iters = grid_cfg.gs_overrides.max_iters
     if grid_cfg.seed is not None:
-        mgs.gs_cfg.seed = grid_cfg.seed
-    elif mgs.gs_cfg.seed is None:
+        gs_cfg.seed = grid_cfg.seed
+    elif gs_cfg.seed is None:
         log.warning("grid_search.seed and gerchberg_saxton.seed are both null; candidates "
                     "will use independent random initial phases (residuals not comparable)")
 
