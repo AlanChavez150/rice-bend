@@ -13,7 +13,8 @@ from rice_bend.config import DEFAULT_CONFIG, GerchbergSaxtonConfig, SimConfig, l
 from rice_bend.interp import interp_amp_phase, interp_real_imag
 from rice_bend.plotting import draw_line_panel, draw_scene
 from rice_bend.data_store import GSHistory, check_run_dir, make_run_dir, save_run
-from rice_bend.sim_scene import SimAperature, SimScene, parse_oscope_rx_data, parse_oscope_heatmap_data
+from rice_bend.exp_data import parse_oscope_heatmap_data, parse_oscope_rx_data
+from rice_bend.sim_scene import SimAperature, SimScene
 
 
 # Result of one solver run. `curr_aper_f` is the reconstructed complex aperture on the
@@ -143,16 +144,7 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
 
 class MGS():
     def __init__(self, freq: float, config: SimConfig):
-        self.log = logging.getLogger()
-        self.freq = freq
-        self.wavelength = rs.wavelength(freq)
-        self.plot_path = config.plot_path
-        self.gs_cfg = config.gerchberg_saxton
-        self.output_cfg = config.output
-        self.gs_history = None
-        self._rx_field = None          # measured RX field on scene.x_axis (set by measure())
-        self._error_weighting = None   # phase-retrieval error weighting (set by measure())
-        self.gs_rec_data = None        # scene re-illuminated by the reconstruction
+        self._init_common(freq, config)
 
         # Convention: the RX aperture sits at the origin (z=0), the bottom of the
         # image. The TX aperture sits above it and projects toward -Z, so its beam
@@ -168,6 +160,83 @@ class MGS():
             spacing=scene_cfg.spacing, rx_ap=rx, tx_ap=tx,
         )
         self._log_geometry()
+
+    def _init_common(self, freq: float, config: SimConfig) -> None:
+        """State every MGS has, whatever built its scene."""
+        self.log = logging.getLogger()
+        self.freq = freq
+        self.wavelength = rs.wavelength(freq)
+        self.plot_path = config.plot_path
+        self.gs_cfg = config.gerchberg_saxton
+        self.output_cfg = config.output
+        self.gs_history = None
+        self._rx_field = None          # measured RX field on scene.x_axis (set by measure())
+        self._error_weighting = None   # phase-retrieval error weighting (set by measure())
+        self.gs_rec_data = None        # scene re-illuminated by the reconstruction
+
+    @classmethod
+    def from_experiment(cls, rx_path: Path, heatmap_path: Path, freq: float,
+                        config: SimConfig) -> "MGS":
+        """Build an MGS from experimental .mat captures instead of a simulated scene.
+
+        Geometry comes from the capture and the bench rather than config.sim_scene:
+        the RX aperture IS the measurement, and the TX aperture is what the
+        experiment is trying to recover (has_real_aper is False, so no "Real TX"
+        overlay is drawn and measure() does not synthesize an RX field).
+
+        Everything the rig contributes -- the down-conversion chain, the aperture
+        edges, the coordinate origins, the amplitude normalisation, the scene
+        margins -- lives in config.experimental rather than as thirteen magic
+        numbers spread across two modules.
+        """
+        exp = config.experimental
+        # alternate constructor: __init__ builds a scene from config, and here the
+        # scene comes from data, so there is nothing for it to do
+        self = cls.__new__(cls)
+        self._init_common(freq, config)
+        self.log.info(f"Carrier Frequency: {freq*1e-9: 0.2f} GHz")
+
+        self.log.info(f"Reading file as RX data: {rx_path}")
+        rx = parse_oscope_rx_data(rx_path, freq, exp)
+        rx.z = exp.rx_z_origin - rx.z
+        dx = rx.dx
+
+        # TX aperture edges in rig coordinates, mirrored into scene coordinates
+        tx_x_min = exp.rig_x_origin - exp.tx_left_edge
+        tx_x_max = exp.rig_x_origin - exp.tx_right_edge
+        # recentre everything so the TX aperture straddles x = 0
+        x_offset = -((tx_x_max - tx_x_min) / 2.0 + tx_x_min)
+
+        rx_centred = SimAperature(x_min=rx.x_min + x_offset, x_max=rx.x_max + x_offset,
+                                  z=rx.z, dx=dx)
+        # the capture can be one sample longer than the recentred aperture's own
+        # sampling, so it is truncated rather than resampled
+        rx_centred.aper_profile = rx.aper_profile[0:len(rx_centred.aper_profile)]
+        rx_centred.aper_profile = exp.rx_amplitude_scale * (
+            rx_centred.aper_profile / np.max(rx_centred.aper_profile))
+        rx = rx_centred
+
+        tx = SimAperature(x_min=tx_x_min + x_offset, x_max=tx_x_max + x_offset,
+                          z=0, dx=dx)
+        tx.make_steer(freq, theta_deg=0)   # broadside plane wave: the solver's seed
+        self.gs_tx = SimAperature(x_min=tx.x_min, x_max=tx.x_max, z=tx.z, dx=dx)
+
+        spacing_ratio = round(dx / self.wavelength, 3)
+        self.log.info(f"RX measurements are spread {spacing_ratio:0.3f} wavelengths apart")
+
+        self.log.info(f"Reading file with heatmap data: {heatmap_path}")
+        base_scene = SimScene(
+            x_min=tx.x_min - exp.scene_x_margin, x_max=tx.x_max + exp.scene_x_margin,
+            z_min=exp.scene_z_min, z_max=exp.scene_z_max,
+            spacing=dx, rx_ap=rx, tx_ap=tx,
+        )
+        self.scene = parse_oscope_heatmap_data(heatmap_path, base_scene, x_offset,
+                                               freq, exp)
+
+        self.has_real_aper = False   # the experimental TX aperture is unknown
+        self.beam_type = "directional"
+        self._log_geometry()
+        return self
 
     def _build_rx(self, rx_cfg) -> SimAperature:
         """The receive aperture: a window of `width` centred at `x_center`, at the
@@ -421,105 +490,6 @@ class MGS():
             plt.show()
         plt.close(fig)
 
-class ExpMGS(MGS):
-    def __init__(self, rx_path: Path, heatmap_path: Path, freq: float, config: SimConfig):
-        self.log = logging.getLogger("ExpMGS")
-        self.log.info(f"Carrier Frequency: {freq*1e-9: 0.2f} GHz")
-        self.freq = freq
-        # ExpMGS derives its scene from measured data, so only plot_path is used
-        self.plot_path = config.plot_path
-        self.gs_cfg = config.gerchberg_saxton
-        self.output_cfg = config.output
-        self.gs_history = None
-        self._rx_field = None          # measured RX field on scene.x_axis (set by measure())
-        self._error_weighting = None   # phase-retrieval error weighting (set by measure())
-
-        self.log.info(f"Reading file as RX data: {rx_path}")
-        rx = parse_oscope_rx_data(rx_path, freq, 25e9, 6)
-        z_adj = 0.35 # measured during experiment setup
-        rx.z = z_adj - rx.z
-
-
-        ap_left_edge = 0.2558
-        ap_right_edge = 0.1573
-
-        dx = rx.dx
-        tx = SimAperature(
-            x_min=0.3 - ap_left_edge,
-            x_max=0.3 - ap_right_edge,
-            z=0,
-            dx=dx
-        )
-
-        # recenter everything such that tx data is centered around 0.0
-        x_offset = (tx.x_max - tx.x_min) / 2.0 + tx.x_min
-        x_offset *= -1.0
-
-        rx_recentered = SimAperature(
-            x_min=rx.x_min + x_offset,
-            x_max=rx.x_max + x_offset,
-            z=rx.z,
-            dx=dx
-        )
-        rx_recentered.aper_profile = rx.aper_profile[0: len(rx_recentered.aper_profile)]
-        rx = rx_recentered
-        # rescale data
-        rx.aper_profile = 6.0 * (rx.aper_profile / np.max(rx.aper_profile))
-
-        tx_recentered = SimAperature(
-            x_min=tx.x_min + x_offset,
-            x_max=tx.x_max + x_offset,
-            z=tx.z,
-            dx=dx
-        )
-        tx = tx_recentered
-        tx.make_steer(self.freq, theta_deg=0)
-
-        x_min = tx.x_min - 0.2
-        x_max = tx.x_max + 0.2
-        z_min = 0.0
-        z_max = 0.4
-        self.wavelength = rs.wavelength(freq)
-
-        spacing_ratio = round(rx.dx / self.wavelength, 3)
-        self.log.info(f"RX measurements are spread {spacing_ratio:0.3f} wavelengths apart")
-
-        self.gs_tx = SimAperature(
-            x_min=tx.x_min,
-            x_max=tx.x_max,
-            z=tx.z,
-            dx=dx
-        )
-
-        self.log.info(f"Reading file with heatmap data: {heatmap_path}")
-        base_scene = SimScene(
-            x_min=x_min,
-            x_max=x_max,
-            z_min=z_min,
-            z_max=z_max,
-            spacing=dx,
-            rx_ap=rx,
-            tx_ap=tx
-        )
-        heatmap_scene = parse_oscope_heatmap_data(heatmap_path, base_scene, x_offset, self.freq)
-        self.scene = heatmap_scene
-
-        self.gs_rec_data = None   # filled by illuminate_reconstructed()
-
-        # Log parameters
-        self.log.info(f"Simulation scene:")
-        self.log.info(f" - X axis: {self.scene.x_min:0.3f} - {self.scene.x_max:0.3f}")
-        self.log.info(f" - Z axis: {self.scene.z_min:0.3f} - {self.scene.z_max:0.3f}")
-        self.log.info(f"RX aperature:")
-        self.log.info(f" - X axis: {self.scene.rx_ap.x_min:0.3f} {self.scene.rx_ap.x_max:0.3f}")
-        self.log.info(f" - Z: {self.scene.rx_ap.z:0.3f}")
-        self.log.info(f"TX aperature")
-        self.log.info(f" - X axis: {self.scene.tx_ap.x_min:0.3f} {self.scene.tx_ap.x_max:0.3f}")
-        self.log.info(f" - Z: {self.scene.tx_ap.z:0.3f}")
-        self.has_real_aper = False  # experimental TX aperture is unknown -> no "Real TX" overlay
-        self.beam_type = "directional"  # ExpMGS seeds with a steered guess
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="Program to simulate phase retrieval using a modified gerchberg-saxton algorithm"
@@ -611,7 +581,7 @@ def main():
     if args.rx_path is not None and not args.heatmap_path is None:
         rx_path = Path(args.rx_path)
         heatmap_path = Path(args.heatmap_path)
-        mgs = ExpMGS(rx_path, heatmap_path, args.freq, config)
+        mgs = MGS.from_experiment(rx_path, heatmap_path, args.freq, config)
         mgs.run_gerch_sax()
         mgs.illuminate_reconstructed()
         mgs.plot_scene()

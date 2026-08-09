@@ -1,12 +1,9 @@
-from copy import deepcopy
-from pathlib import Path
+"""Aperture and scene geometry. No I/O, no plotting -- the .mat readers live in
+exp_data.py."""
 
 import numpy as np
-import scipy.interpolate
-import h5py
 
 from rice_bend import caustic, rs
-from rice_bend.interp import interp_amp_phase
 
 
 def sampled_axis(lo: float, hi: float, spacing: float) -> np.ndarray:
@@ -83,101 +80,3 @@ class SimScene():
         # of complex128 that the first propagation immediately overwrote with
         # complex64 -- and in the grid-search path was never written at all.
         self.data = None
-
-def parse_oscope_rx_data(path: Path, freq_c: float, lo_freq: float = 25e9, trx_n: float = 6) -> SimAperature:
-    """
-    Reads a .mat file created by experimental_data/heatmap.m
-    """
-    down_mix_freq = freq_c - (lo_freq * trx_n)
-    if down_mix_freq < 0:
-        err_msg = f"Incorrect carrier frequency. carrier {freq_c*1e-9:0.1f} GHz. LO Freq {lo_freq*1e-9:0.1f} GHz {trx_n*1e-9:0.1f} GHz"
-        raise ValueError(err_msg)
-
-    with h5py.File(path, "r") as f:
-        # HDF5 datasets behave like NumPy arrays once opened
-        xvec     = f["xvec"][:].squeeze()          # shape (Nx,)
-        zvec     = f["zvec"][:].flatten()          # shape (Nz,)
-        xax_td   = f["xax_td"][:].flatten()
-        tds      = f["tds"]
-
-        tds_plane = tds[:, :, 0]
-        tds_plane = tds_plane.T
-
-    sample_rate = 1.0 / (xax_td[1] - xax_td[0])
-
-    # convert from mm to m
-    xvec = np.array(xvec * 1e-3)
-    zvec = np.array(zvec * 1e-3)
-
-    aper_profile = np.zeros(shape=xvec.shape, dtype=np.complex128)
-    for x_idx in range(xvec.shape[0]):
-        curr_fft = np.fft.fft(tds_plane[x_idx, :])
-        freq_carrier_bin = int(down_mix_freq / (sample_rate / len(curr_fft)))
-        aper_profile[x_idx] = curr_fft[freq_carrier_bin]
-
-    aper = SimAperature(
-        x_min=xvec.min(),
-        x_max=xvec.max(),
-        z=zvec[0],
-        dx=xvec[1] - xvec[0]
-    )
-    aper.aper_axis = xvec
-    aper.aper_profile = aper_profile[::-1]
-    return aper
-
-def parse_oscope_heatmap_data(
-        path: Path,
-        base_scene: SimScene,
-        x_off: float,
-        freq_c: float,
-        lo_freq: float=25e9,
-        trx_n: float = 6
-    ) -> SimScene:
-    """
-    Reads a .mat file created by experimental_data/heatmap.m
-
-    Experimental data is interpolated onto a base scene
-    """
-    down_mix_freq = freq_c - (lo_freq * trx_n)
-    if down_mix_freq < 0:
-        err_msg = f"Incorrect carrier frequency. carrier {freq_c*1e-9:0.1f} GHz. LO Freq {lo_freq*1e-9:0.1f} GHz {trx_n*1e-9:0.1f} GHz"
-        raise ValueError(err_msg)
-
-    with h5py.File(path, "r") as f:
-        # HDF5 datasets behave like NumPy arrays once opened
-        xvec     = f["xvec"][:].squeeze()          # shape (Nx,)
-        zvec     = f["zvec"][:].flatten()          # shape (Nz,)
-        xax_td   = f["xax_td"][:].flatten()
-        tds      = f["tds"]
-
-
-        tds = np.array(tds)
-        tds_plane = tds.T
-
-    sample_rate = 1.0 / (xax_td[1] - xax_td[0])
-
-    # convert from mm to m
-    xvec = np.array(xvec * 1e-3)
-    zvec = np.array(zvec * 1e-3)
-
-    exp_data = np.zeros(shape=(zvec.shape[0], xvec.shape[0]), dtype=np.complex128)
-    for z_idx in range(zvec.shape[0]):
-        for x_idx in range(xvec.shape[0]):
-            curr_fft = np.fft.fft(tds_plane[z_idx, x_idx])
-            freq_carrier_bin = int(down_mix_freq / (sample_rate / len(curr_fft)))
-            exp_data[z_idx][x_idx] = curr_fft[freq_carrier_bin]
-
-    zvec = (0.3 - zvec)
-    xvec = (0.3 - xvec)
-    xvec += x_off
-    interp_2d = scipy.interpolate.RegularGridInterpolator(
-        (zvec, xvec),
-        exp_data,
-        bounds_error=False,
-        fill_value=0.0+0.0j
-    )
-
-    exp_scene = deepcopy(base_scene)
-    base_z, base_x = np.meshgrid(base_scene.z_axis, base_scene.x_axis, indexing="ij")
-    exp_scene.data = interp_2d((base_z, base_x))
-    return exp_scene
