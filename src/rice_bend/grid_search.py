@@ -15,7 +15,6 @@ import os
 import shutil
 import warnings
 from collections import namedtuple
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -34,6 +33,7 @@ from rice_bend.config import (DEFAULT_CONFIG, AxisSweep, GridSearchConfig, SimCo
                               SimSceneConfig, load_config)
 from rice_bend.data_store import _c64, _f64, _json_safe, check_run_dir, make_run_dir
 from rice_bend.interp import interp_amp_phase
+from rice_bend.parallel import map_workers, round_robin_chunks, worker_shared
 from rice_bend.mgs import MGS, gs_reconstruct
 from rice_bend.sim_scene import SimAperature, sampled_axis
 
@@ -112,11 +112,6 @@ def grid_summary(points: List[GridPoint]) -> str:
 SharedMeasurement = namedtuple(
     "SharedMeasurement", "x_axis rx_z rx_field error_weighting wavelength params")
 
-# Per-worker copy of the shared measurement, set once by the pool initializer so it is
-# not re-pickled for every one of the (potentially hundreds of) candidate tasks.
-_WORKER_SHARED: Optional["SharedMeasurement"] = None
-
-
 def _reconstruct_candidate(p: "GridPoint", shared: "SharedMeasurement") -> "CandidateResult":
     """Reconstruct one candidate beam at grid point `p`. Pure given `shared` — runs
     identically in the parent process or a worker."""
@@ -143,20 +138,13 @@ def _reconstruct_candidate(p: "GridPoint", shared: "SharedMeasurement") -> "Cand
     )
 
 
-def _init_worker(shared: "SharedMeasurement") -> None:
-    """ProcessPoolExecutor initializer: stash the shared measurement once per worker and
-    pin math-library threads to 1 so N processes don't oversubscribe the cores (the GS
-    hot path is FFT + ufuncs, so this is mostly precautionary)."""
-    global _WORKER_SHARED
-    for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
-                "NUMEXPR_NUM_THREADS"):
-        os.environ.setdefault(var, "1")
-    _WORKER_SHARED = shared
-
-
 def _worker_task(p: "GridPoint") -> "CandidateResult":
-    """Worker entry point: reconstruct one candidate using the per-worker shared state."""
-    return _reconstruct_candidate(p, _WORKER_SHARED)
+    """Task entry point: reconstruct one candidate against the shared measurement.
+
+    Deliberately a two-line wrapper rather than folding the global into
+    _reconstruct_candidate: the shared state is transport, not a dependency of the
+    physics, and _reconstruct_candidate's "pure given `shared`" stays true."""
+    return _reconstruct_candidate(p, worker_shared())
 
 
 # --------------------------------------------------------------------------- #
@@ -255,32 +243,15 @@ def run_grid_search(config: SimConfig, freq: float, *, limit: Optional[int] = No
         params=mgs.gs_cfg.model_copy(),
     )
 
-    total = len(usable)
-    n_jobs = max(1, int(jobs))
-    candidates: List[CandidateResult] = []
-
-    def _log_done(done: int, cand: CandidateResult) -> None:
+    def _log_done(done: int, total: int, cand: CandidateResult) -> None:
         p = cand.point
         log.info(f"[{done}/{total}] #{p.index} z={p.z:.3f} x={p.x_center:+.3f} "
                  f"-> loss {cand.final_loss:.6g} ({cand.n_iters_run} iters, {cand.stop_reason})")
 
-    if n_jobs == 1 or total <= 1:
-        for n, p in enumerate(usable):
-            cand = _reconstruct_candidate(p, shared)
-            candidates.append(cand)
-            _log_done(n + 1, cand)
-    else:
-        n_workers = min(n_jobs, total)
-        log.info(f"Reconstructing {total} candidate(s) across {n_workers} worker process(es)")
-        with ProcessPoolExecutor(max_workers=n_workers,
-                                 initializer=_init_worker, initargs=(shared,)) as ex:
-            futures = [ex.submit(_worker_task, p) for p in usable]
-            for done, fut in enumerate(as_completed(futures), start=1):
-                cand = fut.result()
-                candidates.append(cand)
-                _log_done(done, cand)
-        # collected in completion order; restore enumeration order for a stable manifest
-        candidates.sort(key=lambda c: c.point.index)
+    # map_workers returns input order, so the manifest is stable without a re-sort.
+    candidates: List[CandidateResult] = map_workers(
+        _worker_task, usable, jobs=jobs, shared=shared, on_done=_log_done, log=log,
+        desc=f"Reconstructing {len(usable)} candidate(s)")
 
     real_tx = config.tx_aperture
     return GridSearchRun(
@@ -955,35 +926,32 @@ def _plot_candidate_quad(cand_field: np.ndarray, real_field: Optional[np.ndarray
     plt.close(fig)
 
 
-# Per-worker shared state for parallel scene rendering, set once by the pool initializer
-# so the (read-only) scene geometry + real beam are not re-pickled for every chunk.
+# Read-only scene geometry + real beam, handed to the scene tasks once per worker.
 SceneShared = namedtuple("SceneShared", "ctx real_field x_axis z_axis best_index scenes_dir")
-_SCENE_WORKER: Optional["SceneShared"] = None
 
 
-def _init_scene_worker(shared: "SceneShared") -> None:
-    """Scene-pool initializer: stash the shared scene state, force the headless matplotlib
-    backend (each worker saves its own PNG), and pin math threads (precautionary)."""
-    global _SCENE_WORKER
-    for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
-                "NUMEXPR_NUM_THREADS"):
-        os.environ.setdefault(var, "1")
+def _agg_backend() -> None:
+    """Worker setup: each scene task saves its own PNG, so force the headless backend.
+    Runs in the pool only — doing it in the parent would permanently kill --show."""
     try:
         plt.switch_backend("Agg")
     except Exception:
         pass
-    _SCENE_WORKER = shared
 
 
 def _render_scene_chunk(chunk: "List[CandidateScene]"):
     """Render every candidate in `chunk` to its PNG; return (partial field-sum, count,
-    skipped). One chunk per worker keeps the returned partial sum (for the averaged scene)
-    small. Re-illumination + plotting are deterministic, so each PNG is identical to the
-    serial render."""
-    s = _SCENE_WORKER
+    skipped). Re-illumination + plotting are deterministic, so each PNG is identical
+    however the chunks are distributed.
+
+    Chunked rather than one task per candidate ON PURPOSE: a task returns a whole
+    scene field, so per-candidate tasks would stream 2304 of them back to the parent.
+    """
+    s = worker_shared()
     acc = None
     count = 0
     skipped: List[Tuple[int, str]] = []
+    log = logging.getLogger()
     for it in chunk:
         try:
             field = _reilluminate(s.x_axis, s.z_axis, it.aper_axis, it.aper_profile,
@@ -996,6 +964,8 @@ def _render_scene_chunk(chunk: "List[CandidateScene]"):
                              best=(it.index == s.best_index))
         acc = field.astype(np.float64) if acc is None else acc + field
         count += 1
+        if count % 10 == 0:
+            log.info(f"  {count} rendered in this chunk (through #{it.index})")
     return acc, count, skipped
 
 
@@ -1039,47 +1009,25 @@ def make_candidate_scenes(ctx: SceneContext, out_dir: Path, *, z_planes: int = 2
     # identical to the serial render; only the averaged-scene sum order differs, to
     # float round-off). The running field-sum for the average is reduced from per-worker
     # partial sums.
-    n_jobs = max(1, int(jobs))
+    shared = SceneShared(ctx=ctx, real_field=real_field, x_axis=x_axis, z_axis=z_axis,
+                         best_index=best.index, scenes_dir=scenes_dir)
+    chunks = round_robin_chunks(items, max(1, int(jobs)))
+    parts = map_workers(_render_scene_chunk, chunks, jobs=jobs, shared=shared,
+                        setup=_agg_backend, log=log,
+                        desc=f"Rendering {len(items)} candidate scene(s) over "
+                             f"{z_planes} z-planes -> {scenes_dir}/")
+
+    # The averaged scene sums in chunk order, which is not candidate order; float
+    # addition is not associative, so the last bits of scene_average.png depend on
+    # the chunk count. Honest, and unchanged from before.
     acc = None
     count = 0
-    if n_jobs == 1 or len(items) <= 1:
-        log.info(f"Rendering {len(items)} candidate scene(s) over {z_planes} z-planes "
-                 f"-> {scenes_dir}/")
-        for n, it in enumerate(items):
-            try:
-                field = _reilluminate(x_axis, z_axis, it.aper_axis, it.aper_profile,
-                                      ctx.wavelength, it.z)
-            except RuntimeError as e:
-                log.warning(f"  candidate #{it.index}: skipped ({e})")
-                continue
-            _plot_candidate_quad(field, real_field, it, ctx,
-                                 scenes_dir / f"cand_{it.index:04d}.png",
-                                 best=(it.index == best.index))
-            acc = field.astype(np.float64) if acc is None else acc + field
-            count += 1
-            if (n + 1) % 10 == 0:
-                log.info(f"  {n + 1}/{len(items)} rendered")
-    else:
-        n_workers = min(n_jobs, len(items))
-        # round-robin chunks: each re-illumination costs the same, so striding the
-        # candidates across workers keeps the load balanced, and one chunk per worker
-        # keeps the returned partial sums small.
-        chunks = [items[i::n_workers] for i in range(n_workers)]
-        shared = SceneShared(ctx=ctx, real_field=real_field, x_axis=x_axis, z_axis=z_axis,
-                             best_index=best.index, scenes_dir=scenes_dir)
-        log.info(f"Rendering {len(items)} candidate scene(s) over {z_planes} z-planes "
-                 f"across {n_workers} worker process(es) -> {scenes_dir}/")
-        with ProcessPoolExecutor(max_workers=n_workers, initializer=_init_scene_worker,
-                                 initargs=(shared,)) as ex:
-            futures = [ex.submit(_render_scene_chunk, ch) for ch in chunks]
-            for done, fut in enumerate(as_completed(futures), start=1):
-                pacc, pcount, skipped = fut.result()
-                if pacc is not None:
-                    acc = pacc if acc is None else acc + pacc
-                count += pcount
-                for idx, msg in skipped:
-                    log.warning(f"  candidate #{idx}: skipped ({msg})")
-                log.info(f"  worker chunk {done}/{n_workers} done ({count} rendered so far)")
+    for pacc, pcount, skipped in parts:
+        if pacc is not None:
+            acc = pacc if acc is None else acc + pacc
+        count += pcount
+        for idx, msg in skipped:
+            log.warning(f"  candidate #{idx}: skipped ({msg})")
 
     log.info(f"Wrote {count} candidate scene(s) to {scenes_dir}/")
     if average and acc is not None:
@@ -1097,26 +1045,23 @@ def make_candidate_scenes(ctx: SceneContext, out_dir: Path, *, z_planes: int = 2
 # --------------------------------------------------------------------------- #
 # Candidate-beam animation (one frame per candidate re-illuminating the scene)
 # --------------------------------------------------------------------------- #
-# Per-worker shared state for parallel candidate-beam frame re-illumination.
+# Read-only scene geometry handed to the frame tasks once per worker.
 _AnimShared = namedtuple("_AnimShared", "x_axis z_axis wavelength")
-_ANIM_WORKER: Optional["_AnimShared"] = None
-
-
-def _init_anim_worker(shared: "_AnimShared") -> None:
-    global _ANIM_WORKER
-    for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
-        os.environ.setdefault(var, "1")
-    _ANIM_WORKER = shared
 
 
 def _anim_frame(item: "CandidateScene"):
-    """Re-illuminate one candidate into a scene field (worker task); None if undersampled."""
-    s = _ANIM_WORKER
+    """Re-illuminate one candidate into a scene field (task); returns (field, reason).
+
+    Returns the skip reason rather than swallowing it — this used to discard str(e)
+    while the serial arm printed the real message, so the same failure read
+    differently depending on --jobs.
+    """
+    s = worker_shared()
     try:
         return _reilluminate(s.x_axis, s.z_axis, item.aper_axis, item.aper_profile,
-                             s.wavelength, item.z)
-    except RuntimeError:
-        return None
+                             s.wavelength, item.z), None
+    except RuntimeError as e:
+        return None, str(e)
 
 
 def animate_candidate_beams(ctx: SceneContext, out_path: Path, *, z_planes: int = 200,
@@ -1143,33 +1088,20 @@ def animate_candidate_beams(ctx: SceneContext, out_path: Path, *, z_planes: int 
 
     # one (independent) propagation per candidate; precompute frames so the color scale
     # is fixed, distributing them across workers when jobs > 1 (output identical to serial).
-    n_jobs = max(1, int(jobs))
+    shared = _AnimShared(x_axis=x_axis, z_axis=z_axis, wavelength=ctx.wavelength)
+    results = map_workers(
+        _anim_frame, items, jobs=jobs, shared=shared, log=log,
+        on_done=lambda done, total, _r: (log.info(f"  {done}/{total} propagated")
+                                         if done % 10 == 0 else None),
+        desc=f"Propagating {len(items)} candidate frame(s) over {z_planes} z-planes")
+
     frames, frame_items = [], []
     vmax = 0.0
-    if n_jobs == 1 or len(items) <= 1:
-        log.info(f"Propagating {len(items)} candidate frame(s) over {z_planes} z-planes")
-        for n, it in enumerate(items):
-            try:
-                f = _reilluminate(x_axis, z_axis, it.aper_axis, it.aper_profile, ctx.wavelength, it.z)
-            except RuntimeError as e:
-                log.warning(f"  candidate #{it.index}: skipped ({e})")
-                continue
-            frames.append(f); frame_items.append(it); vmax = max(vmax, float(f.max()))
-            if (n + 1) % 10 == 0:
-                log.info(f"  {n + 1}/{len(items)} propagated")
-    else:
-        n_workers = min(n_jobs, len(items))
-        log.info(f"Propagating {len(items)} candidate frame(s) over {z_planes} z-planes "
-                 f"across {n_workers} worker process(es)")
-        shared = _AnimShared(x_axis=x_axis, z_axis=z_axis, wavelength=ctx.wavelength)
-        with ProcessPoolExecutor(max_workers=n_workers, initializer=_init_anim_worker,
-                                 initargs=(shared,)) as ex:
-            results = list(ex.map(_anim_frame, items))  # map preserves grid/best order
-        for it, f in zip(items, results):
-            if f is None:
-                log.warning(f"  candidate #{it.index}: skipped (RS undersampled)")
-                continue
-            frames.append(f); frame_items.append(it); vmax = max(vmax, float(f.max()))
+    for it, (f, reason) in zip(items, results):
+        if f is None:
+            log.warning(f"  candidate #{it.index}: skipped ({reason})")
+            continue
+        frames.append(f); frame_items.append(it); vmax = max(vmax, float(f.max()))
     if not frames:
         log.warning("No frames to animate")
         return None

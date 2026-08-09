@@ -12,9 +12,7 @@ Only the phase is optimized (amplitude is held fixed), so the phase is what anim
 import argparse
 import json
 import logging
-import os
 from collections import namedtuple
-from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import coloredlogs
@@ -23,24 +21,17 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, FFMpegWriter, writers
 
 from rice_bend import rs
+from rice_bend.parallel import map_workers, worker_shared
 
 
-# Per-worker shared state for parallel scene-frame re-illumination (set by the pool
-# initializer so the read-only arrays are not re-pickled for every frame).
+# Read-only arrays handed to the frame tasks once per worker, rather than re-pickled
+# for every frame.
 _SceneAnimShared = namedtuple("_SceneAnimShared", "x amp phases z_axis wavelength tx_z")
-_SCENE_ANIM = None
-
-
-def _init_scene_anim_worker(shared: "_SceneAnimShared") -> None:
-    global _SCENE_ANIM
-    for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
-        os.environ.setdefault(var, "1")
-    _SCENE_ANIM = shared
 
 
 def _reilluminate_frame(k: int) -> np.ndarray:
-    """Re-illuminate the scene with the TX estimate at captured iteration k (worker task)."""
-    s = _SCENE_ANIM
+    """Re-illuminate the scene with the TX estimate at captured iteration k."""
+    s = worker_shared()
     u0 = s.amp * np.exp(1j * s.phases[k])
     return np.abs(rs.illuminate(s.x, s.z_axis, u0, s.wavelength, s.tx_z))
 
@@ -234,24 +225,15 @@ def animate_scene_reillumination(run_dir: Path, out_path: Path, fps: int = 15,
 
     log.info(f"Re-illuminating scene for {len(fsel)} frames over {len(z_axis)} z-planes "
              f"(frame_stride={frame_stride}, z_stride={z_stride})")
-    n_jobs = max(1, int(jobs))
-    if n_jobs == 1 or len(fsel) <= 1:
-        frames = []
-        for j, k in enumerate(fsel):
-            u0 = amp * np.exp(1j * phases[k])
-            frames.append(np.abs(rs.illuminate(x, z_axis, u0, wavelength, tx_z)))
-            if j % 10 == 0:
-                log.info(f"  propagated frame {j + 1}/{len(fsel)} (iteration {int(iters[k])})")
-    else:
-        # each frame's full-scene RS propagation is independent -> render across workers
-        n_workers = min(n_jobs, len(fsel))
-        log.info(f"  propagating {len(fsel)} frames across {n_workers} worker process(es)")
-        shared = _SceneAnimShared(x=x, amp=amp, phases=phases, z_axis=z_axis,
-                                  wavelength=wavelength, tx_z=tx_z)
-        with ProcessPoolExecutor(max_workers=n_workers, initializer=_init_scene_anim_worker,
-                                 initargs=(shared,)) as ex:
-            # map preserves input order, so frames line up with fsel
-            frames = list(ex.map(_reilluminate_frame, fsel))
+    # each frame's full-scene RS propagation is independent; results come back in
+    # input order, so frames line up with fsel whatever --jobs is.
+    shared = _SceneAnimShared(x=x, amp=amp, phases=phases, z_axis=z_axis,
+                              wavelength=wavelength, tx_z=tx_z)
+    frames = map_workers(
+        _reilluminate_frame, fsel, jobs=jobs, shared=shared, log=log,
+        on_done=lambda done, total, _f: (log.info(f"  propagated frame {done}/{total}")
+                                         if done % 10 == 1 else None),
+        desc=f"  propagating {len(fsel)} frames")
     vmax = max(float(f.max()) for f in frames)
 
     dpi = 100
