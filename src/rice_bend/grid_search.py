@@ -18,7 +18,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-import coloredlogs
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.animation import FuncAnimation
@@ -27,6 +26,7 @@ from matplotlib.colors import LogNorm, Normalize, SymLogNorm
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers the 3d projection)
 
 from rice_bend import rs
+from rice_bend.cli import setup_logging
 from rice_bend.config import (DEFAULT_CONFIG, AxisSweep, GridSearchConfig, SimConfig,
                               SimSceneConfig, load_config)
 from rice_bend.data_store import (c64, check_run_dir, f64, load_run_config, make_run_dir,
@@ -40,6 +40,13 @@ from rice_bend.sim_scene import SimAperature, sampled_axis
 # Tolerance for inclusive bounds checks, to absorb float round-off in the sweep
 # endpoints (e.g. an aperture edge landing exactly on the scene boundary).
 _BOUNDS_TOL = 1e-9
+
+# Demoted from CLI flags: never changed across 90 saved runs, and the tradeoff is
+# better documented next to the code than in --help.
+SCENE_Z_PLANES = 200      # z planes per re-illumination; lower = faster and coarser
+ANIM_FPS = 10             # candidate_beams.mp4 frame rate
+ANIM_TOP_DEFAULT = 100    # --anim holds every frame at once (see _anim_top)
+ANIM_WARN_FRAMES = 400
 
 
 # --------------------------------------------------------------------------- #
@@ -566,23 +573,28 @@ def plot_residual_heatmap(summary: ResidualSummary, out_path: Path,
 # --------------------------------------------------------------------------- #
 # Residual scatter summary (distribution of candidate residuals)
 # --------------------------------------------------------------------------- #
-def _candidate_points(summary: ResidualSummary):
-    """Flatten a ResidualSummary's loss grid into per-candidate arrays.
+def _candidate_points(z_values: np.ndarray, x_values: np.ndarray, grid: np.ndarray,
+                      real_z: float, real_x_center: float):
+    """Flatten a (z, x_center) grid into per-candidate arrays.
 
-    Returns (z, x_center, loss, dist) for every grid cell that was actually run
-    (finite residual). `dist` is the Euclidean distance in the (z, x_center) plane
-    from the candidate to the true TX location; z and x_center share units (metres),
-    so the distance is physically meaningful. enumerate_grid uses z-outer/x-inner
-    ordering, which is exactly meshgrid's "ij" indexing, so cells map back to the
-    correct (z, x_center) without float matching.
+    Returns (z, x_center, value, dist) for every cell that was actually run (finite
+    value). `dist` is the Euclidean distance in the (z, x_center) plane from the
+    candidate to the true TX; z and x_center share units (metres), so it is
+    physically meaningful. enumerate_grid uses z-outer/x-inner ordering, which is
+    exactly meshgrid's "ij" indexing, so cells map back without float matching.
+
+    Takes arrays rather than a ResidualSummary because the difference plots pass a
+    grid of loss DIFFERENCES. Handing it a summary forced them to fabricate one
+    carrying a difference grid and best=None, which meant a reader had to know that
+    a ResidualSummary sometimes holds losses and sometimes holds something else.
     """
-    zz, xx = np.meshgrid(summary.z_values, summary.x_values, indexing="ij")
-    finite = np.isfinite(summary.loss_grid)
+    zz, xx = np.meshgrid(z_values, x_values, indexing="ij")
+    finite = np.isfinite(grid)
     z = zz[finite]
     x = xx[finite]
-    loss = summary.loss_grid[finite]
-    dist = np.hypot(z - summary.real_tx_z, x - summary.real_tx_x_center)
-    return z, x, loss, dist
+    value = grid[finite]
+    dist = np.hypot(z - real_z, x - real_x_center)
+    return z, x, value, dist
 
 
 def plot_residual_scatter(summary: ResidualSummary, out_path: Path, *,
@@ -597,7 +609,9 @@ def plot_residual_scatter(summary: ResidualSummary, out_path: Path, *,
     variant — a log residual axis whose floor adapts to the data's own minimum
     (rounded down to a decade), spreading the lowest residuals apart.
     """
-    _, _, loss, dist = _candidate_points(summary)
+    _, _, loss, dist = _candidate_points(summary.z_values, summary.x_values,
+                                         summary.loss_grid, summary.real_tx_z,
+                                         summary.real_tx_x_center)
     fig, ax = plt.subplots(figsize=(9, 6), layout="constrained")
 
     if loss.size == 0:
@@ -655,7 +669,9 @@ def plot_residual_scatter_3d(summaries: List[Tuple[float, ResidualSummary]], out
     real_x = real_z = None
     for freq_hz, summary in summaries:
         f_ghz = freq_hz / 1e9
-        z, x, loss, _ = _candidate_points(summary)
+        z, x, loss, _ = _candidate_points(summary.z_values, summary.x_values,
+                                          summary.loss_grid, summary.real_tx_z,
+                                          summary.real_tx_x_center)
         if loss.size:
             # Cubic falloff: size collapses quickly as the residual (MSE) rises, so
             # high-MSE dots are tiny and the layers stay see-through.
@@ -939,7 +955,7 @@ def _render_scene_chunk(chunk: "List[CandidateScene]"):
     return acc, count, skipped
 
 
-def make_candidate_scenes(ctx: SceneContext, out_dir: Path, *, z_planes: int = 200,
+def make_candidate_scenes(ctx: SceneContext, out_dir: Path, *, z_planes: int = SCENE_Z_PLANES,
                           top: Optional[int] = None, average: bool = True, jobs: int = 1,
                           log: Optional[logging.Logger] = None) -> None:
     """Write one 4-panel PNG per candidate beam (scenes/cand_####.png) plus, by default, a
@@ -1034,7 +1050,7 @@ def _anim_frame(item: "CandidateScene"):
         return None, str(e)
 
 
-def animate_candidate_beams(ctx: SceneContext, out_path: Path, *, z_planes: int = 200,
+def animate_candidate_beams(ctx: SceneContext, out_path: Path, *, z_planes: int = SCENE_Z_PLANES,
                             top: Optional[int] = None, fps: int = 10, jobs: int = 1,
                             show: bool = False, log: Optional[logging.Logger] = None):
     """Animate the candidate beams: one frame per candidate re-illuminating the scene.
@@ -1158,10 +1174,8 @@ def plot_residual_scatter_3d_diff(summaries: List[Tuple[float, ResidualSummary]]
     real_x = real_z = None
     for f, s, d in diffs:
         f_ghz = f / 1e9
-        # Reuse the flattening helper on a summary carrying the difference grid.
-        tmp = ResidualSummary(s.z_values, s.x_values, d,
-                              s.real_tx_z, s.real_tx_x_center, None)
-        z, x, dval, _ = _candidate_points(tmp)
+        z, x, dval, _ = _candidate_points(s.z_values, s.x_values, d,
+                                          s.real_tx_z, s.real_tx_x_center)
         if dval.size:
             sizes = s_min + (np.abs(dval) / vlim) * (s_max - s_min)
             ax.scatter(x, z, np.full_like(x, f_ghz), c=dval, cmap=cmap, norm=norm,
@@ -1285,82 +1299,119 @@ def _emit_multifreq_plots(summaries: List[Tuple[float, ResidualSummary]],
     log.info(f"Wrote {len(summaries)} per-frequency vs-average comparison(s) (+hc) under {base_dir}")
 
 
+def _emit_scenes_and_anim(make_ctx, out_dir: Path, args, log) -> None:
+    """Per-candidate scenes and/or the candidate animation, if asked for.
+
+    `make_ctx` is a THUNK, not a SceneContext: scenes_from_manifest reads every
+    candidate npz (2304 of them on scenario_caustic_hit), so constructing one
+    eagerly only to discover that both flags are off would be a real regression.
+    """
+    if not (args.scenes or args.anim):
+        return
+    ctx = make_ctx()
+    if args.scenes:
+        make_candidate_scenes(ctx, out_dir, z_planes=SCENE_Z_PLANES,
+                              top=args.scene_top, jobs=args.jobs, log=log)
+    if args.anim:
+        animate_candidate_beams(ctx, out_dir / "candidate_beams.mp4",
+                                z_planes=SCENE_Z_PLANES, top=_anim_top(args, log),
+                                fps=ANIM_FPS, jobs=args.jobs, log=log)
+
+
+def _anim_top(args, log) -> Optional[int]:
+    """How many frames the animation may hold.
+
+    animate_candidate_beams must keep every frame resident to fix a shared colour
+    scale -- 2304 x 200 x 2400 float32 is 4.4 GB on scenario_caustic_hit -- so
+    --anim caps itself unless --scene-top says otherwise.
+    """
+    if args.scene_top is None:
+        log.info(f"--anim: animating the {ANIM_TOP_DEFAULT} lowest-residual candidates. "
+                 f"Every frame is held in memory at once to fix a shared colour scale; "
+                 f"pass --scene-top to choose a different cap.")
+        return ANIM_TOP_DEFAULT
+    if args.scene_top > ANIM_WARN_FRAMES:
+        log.warning(f"--anim with --scene-top {args.scene_top}: that is "
+                    f"{args.scene_top} full scene frames held in memory at once "
+                    f"(roughly {args.scene_top * SCENE_Z_PLANES * 2400 * 4 / 1e9:.1f} GB "
+                    f"at the default scene width).")
+    return args.scene_top
+
+
+def _emit_run_plots(summary: ResidualSummary, out_dir: Path, args, log, make_ctx) -> None:
+    """Everything one run directory gets.
+
+    One rule: the cheap manifest-only plots always run; anything that re-solves MGS
+    or renders per-candidate PNGs is opt-in. A fresh run and a --replot of it now
+    produce the same set of files, which was not true when --summary/--scatter
+    gated the fresh path and --replot ignored them.
+    """
+    _emit_heatmaps(summary, out_dir, log)
+    _emit_scatters(summary, out_dir, log)
+    if args.true_mgs:
+        # baseline MGS run at the KNOWN TX location: one full solve per run dir
+        make_true_mgs_plot(out_dir, log=log)
+    _emit_scenes_and_anim(make_ctx, out_dir, args, log)
+
+
 def _replot_one_dir(run_dir: Path, args, log) -> ResidualSummary:
-    """Regenerate one saved run dir's plots from disk: residual heatmap + scatter with
-    their high-contrast twins (cheap, manifest-only), the baseline true-MGS scene (one
-    full solve; skipped with --skip-true-mgs), and — when --scenes/--anim are set — the
-    per-candidate scenes/animation. Returns the ResidualSummary."""
+    """Regenerate one saved run directory's plots from disk."""
     run_dir = Path(run_dir)
     summary = summary_from_manifest(run_dir)
-    _emit_heatmaps(summary, run_dir, log)
-    _emit_scatters(summary, run_dir, log)
-    # Baseline single "true" MGS run at the known TX (recomputes one MGS solve).
-    if not args.skip_true_mgs:
-        make_true_mgs_plot(run_dir, log=log)
-    if args.scenes or args.anim:
-        ctx = scenes_from_manifest(run_dir)
-        if args.scenes:
-            make_candidate_scenes(ctx, run_dir, z_planes=args.scene_z_planes,
-                                  top=args.scene_top, jobs=args.jobs, log=log)
-        if args.anim:
-            animate_candidate_beams(ctx, run_dir / "candidate_beams.mp4",
-                                    z_planes=args.scene_z_planes, top=args.scene_top,
-                                    fps=args.fps, jobs=args.jobs, log=log)
+    _emit_run_plots(summary, run_dir, args, log, lambda: scenes_from_manifest(run_dir))
     return summary
 
 
-def _run_one_frequency(config: SimConfig, freq: float, make_out_dir, args, log):
-    """Run the whole sweep at one frequency, save it into make_out_dir(), emit its per-run
-    2D plots (and scenes/anim when requested), and return (run, ResidualSummary).
-
-    Used for both the single-frequency flat run and each layer of a multi-frequency run,
-    so the two paths stay behaviourally identical per frequency. `make_out_dir` is a
-    callable invoked only AFTER the sweep completes — creating (and clearing) the run
-    directory is deferred so an interrupted sweep leaves prior saved results intact.
-    """
-    run = run_grid_search(config, freq, limit=args.limit, jobs=args.jobs, log=log)
-    out_dir = make_out_dir()
+def _persist_and_plot(run: GridSearchRun, out_dir: Path, config: SimConfig,
+                      args, log) -> ResidualSummary:
+    """Save a finished sweep into out_dir and emit its plots."""
     save_grid_run(run, out_dir, config, args.config, vars(args))
     log.info(f"Saved {len(run.candidates)} candidate beam(s) to {out_dir}")
     summary = summary_from_run(run)
-    if args.summary:
-        _emit_heatmaps(summary, out_dir, log)
-    if args.scatter:
-        _emit_scatters(summary, out_dir, log)
-    if args.scenes or args.anim:
-        ctx = scenes_from_run(run)
-        if args.scenes:
-            make_candidate_scenes(ctx, out_dir, z_planes=args.scene_z_planes,
-                                  top=args.scene_top, jobs=args.jobs, log=log)
-        if args.anim:
-            animate_candidate_beams(ctx, out_dir / "candidate_beams.mp4",
-                                    z_planes=args.scene_z_planes, top=args.scene_top,
-                                    fps=args.fps, jobs=args.jobs, log=log)
-    return run, summary
+    _emit_run_plots(summary, out_dir, args, log, lambda: scenes_from_run(run))
+    return summary
 
 
-def main():
+def _dry_run(config: SimConfig, freqs: List[float], log) -> None:
+    """Enumerate the grid and print it, without running any MGS."""
+    # the enumeration depends on frequency only through the RS-undersampling check
+    if len(freqs) > 1:
+        log.info(f"Dry run: enumerating grid at {freqs[0] / 1e9:g} GHz "
+                 f"(of {len(freqs)} frequencies)")
+    points = enumerate_grid(config.grid_search, config.sim_scene, rs.wavelength(freqs[0]))
+    log.info(grid_summary(points))
+    for p in points:
+        if p.ok:
+            log.info(f"  #{p.index:4d} z={p.z:.3f} x_center={p.x_center:+.3f} "
+                     f"window [{p.x_min:.3f}, {p.x_max:.3f}]")
+        else:
+            log.warning(f"  #{p.index:4d} z={p.z:.3f} x_center={p.x_center:+.3f} "
+                        f"SKIP: {p.skip_reason}")
+
+
+def _parse_args():
+    """The CLI. Rule: the config says what the experiment IS; the CLI says what to do
+    with this invocation.
+
+    provenance.cli_args across 90 saved runs shows only --config, --run-name, --jobs,
+    --summary and --scatter were ever set, so the surface is 12 flags rather than 20:
+    --output-dir/--run-name merged into -o/--out; --seed and --max-iters dropped (every
+    shipped config sets them); --scene-z-planes and --fps demoted to module constants;
+    --summary/--scatter made unconditional; --no-save deleted; --skip-true-mgs inverted
+    to an opt-in --true-mgs.
+    """
     parser = argparse.ArgumentParser(
         description="Grid search over speculative TX locations, running MGS at each "
-                    "to emit candidate beams"
-    )
+                    "to emit candidate beams")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG,
                         help="Path to a simulation config .yml with a grid_search block")
+    parser.add_argument("--out", "-o", type=Path, default=None,
+                        help="Run directory to write into, named outright "
+                             "(default: <output.output_dir>/<output.run_name>)")
     parser.add_argument("--freq", "-f", type=float, nargs="+", default=None,
                         help="One or more frequencies in Hz (overrides config `frequencies`). "
                              "Multiple values run the whole sweep independently per frequency. "
                              "Default: config `frequencies`, else 150e9.")
-    parser.add_argument("--output-dir", type=Path, default=None,
-                        help="Override output.output_dir (base dir for the run folder)")
-    parser.add_argument("--run-name", type=str, default=None,
-                        help="Run directory name under output_dir (default: grid_search)")
-    parser.add_argument("--out", "-o", type=Path, default=None,
-                        help="Run directory to write this run into, named outright "
-                             "(overrides --output-dir + --run-name)")
-    parser.add_argument("--seed", type=int, default=None,
-                        help="Override grid_search.seed (fixed GS seed across candidates)")
-    parser.add_argument("--max-iters", type=int, default=None,
-                        help="Override grid_search.gs_overrides.max_iters for the sweep")
     parser.add_argument("--limit", type=int, default=None,
                         help="Only run the first N usable candidates (for quick tests)")
     parser.add_argument("--jobs", "-j", type=int, default=os.cpu_count(),
@@ -1369,46 +1420,36 @@ def main():
                              "identical regardless of value.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Enumerate the grid and print a summary without running MGS")
-    parser.add_argument("--no-save", action="store_true", help="Disable persistence")
-    parser.add_argument("--summary", action="store_true",
-                        help="Write a residual-vs-(z, x_center) heatmap (residual_heatmap.png)")
-    parser.add_argument("--scatter", action="store_true",
-                        help="Write a residual-vs-distance-to-true-TX scatter plot (residual_scatter.png)")
     parser.add_argument("--replot", type=Path, default=None,
-                        help="Re-plot the residual heatmap from a saved run dir, then exit")
-    parser.add_argument("--skip-true-mgs", action="store_true",
-                        help="[replot] skip recomputing the true-MGS baseline scene "
-                             "(a full MGS solve per run dir); existing plots are left as-is")
+                        help="Re-plot a saved run dir (single- or multi-frequency), then exit")
+    parser.add_argument("--true-mgs", action="store_true",
+                        help="Also recompute the baseline MGS run at the KNOWN TX location "
+                             "(true_mgs_scene.png) -- one full MGS solve per run dir")
     parser.add_argument("--scenes", action="store_true",
-                        help="Render one PNG per candidate beam (scenes/) plus an averaged scene (scene_average.png)")
+                        help="Render one PNG per candidate beam (scenes/) plus an averaged scene")
     parser.add_argument("--scene-top", type=int, default=None,
-                        help="[scenes] only render the N lowest-residual candidates")
-    parser.add_argument("--scene-z-planes", type=int, default=200,
-                        help="[scenes/anim] z-planes per re-illumination (lower = faster/coarser)")
+                        help="[scenes/anim] only render the N lowest-residual candidates "
+                             f"(--anim defaults to {ANIM_TOP_DEFAULT})")
     parser.add_argument("--anim", action="store_true",
-                        help="Animate the candidate beams to candidate_beams.mp4 (one frame per candidate, ffmpeg)")
-    parser.add_argument("--fps", type=int, default=10, help="[anim] frames per second")
+                        help="Animate the candidate beams to candidate_beams.mp4 (ffmpeg)")
     parser.add_argument("--debug", action="store_true", help="Enable debug logs")
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    level = "DEBUG" if args.debug else "INFO"
-    coloredlogs.install(level=level, fmt="%(levelname)s: %(message)s")
-    log = logging.getLogger()
+
+def main():
+    args = _parse_args()
+    log = setup_logging(args.debug)
 
     if args.replot is not None:
         base = Path(args.replot)
         freq_index = load_frequencies_index(base)
-        if freq_index is not None:
-            # Multi-frequency run: replot every per-frequency subdir, then the
-            # top-level frequency-averaged heatmap + 3D scatter (each with hc twins).
-            summaries = []
-            for entry in freq_index["frequencies"]:
-                sub = base / entry["dir"]
-                summaries.append((float(entry["freq_hz"]), _replot_one_dir(sub, args, log)))
-            _emit_multifreq_plots(summaries, base, log)
+        if freq_index is None:
+            _replot_one_dir(base, args, log)          # single-frequency (flat) run
             return
-        # Single-frequency (flat) run.
-        _replot_one_dir(base, args, log)
+        # multi-frequency: every per-frequency subdir, then the top-level plots
+        summaries = [(float(e["freq_hz"]), _replot_one_dir(base / e["dir"], args, log))
+                     for e in freq_index["frequencies"]]
+        _emit_multifreq_plots(summaries, base, log)
         return
 
     config = load_config(args.config)
@@ -1416,83 +1457,43 @@ def main():
         log.error(f"Config {args.config} has no `grid_search` block")
         raise SystemExit(2)
 
-    # CLI overrides onto the config
-    if args.seed is not None:
-        config.grid_search.seed = args.seed
-    if args.max_iters is not None:
-        config.grid_search.gs_overrides.max_iters = args.max_iters
-    if args.output_dir is not None:
-        config.output.output_dir = args.output_dir
-    run_name = args.run_name or config.output.run_name or "grid_search"
+    run_name = config.output.run_name or "grid_search"
     if args.out is not None:
         config.output.output_dir = Path(args.out).parent
         run_name = Path(args.out).name
     freqs = _resolve_frequencies(config, args.freq)
 
     if args.dry_run:
-        # The grid enumeration only depends on frequency via the RS-undersampling check;
-        # report at the first frequency (the others differ only in that check).
-        if len(freqs) > 1:
-            log.info(f"Dry run: enumerating grid at {freqs[0] / 1e9:g} GHz "
-                     f"(of {len(freqs)} frequencies)")
-        wavelength = rs.wavelength(freqs[0])
-        points = enumerate_grid(config.grid_search, config.sim_scene, wavelength)
-        log.info(grid_summary(points))
-        for p in points:
-            if p.ok:
-                log.info(f"  #{p.index:4d} z={p.z:.3f} x_center={p.x_center:+.3f} "
-                         f"window [{p.x_min:.3f}, {p.x_max:.3f}]")
-            else:
-                log.warning(f"  #{p.index:4d} z={p.z:.3f} x_center={p.x_center:+.3f} "
-                            f"SKIP: {p.skip_reason}")
+        _dry_run(config, freqs, log)
         return
 
-    persist = not (args.no_save or not config.output.save_run)
-    if persist or len(freqs) > 1:
-        # Fail fast on a run-directory collision: make_run_dir is deferred until after
-        # the sweep, so without this the clash surfaces only once the compute is spent.
-        check_run_dir(config.output.output_dir, run_name, kind="grid")
+    # Fail fast on a run-directory collision: the directory is created only once the
+    # sweep has finished, so without this the clash surfaces after hours of compute.
+    check_run_dir(config.output.output_dir, run_name, kind="grid")
 
     if len(freqs) == 1:
-        # Single frequency: original flat layout (results/<run_name>/...).
-        freq = freqs[0]
-        if not persist:
-            log.info("Persistence disabled; not writing candidates")
-            run = run_grid_search(config, freq, limit=args.limit, jobs=args.jobs, log=log)
-            summary = summary_from_run(run)
-            if args.summary:
-                _emit_heatmaps(summary, Path("."), log)
-            if args.scatter:
-                _emit_scatters(summary, Path("."), log)
-            if args.scenes or args.anim:
-                ctx = scenes_from_run(run)
-                if args.scenes:
-                    make_candidate_scenes(ctx, Path("."), z_planes=args.scene_z_planes,
-                                          top=args.scene_top, jobs=args.jobs, log=log)
-                if args.anim:
-                    animate_candidate_beams(ctx, Path("candidate_beams.mp4"),
-                                            z_planes=args.scene_z_planes, top=args.scene_top,
-                                            fps=args.fps, jobs=args.jobs, log=log)
-            return
-        _run_one_frequency(config, freq,
-                           lambda: make_run_dir(config.output.output_dir, run_name,
-                                                kind="grid"),
-                           args, log)
+        # single frequency keeps the flat layout: results/<run_name>/...
+        run = run_grid_search(config, freqs[0], limit=args.limit, jobs=args.jobs, log=log)
+        out_dir = make_run_dir(config.output.output_dir, run_name, kind="grid")
+        _persist_and_plot(run, out_dir, config, args, log)
         return
 
-    # Multiple frequencies: one full sweep per frequency into results/<run_name>/freq_<GHz>/,
-    # then a top-level 3D residual scatter aggregating them.
-    if not persist:
-        log.warning("Multi-frequency runs require saving; --no-save / save_run=false is ignored")
     base_path = Path(config.output.output_dir) / run_name
     log.info(f"Multi-frequency run: {len(freqs)} frequencies "
              f"({', '.join(f'{f / 1e9:g}' for f in freqs)} GHz) -> {base_path}")
-    # The base dir is created (clearing any previous run) only when the FIRST sweep
-    # finishes, and each freq subdir only after its own sweep — so an interrupted run
-    # never destroys prior results without producing new ones.
+
     base: Optional[Path] = None
 
     def _get_base() -> Path:
+        """The multi-frequency base directory, created (and cleared) exactly once.
+
+        Both halves are load-bearing. Deferring the creation to the first COMPLETED
+        sweep means an interrupted run never destroys prior results without
+        producing new ones. Memoizing it means the second frequency does not rmtree
+        the freq_140GHz directory just written -- and clearing it at all is what
+        stops a re-run with a shorter frequency list from leaving a stale
+        freq_<GHz> dir beside an average computed from a different sweep.
+        """
         nonlocal base
         if base is None:
             base = make_run_dir(config.output.output_dir, run_name, kind="grid")
@@ -1502,10 +1503,9 @@ def main():
     real_x = real_z = 0.0
     for freq in freqs:
         log.info(f"=== frequency {freq / 1e9:g} GHz ===")
-        run, summary = _run_one_frequency(
-            config, freq,
-            lambda f=freq: make_run_dir(_get_base(), _freq_dir_name(f), kind="grid"),
-            args, log)
+        run = run_grid_search(config, freq, limit=args.limit, jobs=args.jobs, log=log)
+        out_dir = make_run_dir(_get_base(), _freq_dir_name(freq), kind="grid")
+        summary = _persist_and_plot(run, out_dir, config, args, log)
         entries.append({"freq_hz": float(freq), "wavelength_m": float(run.wavelength),
                         "dir": _freq_dir_name(freq)})
         summaries.append((freq, summary))
