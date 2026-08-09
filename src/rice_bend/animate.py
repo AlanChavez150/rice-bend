@@ -81,6 +81,9 @@ def _aligned_reference_phase(x_axis, support, amp, final_phase, tx_axis, tx_prof
     """Interpolate the real TX onto x_axis and rotate by a global phase so its
     convention matches the recovered estimate (phase retrieval has a global-phase
     ambiguity). Returns unwrapped phase masked outside the aperture, or None."""
+    # np.interp (not interp.interp_real_imag): the two disagree at ULP level, and this
+    # one's edge clamp is inert anyway -- `real` is only ever read at [support], and
+    # support lies inside the TX aperture extent, so the clamped tail is never used.
     real = np.interp(x_axis, tx_axis, tx_profile.real) + 1j * np.interp(x_axis, tx_axis, tx_profile.imag)
     est_final = amp * np.exp(1j * final_phase)
     overlap = np.sum(np.conj(est_final[support]) * real[support])

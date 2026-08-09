@@ -34,7 +34,8 @@ from rice_bend.animate import _write_mp4
 from rice_bend.config import (DEFAULT_CONFIG, AxisSweep, GridSearchConfig, SimConfig,
                               SimSceneConfig, load_config)
 from rice_bend.data_store import _c64, _f64, _json_safe, check_run_dir, make_run_dir
-from rice_bend.mgs import MGS, gs_reconstruct, interp_complex_to_axis
+from rice_bend.interp import interp_amp_phase
+from rice_bend.mgs import MGS, gs_reconstruct
 from rice_bend.sim_scene import SimAperature
 
 # Tolerance for inclusive bounds checks, to absorb float round-off in the sweep
@@ -136,7 +137,7 @@ def _reconstruct_candidate(p: "GridPoint", shared: "SharedMeasurement") -> "Cand
         wavelength=shared.wavelength, params=shared.params,
         capture=False, log=None,
     )
-    aper_profile = interp_complex_to_axis(x_axis, result.curr_aper_f, hyp.aper_axis)
+    aper_profile = interp_amp_phase(x_axis, result.curr_aper_f, hyp.aper_axis)
     return CandidateResult(
         point=p,
         aper_axis=hyp.aper_axis.copy(),
@@ -829,6 +830,11 @@ def _reilluminate(x_axis: np.ndarray, z_axis: np.ndarray, aper_axis: np.ndarray,
     # zero-fill beyond the aperture extent. np.interp clamps to the edge values by
     # default, which would smear a spurious ~unit-amplitude source across the whole
     # scene (energy from outside the aperture); match MGS run_sim's fill_value=0.
+    #
+    # Deliberately np.interp and not interp.interp_real_imag: the two disagree at ULP
+    # level (1.3e-7 on complex64), and this is the only thing keeping --replot
+    # --scenes/--anim working on saved runs whose npz holds a 400-point aper_axis
+    # against a 2400-point scene.
     ap = (np.interp(x_axis, aper_axis, aper_profile.real, left=0.0, right=0.0)
           + 1j * np.interp(x_axis, aper_axis, aper_profile.imag, left=0.0, right=0.0))
     field = np.abs(rs.rs(x_axis, z_axis, ap, wavelength, z_src=tx_z, forward_dir=-1.0))

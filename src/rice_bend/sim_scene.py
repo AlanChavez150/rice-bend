@@ -43,30 +43,6 @@ class SimAperature():
         phase = -1.0  * k * self.aper_axis * np.sin(theta_rad)
         self.aper_profile = 1.0 * np.exp(1j * phase)
 
-    def interp_axis(self, new_axis: np.ndarray, assume_sorted: bool = True):
-        """
-        Interpolates the current aperature onto a different x axis.
-
-        Amplitude and phase interpolated seperately
-        """
-        ampl_interp_func = scipy.interpolate.interp1d(
-            self.aper_axis,
-            np.abs(self.aper_profile),
-            kind="linear",
-            fill_value=0,
-            bounds_error=False,
-            assume_sorted=assume_sorted
-        )
-        phs_interp_func = scipy.interpolate.interp1d(
-            self.aper_axis,
-            np.angle(self.aper_profile),
-            kind="linear",
-            fill_value=0,
-            bounds_error=False,
-            assume_sorted=assume_sorted
-        )
-        return ampl_interp_func(new_axis) * np.exp(1j * phs_interp_func(new_axis))
-
 class SimScene():
     """
     Simple class used to keep track of the parameters of the simulation.

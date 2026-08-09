@@ -1,7 +1,8 @@
 import numpy as np
 import scipy.integrate
 import scipy.constants
-import scipy.interpolate
+
+from rice_bend.interp import interp_amp_phase
 
 def generate_aperature(
         freq: float,
@@ -30,25 +31,8 @@ def generate_aperature(
     phi = np.flip(scipy.integrate.cumulative_trapezoid(dphi_dy_sorted, x_sorted, initial=0))
     aper = 1.0 * np.exp(1j * phi)
 
-    # interpolate from cuastic x axis to provided x axis
-    ampl_interp_func = scipy.interpolate.interp1d(
-        x_caustic,
-        np.abs(aper),
-        kind="linear",
-        fill_value=0,
-        bounds_error=False,
-        assume_sorted=False
-    )
-    phs_interp_func = scipy.interpolate.interp1d(
-        x_caustic,
-        np.angle(aper),
-        kind="linear",
-        fill_value=0,
-        bounds_error=False,
-        assume_sorted=False
-    )
-
-    aper_interp = ampl_interp_func(x_axis) * np.exp(1j * phs_interp_func(x_axis))
-    return aper_interp
+    # interpolate from caustic x axis to provided x axis. x_caustic is not sorted
+    # (it comes out of the trajectory, not a grid), hence assume_sorted=False.
+    return interp_amp_phase(x_caustic, aper, x_axis, assume_sorted=False)
 
 
