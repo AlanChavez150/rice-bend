@@ -12,7 +12,6 @@ import argparse
 import json
 import logging
 import os
-import shutil
 import warnings
 from collections import namedtuple
 from dataclasses import dataclass
@@ -27,11 +26,11 @@ from matplotlib.cm import ScalarMappable
 from matplotlib.colors import LogNorm, Normalize, SymLogNorm
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers the 3d projection)
 
-from rice_bend import __version__, rs
-from rice_bend.animate import _write_mp4
+from rice_bend import rs
 from rice_bend.config import (DEFAULT_CONFIG, AxisSweep, GridSearchConfig, SimConfig,
                               SimSceneConfig, load_config)
-from rice_bend.data_store import _c64, _f64, _json_safe, check_run_dir, make_run_dir
+from rice_bend.data_store import (c64, check_run_dir, f64, load_run_config, make_run_dir,
+                                  provenance, save_config_snapshot, write_json, write_mp4)
 from rice_bend.interp import interp_amp_phase
 from rice_bend.parallel import map_workers, round_robin_chunks, worker_shared
 from rice_bend.mgs import MGS, gs_reconstruct
@@ -295,13 +294,13 @@ def save_grid_run(run: GridSearchRun, run_dir: Path, config: SimConfig,
     # shared measurement (saved once)
     np.savez_compressed(
         run_dir / "measurement.npz",
-        scene_x_axis=_f64(run.scene_x_axis),
-        rx_field=_c64(run.rx_field),
-        error_weighting=_f64(run.error_weighting),
-        rx_aper_axis=_f64(run.rx_aper_axis),
-        rx_aper_profile=_c64(run.rx_aper_profile),
-        real_tx_aper_axis=_f64(run.real_tx_aper_axis),
-        real_tx_aper_profile=_c64(run.real_tx_aper_profile),
+        scene_x_axis=f64(run.scene_x_axis),
+        rx_field=c64(run.rx_field),
+        error_weighting=f64(run.error_weighting),
+        rx_aper_axis=f64(run.rx_aper_axis),
+        rx_aper_profile=c64(run.rx_aper_profile),
+        real_tx_aper_axis=f64(run.real_tx_aper_axis),
+        real_tx_aper_profile=c64(run.real_tx_aper_profile),
     )
 
     ground_truth = {
@@ -315,8 +314,8 @@ def save_grid_run(run: GridSearchRun, run_dir: Path, config: SimConfig,
         name = f"cand_{cand.point.index:04d}"
         np.savez_compressed(
             cand_dir / f"{name}.npz",
-            aper_axis=_f64(cand.aper_axis),
-            aper_profile=_c64(cand.aper_profile),
+            aper_axis=f64(cand.aper_axis),
+            aper_profile=c64(cand.aper_profile),
             loss_full=np.asarray(cand.loss_full, dtype=np.float32),
         )
         cmeta = {
@@ -331,8 +330,7 @@ def save_grid_run(run: GridSearchRun, run_dir: Path, config: SimConfig,
             "ground_truth": ground_truth,
             "npz": f"{name}.npz",
         }
-        with open(cand_dir / f"{name}.json", "w") as f:
-            json.dump(cmeta, f, indent=2, default=_json_safe)
+        write_json(cand_dir / f"{name}.json", cmeta)
         cand_entries.append({
             "index": cand.point.index, "z": cand.point.z, "x_center": cand.point.x_center,
             "x_min": cand.point.x_min, "x_max": cand.point.x_max,
@@ -362,26 +360,14 @@ def save_grid_run(run: GridSearchRun, run_dir: Path, config: SimConfig,
                          "z_min": run.scene_bounds[2], "z_max": run.scene_bounds[3]},
         "ground_truth": ground_truth,
         "gs": {"effective_max_iters": run.effective_max_iters},
-        "provenance": {
-            "cli_args": {k: (str(v) if isinstance(v, Path) else v)
-                         for k, v in (args_dict or {}).items()},
-            "package_version": __version__,
-        },
+        "provenance": provenance(args_dict),
         "counts": {"total": len(run.grid_points), "usable": n_usable,
                    "ran": len(run.candidates), "skipped": len(skipped_entries)},
         "candidates": cand_entries,
         "skipped": skipped_entries,
     }
-    with open(run_dir / "candidate_beams.json", "w") as f:
-        json.dump(manifest, f, indent=2, default=_json_safe)
-
-    # config snapshots: effective (defaults filled) + raw source (preserves comments)
-    with open(run_dir / "config_snapshot.json", "w") as f:
-        json.dump(config.model_dump(mode="json"), f, indent=2, default=_json_safe)
-    try:
-        shutil.copyfile(config_path, run_dir / "config_source.yml")
-    except (OSError, TypeError):
-        pass
+    write_json(run_dir / "candidate_beams.json", manifest)
+    save_config_snapshot(run_dir, config, config_path)
 
     logging.getLogger().info(f"Saved grid run to {run_dir}")
 
@@ -517,16 +503,13 @@ def write_frequencies_index(base_dir: Path, entries: List[dict],
 
     `entries` is a list of {freq_hz, wavelength_m, dir} dicts (one per frequency).
     """
-    out = Path(base_dir) / FREQ_INDEX_NAME
     payload = {
         "schema_version": 1,
         "frequencies": entries,
         "ground_truth": {"real_tx_z": float(real_tx_z),
                          "real_tx_x_center": float(real_tx_x_center)},
     }
-    with open(out, "w") as f:
-        json.dump(payload, f, indent=2)
-    return out
+    return write_json(Path(base_dir) / FREQ_INDEX_NAME, payload)
 
 
 def load_frequencies_index(base_dir: Path) -> Optional[dict]:
@@ -712,21 +695,6 @@ def plot_residual_scatter_3d(summaries: List[Tuple[float, ResidualSummary]], out
 # --------------------------------------------------------------------------- #
 # Single "true" MGS run (baseline reconstruction at the KNOWN TX location)
 # --------------------------------------------------------------------------- #
-def _load_run_config(run_dir: Path, log: logging.Logger) -> Optional[SimConfig]:
-    """Load a saved run's config: prefer the verbatim source .yml, fall back to the
-    effective snapshot JSON. Returns None if neither is present."""
-    src = run_dir / "config_source.yml"
-    if src.exists():
-        return load_config(src)
-    snap = run_dir / "config_snapshot.json"
-    if snap.exists():
-        with open(snap) as f:
-            return SimConfig.model_validate(json.load(f))
-    log.warning(f"No config_source.yml/config_snapshot.json in {run_dir}; "
-                "cannot build the true MGS run")
-    return None
-
-
 def make_true_mgs_plot(run_dir: Path, log: Optional[logging.Logger] = None) -> Optional[Path]:
     """Reconstruct + plot the single "true" MGS run for a saved grid run.
 
@@ -744,7 +712,7 @@ def make_true_mgs_plot(run_dir: Path, log: Optional[logging.Logger] = None) -> O
     with open(run_dir / "candidate_beams.json") as f:
         manifest = json.load(f)
     freq = float(manifest["freq_hz"])
-    config = _load_run_config(run_dir, log)
+    config = load_run_config(run_dir, log)
     if config is None:
         return None
 
@@ -1130,7 +1098,7 @@ def animate_candidate_beams(ctx: SceneContext, out_path: Path, *, z_planes: int 
         return [im, tx_scatter]
 
     anim = FuncAnimation(fig, update, frames=len(frames), blit=False)
-    return _write_mp4(anim, fig, out_path, fps, dpi, show, log)
+    return write_mp4(anim, fig, out_path, fps, dpi, show, log)
 
 
 # --------------------------------------------------------------------------- #

@@ -1,8 +1,13 @@
-"""Persistence of MGS runs: per-run directory with numeric arrays (.npz),
-scalar metadata (.json), config snapshots, and a copy of the scene plot.
+"""Run persistence: the per-run directory, its numeric arrays (.npz), its scalar
+metadata (.json), the config snapshots, and the small I/O helpers both entry points
+share.
 
-Storage split: all numeric arrays (including complex) live in run.npz; only
-JSON-safe scalars (no complex, no numpy types) live in run.json.
+Storage split: all numeric arrays (including complex) live in the .npz; only
+JSON-safe scalars (no complex, no numpy types) live in the .json.
+
+The helpers below are public because grid_search needs them too. They used to be
+underscore-private here, reached across a command boundary -- a reliable signal that
+the layering was wrong rather than that the names should stay private.
 """
 
 import json
@@ -15,6 +20,7 @@ from typing import List, Optional
 import numpy as np
 
 from rice_bend import __version__
+from rice_bend.config import SimConfig, load_config
 
 
 @dataclass
@@ -137,7 +143,7 @@ def make_run_dir(output_base: Path, run_name: Optional[str], kind: str) -> Path:
     return run_dir
 
 
-def _json_safe(obj):
+def json_safe(obj):
     """default= hook for json.dump. Casts numpy scalars to python; rejects complex."""
     if isinstance(obj, (np.integer,)):
         return int(obj)
@@ -154,11 +160,89 @@ def _json_safe(obj):
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
-def _c64(a: np.ndarray) -> np.ndarray:
+def write_json(path: Path, obj) -> Path:
+    """Write `obj` as indented JSON through the json_safe hook.
+
+    Six sites spelled this line out, and write_frequencies_index silently omitted
+    `default=` -- it worked only because its caller float()-cast everything first.
+    """
+    with open(path, "w") as f:
+        json.dump(obj, f, indent=2, default=json_safe)
+    return Path(path)
+
+
+def provenance(args_dict: dict, **extra) -> dict:
+    """The provenance block every run manifest carries: the CLI invocation that
+    produced it and the package version."""
+    out = {
+        "cli_args": {k: (str(v) if isinstance(v, Path) else v)
+                     for k, v in (args_dict or {}).items()},
+        "package_version": __version__,
+    }
+    out.update(extra)
+    return out
+
+
+def save_config_snapshot(run_dir: Path, config, config_path: Path) -> None:
+    """Write both config snapshots: the effective one (defaults filled in) and a
+    verbatim copy of the source .yml, which preserves comments."""
+    write_json(Path(run_dir) / "config_snapshot.json", config.model_dump(mode="json"))
+    try:
+        shutil.copyfile(config_path, Path(run_dir) / "config_source.yml")
+    except (OSError, TypeError):
+        pass
+
+
+def load_run_config(run_dir: Path, log: logging.Logger) -> Optional[SimConfig]:
+    """Read a saved run's config back: prefer the verbatim source .yml, fall back to
+    the effective snapshot JSON. None if neither is present.
+
+    This is the reader for the format save_config_snapshot writes; the two halves
+    used to live in different modules.
+    """
+    run_dir = Path(run_dir)
+    src = run_dir / "config_source.yml"
+    if src.exists():
+        return load_config(src)
+    snap = run_dir / "config_snapshot.json"
+    if snap.exists():
+        with open(snap) as f:
+            return SimConfig.model_validate(json.load(f))
+    log.warning(f"No config_source.yml/config_snapshot.json in {run_dir}; "
+                "cannot build the true MGS run")
+    return None
+
+
+def write_mp4(anim, fig, out_path: Path, fps: int, dpi: int, show: bool, log) -> Path:
+    """Render a matplotlib animation to .mp4 via ffmpeg, then close the figure.
+
+    matplotlib is imported inside the function on purpose: this module is also the
+    persistence layer for the numeric sweep, which must stay importable without
+    dragging in FuncAnimation and mpl_toolkits.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.animation import FFMpegWriter, writers
+
+    if not writers.is_available("ffmpeg"):
+        raise RuntimeError(
+            "ffmpeg is not available — install it (e.g. `apt install ffmpeg`) to render .mp4 animations."
+        )
+    out_path = Path(out_path).with_suffix(".mp4")
+    writer = FFMpegWriter(fps=fps)
+    log.info(f"Writing animation to {out_path} ({fps} fps)")
+    anim.save(out_path, writer=writer, dpi=dpi)
+
+    if show:
+        plt.show()
+    plt.close(fig)
+    return out_path
+
+
+def c64(a: np.ndarray) -> np.ndarray:
     return np.asarray(a, dtype=np.complex64)
 
 
-def _f64(a: np.ndarray) -> np.ndarray:
+def f64(a: np.ndarray) -> np.ndarray:
     return np.asarray(a, dtype=np.float64)
 
 
@@ -169,37 +253,37 @@ def _collect_arrays(mgs) -> dict:
     gs_tx = mgs.gs_tx
 
     # apertures / axes (always)
-    out["tx_real_aper_axis"] = _f64(scene.tx_ap.aper_axis)
-    out["tx_real_aper_profile"] = _c64(scene.tx_ap.aper_profile)
-    out["rx_aper_axis"] = _f64(scene.rx_ap.aper_axis)
-    out["rx_aper_profile"] = _c64(scene.rx_ap.aper_profile)
-    out["gs_tx_aper_axis"] = _f64(gs_tx.aper_axis)
-    out["gs_tx_aper_profile"] = _c64(gs_tx.aper_profile)
+    out["tx_real_aper_axis"] = f64(scene.tx_ap.aper_axis)
+    out["tx_real_aper_profile"] = c64(scene.tx_ap.aper_profile)
+    out["rx_aper_axis"] = f64(scene.rx_ap.aper_axis)
+    out["rx_aper_profile"] = c64(scene.rx_ap.aper_profile)
+    out["gs_tx_aper_axis"] = f64(gs_tx.aper_axis)
+    out["gs_tx_aper_profile"] = c64(gs_tx.aper_profile)
 
     # gradient-descent history
     hist = mgs.gs_history
     if hist is not None:
-        out["x_axis"] = _f64(hist.x_axis)
-        out["gs_target_rx_field"] = _c64(hist.orig_prop_f)
-        out["gs_fixed_aper_amp"] = _f64(hist.orig_aper_amp)
-        out["gs_error_weighting"] = _f64(hist.error_weighting)
+        out["x_axis"] = f64(hist.x_axis)
+        out["gs_target_rx_field"] = c64(hist.orig_prop_f)
+        out["gs_fixed_aper_amp"] = f64(hist.orig_aper_amp)
+        out["gs_error_weighting"] = f64(hist.error_weighting)
         out["gs_support"] = np.asarray(hist.support, dtype=bool)
-        out["gs_initial_phase"] = _f64(hist.initial_phase)
+        out["gs_initial_phase"] = f64(hist.initial_phase)
         out["gs_loss_full"] = np.asarray(hist.loss_full, dtype=np.float32)
         if mgs.output_cfg.save_gs_history and len(hist.iter_indices) > 0:
             out["gs_iter_indices"] = np.asarray(hist.iter_indices, dtype=np.int64)
             out["gs_loss_captured"] = np.asarray(hist.loss_captured, dtype=np.float32)
             out["gs_phase_captured"] = np.asarray(hist.phase_captured, dtype=np.float32)
-            out["gs_prop_field_captured"] = _c64(np.asarray(hist.prop_field_captured))
+            out["gs_prop_field_captured"] = c64(np.asarray(hist.prop_field_captured))
 
     # scene axes are always saved (cheap, 1D) so a run can be re-illuminated later
-    out["scene_x_axis"] = _f64(scene.x_axis)
-    out["scene_z_axis"] = _f64(scene.z_axis)
+    out["scene_x_axis"] = f64(scene.x_axis)
+    out["scene_z_axis"] = f64(scene.z_axis)
 
     # large 2D scene fields (opt-in)
     if mgs.output_cfg.save_scene_fields:
-        out["scene_data"] = _c64(scene.data)
-        out["gs_rec_scene_data"] = _c64(mgs.gs_rec_scene.data)
+        out["scene_data"] = c64(scene.data)
+        out["gs_rec_scene_data"] = c64(mgs.gs_rec_scene.data)
 
     return out
 
@@ -218,12 +302,7 @@ def _collect_metadata(mgs, run_dir: Path, freq: float,
         "is_experimental": bool(is_exp),
         "freq_hz": float(freq),
         "wavelength_m": float(getattr(mgs, "wavelength", float("nan"))),
-        "provenance": {
-            "cli_args": {k: (str(v) if isinstance(v, Path) else v)
-                         for k, v in (args_dict or {}).items()},
-            "package_version": __version__,
-            "plot_filename": Path(mgs.plot_path).name,
-        },
+        "provenance": provenance(args_dict, plot_filename=Path(mgs.plot_path).name),
         "gerchberg_saxton": {
             "max_iters": gs_cfg.max_iters,
             "convergence_count": gs_cfg.convergence_count,
@@ -271,16 +350,8 @@ def save_run(mgs, run_dir: Path, config, config_path: Path, freq: float,
 
     meta = _collect_metadata(mgs, run_dir, freq, args_dict, is_exp,
                              list(arrays.keys()))
-    with open(run_dir / "run.json", "w") as f:
-        json.dump(meta, f, indent=2, default=_json_safe)
-
-    # config snapshots: effective (defaults filled) + raw source (preserves comments)
-    with open(run_dir / "config_snapshot.json", "w") as f:
-        json.dump(config.model_dump(mode="json"), f, indent=2, default=_json_safe)
-    try:
-        shutil.copyfile(config_path, run_dir / "config_source.yml")
-    except (OSError, TypeError):
-        pass
+    write_json(run_dir / "run.json", meta)
+    save_config_snapshot(run_dir, config, config_path)
 
     # copy the scene plot in if it was written
     plot_path = Path(mgs.plot_path)
