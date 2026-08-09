@@ -32,7 +32,7 @@ from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers the 3d project
 from rice_bend import __version__, rs
 from rice_bend.animate import _write_mp4
 from rice_bend.config import AxisSweep, GridSearchConfig, SimConfig, SimSceneConfig, load_config
-from rice_bend.data_store import _c64, _f64, _json_safe, make_run_dir
+from rice_bend.data_store import _c64, _f64, _json_safe, check_run_dir, make_run_dir
 from rice_bend.mgs import MGS, gs_params_from_cfg, gs_reconstruct, interp_complex_to_axis
 from rice_bend.sim_scene import SimAperature
 
@@ -1456,6 +1456,9 @@ def main():
                         help="Override output.output_dir (base dir for the run folder)")
     parser.add_argument("--run-name", type=str, default=None,
                         help="Run directory name under output_dir (default: grid_search)")
+    parser.add_argument("--out", "-o", type=Path, default=None,
+                        help="Run directory to write this run into, named outright "
+                             "(overrides --output-dir + --run-name)")
     parser.add_argument("--seed", type=int, default=None,
                         help="Override grid_search.seed (fixed GS seed across candidates)")
     parser.add_argument("--max-iters", type=int, default=None,
@@ -1523,6 +1526,9 @@ def main():
     if args.output_dir is not None:
         config.output.output_dir = args.output_dir
     run_name = args.run_name or config.output.run_name or "grid_search"
+    if args.out is not None:
+        config.output.output_dir = Path(args.out).parent
+        run_name = Path(args.out).name
     freqs = _resolve_frequencies(config, args.freq)
 
     if args.dry_run:
@@ -1544,6 +1550,10 @@ def main():
         return
 
     persist = not (args.no_save or not config.output.save_run)
+    if persist or len(freqs) > 1:
+        # Fail fast on a run-directory collision: make_run_dir is deferred until after
+        # the sweep, so without this the clash surfaces only once the compute is spent.
+        check_run_dir(config.output.output_dir, run_name, kind="grid")
 
     if len(freqs) == 1:
         # Single frequency: original flat layout (results/<run_name>/...).
@@ -1567,7 +1577,8 @@ def main():
                                             fps=args.fps, jobs=args.jobs, log=log)
             return
         _run_one_frequency(config, freq,
-                           lambda: make_run_dir(config.output.output_dir, run_name),
+                           lambda: make_run_dir(config.output.output_dir, run_name,
+                                                kind="grid"),
                            args, log)
         return
 
@@ -1586,7 +1597,7 @@ def main():
     def _get_base() -> Path:
         nonlocal base
         if base is None:
-            base = make_run_dir(config.output.output_dir, run_name)
+            base = make_run_dir(config.output.output_dir, run_name, kind="grid")
         return base
 
     entries, summaries = [], []
@@ -1594,7 +1605,8 @@ def main():
     for freq in freqs:
         log.info(f"=== frequency {freq / 1e9:g} GHz ===")
         run, summary = _run_one_frequency(
-            config, freq, lambda f=freq: make_run_dir(_get_base(), _freq_dir_name(f)),
+            config, freq,
+            lambda f=freq: make_run_dir(_get_base(), _freq_dir_name(f), kind="grid"),
             args, log)
         entries.append({"freq_hz": float(freq), "wavelength_m": float(run.wavelength),
                         "dir": _freq_dir_name(freq)})

@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 
 from rice_bend import rs
 from rice_bend.config import SimConfig, load_config
-from rice_bend.data_store import GSHistory, make_run_dir, save_run
+from rice_bend.data_store import GSHistory, check_run_dir, make_run_dir, save_run
 from rice_bend.sim_scene import SimAperature, SimScene, parse_oscope_rx_data, parse_oscope_heatmap_data
 
 # Default config shipped in the repo's configs/ folder (repo_root/configs/caustic_config.yml)
@@ -771,6 +771,13 @@ def main():
         default=None
     )
     parser.add_argument(
+        "--out", "-o",
+        type=Path,
+        help="Run directory to write this run into, named outright "
+             "(overrides output.output_dir + output.run_name)",
+        default=None
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         help="Override gerchberg_saxton.seed for a reproducible initial phase",
@@ -794,12 +801,15 @@ def main():
     # apply CLI overrides onto the config
     if args.output_dir is not None: config.output.output_dir = args.output_dir
     if args.run_name is not None: config.output.run_name = args.run_name
+    if args.out is not None:
+        config.output.output_dir = Path(args.out).parent
+        config.output.run_name = Path(args.out).name
     if args.seed is not None: config.gerchberg_saxton.seed = args.seed
     if args.no_save: config.output.save_run = False
 
-    run_dir = None
+    # Fail fast on a run-directory collision, before spending the solve.
     if config.output.save_run:
-        run_dir = make_run_dir(config.output.output_dir, config.output.run_name)
+        check_run_dir(config.output.output_dir, config.output.run_name, kind="mgs")
 
     if args.rx_path is not None and not args.heatmap_path is None:
         rx_path = Path(args.rx_path)
@@ -809,17 +819,20 @@ def main():
         mgs.run_gerch_sax()
         mgs.run_sim(True, False)
         mgs.plot_scene()
-        if run_dir is not None:
-            save_run(mgs, run_dir, config, args.config, args.freq, vars(args), is_exp=True)
-
+        is_exp = True
     else:
         mgs = MGS(args.freq, config)
         mgs.run_sim(False)
         mgs.run_gerch_sax()
         mgs.run_sim(True)
         mgs.plot_scene()
-        if run_dir is not None:
-            save_run(mgs, run_dir, config, args.config, args.freq, vars(args), is_exp=False)
+        is_exp = False
+
+    # Deferred to here on purpose: make_run_dir clears the target, so a crashed (or
+    # plt.show()-blocked) solve must not have destroyed the previous run already.
+    if config.output.save_run:
+        run_dir = make_run_dir(config.output.output_dir, config.output.run_name, kind="mgs")
+        save_run(mgs, run_dir, config, args.config, args.freq, vars(args), is_exp=is_exp)
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,62 @@
+# Characterization config for scripts/characterize.sh — NOT a research scenario.
+#
+# A deliberately coarse copy of scenario_caustic_hit: same geometry and beam, but a
+# 6x coarser scene grid, 40 GS iterations and a 3x3 speculative grid, so both
+# entry points finish in a fraction of a second while still exercising the caustic
+# branch, the GS history capture, the multi-frequency layout and the grid sweep.
+#
+# spacing must stay BELOW the wavelength (1.9986 mm at 150 GHz, 1.578 mm at 190 GHz)
+# or rs() raises "needs denser sampling" and every check fails at once.
+
+sim_scene:
+  x_min: -0.3
+  x_max: 0.3
+  z_min: 0.0
+  z_max: 0.85
+  spacing: 0.0015
+
+tx_aperture:
+  x_min: -0.167
+  x_max: -0.035
+  z: 0.3
+  dx: 0.00025
+  beam:
+    type: caustic
+    trajectory: [0.8, 0.0, -0.065]
+
+rx_aperture:
+  x_center: 0.0
+  width: 0.04
+  dx: null
+
+plot_path: tiny_check.png
+
+# Two frequencies only: enough to build the multi-frequency layout (freq_<GHz>/
+# subdirs, frequencies.json, the averaged + 3D plots) without paying for ten.
+frequencies: [140.0e9, 150.0e9]
+
+gerchberg_saxton:
+  max_iters: 40
+  convergence_count: 10
+  convergence_threshold: -1.0e-8
+  lr0: 0.05
+  bt_shrink: 0.5
+  bt_tries: 8
+  seed: 0                # pinned: the digest compares exact floats
+  history_stride: 10     # -> captures at iterations 0/10/20/30 plus the final one
+
+output:
+  output_dir: results
+  run_name: tiny_check
+  save_run: true
+  save_scene_fields: false
+  save_gs_history: true  # check 1 pins gs_iter_indices
+
+# 3x3 = 9 candidates. Small enough that the digest can carry the whole loss vector,
+# which is what pins enumerate_grid's z-outer/x-inner index -> (z, x_center) mapping.
+grid_search:
+  z:        {min: 0.15, max: 0.80, num: 3}
+  x_center: {min: -0.15, max: 0.15, num: 3}
+  aperture: {width: 0.10, dx: 0.00025}
+  seed: 0
+  gs_overrides: {max_iters: 40}
