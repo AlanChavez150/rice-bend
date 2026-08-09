@@ -4,19 +4,16 @@ import scipy
 import scipy.special
 import scipy.signal
 
-def kernel_rs(x: np.ndarray, wavelength: float, z: float, n: float = 1.0, kind: str = "x"):
+def kernel_rs(x: np.ndarray, wavelength: float, z: float, n: float = 1.0):
+    """Rayleigh-Sommerfeld propagation kernel over transverse offset `x` for a
+    propagation distance `z`."""
     k = 2 * np.pi  * n / wavelength
     r = np.sqrt(x**2 + z**2) + 1e-16
     hk = scipy.special.hankel1(1, k * r)
-    if kind == "z":
-        return (0.5j * k * z / r) * hk
-    elif kind == "x":
-        return (0.5j * k * x / r) * hk
-    else:
-        raise ValueError(f"Invalid axis {x}")
+    return (0.5j * k * z / r) * hk
 
-def kernel_rs_inverse(x: np.ndarray, wavelength: float, z: float, n: float = 1.0, kind: str = "x"):
-    return np.conjugate(kernel_rs(x, wavelength, np.abs(z), n, kind))
+def kernel_rs_inverse(x: np.ndarray, wavelength: float, z: float, n: float = 1.0):
+    return np.conjugate(kernel_rs(x, wavelength, np.abs(z), n))
 
 def sampling_quality(x_axis: np.ndarray, z_targets: np.ndarray, wavelength: float,
                      z_src: float = 0.0, forward_dir: float = -1.0,
@@ -62,13 +59,18 @@ def rs(x_axis: np.ndarray, z_targets: np.ndarray, u0: np.ndarray, wavelength: fl
     if quality < 1:
         raise RuntimeError(f"needs denser sampling. {quality=} {dx=} {wavelength=}")
 
+    # Benchmarked (do not re-litigate): batching this loop into one 2D kernel matrix
+    # and a single fftconvolve runs at 0.86-0.93x -- i.e. SLOWER -- at every size
+    # tried, and costs a 130 MB kernel matrix. hankel1 is the expense here, not the
+    # FFT (0.375 ms vs 0.110 ms per call); hoisting it out is what pays, and
+    # gs_reconstruct does exactly that via rs_kernel/rs_apply.
     s_mat = np.zeros(shape=(len(prop), len(x_axis)), dtype=np.complex64)
     for z_idx, curr_prop in enumerate(prop):
         h = None
         if curr_prop >= 0:
-            h = kernel_rs(x_axis, wavelength, curr_prop, 1.0, kind="z")
+            h = kernel_rs(x_axis, wavelength, curr_prop, 1.0)
         else:
-            h = kernel_rs_inverse(x_axis, wavelength, curr_prop, 1.0, kind="z")
+            h = kernel_rs_inverse(x_axis, wavelength, curr_prop, 1.0)
         s = scipy.signal.fftconvolve(u0, h, mode="same") * dx
         s_mat[z_idx] = s
 

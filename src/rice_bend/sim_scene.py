@@ -1,10 +1,9 @@
-import pathlib as Path
 from copy import deepcopy
+from pathlib import Path
 
 import numpy as np
 import scipy.constants
 import scipy.interpolate
-import scipy.special
 import h5py
 
 from rice_bend import caustic
@@ -18,7 +17,7 @@ class SimAperature():
         self.dx = dx
         self.num_points = int((x_max - x_min) // dx)
         self.aper_axis = np.linspace(self.x_min, self.x_max, self.num_points)
-        self.aper_profile = np.zeros(len(self.aper_axis), dtype=np.cfloat)
+        self.aper_profile = np.zeros(len(self.aper_axis), dtype=np.complex128)
 
     def _wavenumber(self, freq: float) -> float:
         return 2 * np.pi / (scipy.constants.c / freq)
@@ -43,16 +42,6 @@ class SimAperature():
         theta_rad = theta_deg * (np.pi / 180)
         phase = -1.0  * k * self.aper_axis * np.sin(theta_rad)
         self.aper_profile = 1.0 * np.exp(1j * phase)
-
-    def make_bessel(self, freq: float):
-        pass
-
-    def make_airy(self, freq: float, x0: float, alpha: float):
-        # is freq really not used for anything?
-        s = self.aper_axis / x0
-        envelope = np.exp(alpha * s)
-        airy_func = scipy.special.airy(s)[0]
-        self.aper_profile = airy_func * envelope
 
     def interp_axis(self, new_axis: np.ndarray, assume_sorted: bool = True):
         """
@@ -94,16 +83,14 @@ class SimScene():
 
         x_points = int((self.x_max - self.x_min) / spacing)
         self.x_axis = np.linspace(self.x_min, self.x_max, x_points)
-        self.dx = self.x_axis[1] - self.x_axis[0]
 
         z_points = int((self.z_max - self.z_min) / spacing)
         self.z_axis = np.linspace(self.z_min, self.z_max, z_points)
-        self.dz = self.z_axis[1] - self.z_axis[0]
 
         self.tx_ap = tx_ap
         self.rx_ap = rx_ap
 
-        self.data = np.zeros(shape=(len(self.z_axis), len(self.x_axis)), dtype=np.cfloat)
+        self.data = np.zeros(shape=(len(self.z_axis), len(self.x_axis)), dtype=np.complex128)
 
 def parse_oscope_rx_data(path: Path, freq_c: float, lo_freq: float = 25e9, trx_n: float = 6) -> SimAperature:
     """
@@ -130,12 +117,9 @@ def parse_oscope_rx_data(path: Path, freq_c: float, lo_freq: float = 25e9, trx_n
     xvec = np.array(xvec * 1e-3)
     zvec = np.array(zvec * 1e-3)
 
-    aper_profile = np.zeros(shape=xvec.shape, dtype=np.cfloat)
+    aper_profile = np.zeros(shape=xvec.shape, dtype=np.complex128)
     for x_idx in range(xvec.shape[0]):
         curr_fft = np.fft.fft(tds_plane[x_idx, :])
-        freq_axis = np.arange(0, len(curr_fft), 1)
-        freq_axis = freq_axis * (sample_rate / len(curr_fft))
-
         freq_carrier_bin = int(down_mix_freq / (sample_rate / len(curr_fft)))
         aper_profile[x_idx] = curr_fft[freq_carrier_bin]
 
@@ -184,12 +168,10 @@ def parse_oscope_heatmap_data(
     xvec = np.array(xvec * 1e-3)
     zvec = np.array(zvec * 1e-3)
 
-    exp_data = np.zeros(shape=(zvec.shape[0], xvec.shape[0]), dtype=np.cfloat)
+    exp_data = np.zeros(shape=(zvec.shape[0], xvec.shape[0]), dtype=np.complex128)
     for z_idx in range(zvec.shape[0]):
         for x_idx in range(xvec.shape[0]):
             curr_fft = np.fft.fft(tds_plane[z_idx, x_idx])
-            freq_axis = np.arange(0, len(curr_fft), 1)
-            freq_axis = freq_axis * (sample_rate / len(curr_fft))
             freq_carrier_bin = int(down_mix_freq / (sample_rate / len(curr_fft)))
             exp_data[z_idx][x_idx] = curr_fft[freq_carrier_bin]
 

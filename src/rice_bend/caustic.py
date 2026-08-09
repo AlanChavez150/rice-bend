@@ -27,7 +27,7 @@ def generate_aperature(
     x_sorted = x_caustic[sort_idx]
     dphi_dy_sorted = dphi_dy[sort_idx]
 
-    phi = np.flip(scipy.integrate.cumtrapz(dphi_dy_sorted, x_sorted, initial=0))
+    phi = np.flip(scipy.integrate.cumulative_trapezoid(dphi_dy_sorted, x_sorted, initial=0))
     aper = 1.0 * np.exp(1j * phi)
 
     # interpolate from cuastic x axis to provided x axis

@@ -10,7 +10,8 @@ readme = "README.md"
 requires-python = ">=3.8"
 dependencies = [
     "numpy",
-    "scipy",
+    # cumulative_trapezoid / trapezoid (the numpy-2.0-safe spellings) landed in 1.6
+    "scipy>=1.6",
     "matplotlib",
     "coloredlogs",
     "h5py",

@@ -15,6 +15,7 @@ import argparse
 from pathlib import Path
 
 import numpy as np
+from scipy.integrate import trapezoid
 
 from rice_bend.config import load_config
 from rice_bend.mgs import MGS
@@ -57,8 +58,8 @@ def main() -> int:
     rxlo, rxhi = rxc - rxw / 2.0, rxc + rxw / 2.0
     inrx = (x >= rxlo) & (x <= rxhi)
     rx_peak = float(amp0[inrx].max()) if inrx.any() else 0.0
-    etot = float(np.trapz(amp0 ** 2, x))
-    erx = float(np.trapz((amp0 ** 2)[inrx], x[inrx])) if inrx.any() else 0.0
+    etot = float(trapezoid(amp0 ** 2, x))
+    erx = float(trapezoid((amp0 ** 2)[inrx], x[inrx])) if inrx.any() else 0.0
     frac = erx / etot if etot > 0 else 0.0
 
     hit = (rx_peak / gmax) >= args.hit_thresh
