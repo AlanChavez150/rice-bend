@@ -1,8 +1,22 @@
 import numpy as np
 
 import scipy
+import scipy.constants
 import scipy.special
 import scipy.signal
+
+
+# NB: `wavelength` is also the parameter name used throughout this module, so inside
+# rs.py these two are shadowed. Callers elsewhere write rs.wavelength(freq).
+def wavelength(freq: float) -> float:
+    """Free-space wavelength in metres at `freq` Hz."""
+    return scipy.constants.c / freq
+
+
+def wavenumber(freq: float) -> float:
+    """Free-space wavenumber in rad/m at `freq` Hz."""
+    return 2 * np.pi / wavelength(freq)
+
 
 def kernel_rs(x: np.ndarray, wavelength: float, z: float, n: float = 1.0):
     """Rayleigh-Sommerfeld propagation kernel over transverse offset `x` for a
@@ -75,3 +89,21 @@ def rs(x_axis: np.ndarray, z_targets: np.ndarray, u0: np.ndarray, wavelength: fl
         s_mat[z_idx] = s
 
     return s_mat
+
+
+def illuminate(x_axis: np.ndarray, z_axis: np.ndarray, u0: np.ndarray,
+               wavelength: float, tx_z: float) -> np.ndarray:
+    """Put aperture field `u0` on the scene x-axis at plane `tx_z`, RS-propagate it
+    toward -Z across `z_axis`, and zero every plane above `tx_z`.
+
+    That last step is the point: the aperture radiates into the -Z half-space only,
+    so without the mask the planes behind it show a back-propagated artifact. The
+    whole sequence was written out four times; this is the one place it lives.
+
+    Returns the complex field, shape (len(z_axis), len(x_axis)). Callers wanting an
+    intensity take np.abs() of the result -- masking before or after |.| is the same
+    picture, since abs(0j) is exactly 0.0.
+    """
+    field = rs(x_axis, z_axis, u0, wavelength, z_src=tx_z, forward_dir=-1.0)
+    field[np.asarray(z_axis) > tx_z, :] = 0
+    return field

@@ -1,7 +1,7 @@
 import numpy as np
 import scipy.integrate
-import scipy.constants
 
+from rice_bend import rs
 from rice_bend.interp import interp_amp_phase
 
 def generate_aperature(
@@ -17,7 +17,7 @@ def generate_aperature(
     Generates a phase plate that will create a beam with trajectory ax^2 + bx + c
     '''
     z = np.linspace(0, z_max, res)
-    wave_number = (2 * np.pi) / (scipy.constants.c / freq)
+    wave_number = rs.wavenumber(freq)
     caustic = (a * z**2) + (b * z) + c
     d_caustic = 2 * a* z + b
 

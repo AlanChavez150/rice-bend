@@ -6,7 +6,6 @@ from pathlib import Path
 
 import coloredlogs
 import numpy as np
-import scipy.constants
 import scipy.interpolate
 import matplotlib.pyplot as plt
 
@@ -159,7 +158,7 @@ class MGS():
         self._rx_field = None          # measured RX field on scene.x_axis (set by measure())
         self._error_weighting = None   # phase-retrieval error weighting (set by measure())
         self.freq = freq
-        self.wavelength = scipy.constants.c / freq
+        self.wavelength = rs.wavelength(freq)
         rx_spacing_ratio = 1 / 20
         rx_spacing = self.wavelength * rx_spacing_ratio
 
@@ -262,12 +261,8 @@ class MGS():
                                              self.scene.x_axis)
 
         self.log.info("Computing wave propogation across scene")
-        data = rs.rs(self.scene.x_axis, self.scene.z_axis, tx_profile_interp, self.wavelength,
-                     z_src=tx_ap.z, forward_dir=-1.0)
-        # the aperture only radiates into the -Z half-space; zero the field behind it
-        # (planes above the TX plane would otherwise show a back-propagated artifact)
-        behind_tx = self.scene.z_axis > tx_ap.z
-        data[behind_tx, :] = 0
+        data = rs.illuminate(self.scene.x_axis, self.scene.z_axis, tx_profile_interp,
+                             self.wavelength, tx_ap.z)
         if gs_rec:
             self.gs_rec_scene.data = data
         else:
@@ -580,7 +575,7 @@ class ExpMGS(MGS):
         x_max = tx.x_max + 0.2
         z_min = 0.0
         z_max = 0.4
-        self.wavelength = scipy.constants.c / freq
+        self.wavelength = rs.wavelength(freq)
 
         spacing_ratio = round(rx.dx / self.wavelength, 3)
         self.log.info(f"RX measurements are spread {spacing_ratio:0.3f} wavelengths apart")
