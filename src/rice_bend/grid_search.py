@@ -11,8 +11,6 @@ import os
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-import numpy as np
-
 from rice_bend import rs
 from rice_bend.candidate_scenes import (ANIM_FPS, ANIM_TOP_DEFAULT, ANIM_WARN_FRAMES,
                                         SCENE_Z_PLANES, animate_candidate_beams,
@@ -24,30 +22,36 @@ from rice_bend.data_store import check_run_dir, make_run_dir
 from rice_bend.grid_sweep import (GridSearchRun, _freq_dir_name, _resolve_frequencies,
                                   enumerate_grid, grid_summary, load_frequencies_index,
                                   run_grid_search, save_grid_run, write_frequencies_index)
-from rice_bend.residual_plots import (ResidualSummary, _hc_norm, average_summary,
+from rice_bend.residual_plots import (ResidualSummary, average_summary,
                                       plot_residual_freq_vs_avg, plot_residual_heatmap,
                                       plot_residual_scatter, plot_residual_scatter_3d,
                                       plot_residual_scatter_3d_diff, summary_from_manifest,
                                       summary_from_run)
 
+def _emit_pair(plot, out_path: Path, *args, **kwargs) -> Path:
+    """Write a residual plot and its high-contrast twin (<name>_hc.png).
+
+    Every plot function takes `hc: bool` and builds its own norm and title suffix,
+    so that flag is the entire difference between the two -- which is why this is
+    four lines and not five near-copies. `hc` used to be spelled four different ways
+    across the plot functions (norm=, log_scale=, norm=_hc_norm(np.stack(...)), hc=).
+    """
+    plot(*args, out_path=out_path, hc=False, **kwargs)
+    plot(*args, out_path=out_path.with_name(f"{out_path.stem}_hc{out_path.suffix}"),
+         hc=True, **kwargs)
+    return out_path
+
+
 def _emit_heatmaps(summary: ResidualSummary, out_dir: Path, log) -> None:
     """Write the residual heatmap plus its high-contrast (log-scale) twin."""
-    heat_out = out_dir / "residual_heatmap.png"
-    plot_residual_heatmap(summary, heat_out)
-    plot_residual_heatmap(summary, out_dir / "residual_heatmap_hc.png",
-                          title="Candidate residual (high contrast, log scale)",
-                          norm=_hc_norm(summary.loss_grid))
-    log.info(f"Wrote residual heatmap (+hc) to {heat_out}")
+    out = _emit_pair(plot_residual_heatmap, out_dir / "residual_heatmap.png", summary)
+    log.info(f"Wrote residual heatmap (+hc) to {out}")
 
 
 def _emit_scatters(summary: ResidualSummary, out_dir: Path, log) -> None:
     """Write the residual scatter plus its high-contrast (log-y) twin."""
-    sc_out = out_dir / "residual_scatter.png"
-    plot_residual_scatter(summary, sc_out)
-    plot_residual_scatter(summary, out_dir / "residual_scatter_hc.png",
-                          title="Candidate residual distribution (high contrast)",
-                          log_scale=True)
-    log.info(f"Wrote residual scatter (+hc) to {sc_out}")
+    out = _emit_pair(plot_residual_scatter, out_dir / "residual_scatter.png", summary)
+    log.info(f"Wrote residual scatter (+hc) to {out}")
 
 
 def _emit_multifreq_plots(summaries: List[Tuple[float, ResidualSummary]],
@@ -55,17 +59,11 @@ def _emit_multifreq_plots(summaries: List[Tuple[float, ResidualSummary]],
     """Top-level plots for a multi-frequency run: the frequency-averaged residual
     heatmap and the 3D residual scatter, each with a high-contrast (log-scale) twin."""
     avg = average_summary(summaries)
-    avg_out = base_dir / "residual_heatmap_avg.png"
-    plot_residual_heatmap(avg, avg_out, title="Average residual across frequencies")
-    plot_residual_heatmap(avg, base_dir / "residual_heatmap_avg_hc.png",
-                          title="Average residual across frequencies (high contrast, log scale)",
-                          norm=_hc_norm(avg.loss_grid))
+    avg_out = _emit_pair(plot_residual_heatmap, base_dir / "residual_heatmap_avg.png",
+                         avg, title="Average residual across frequencies")
     log.info(f"Wrote frequency-averaged residual heatmap (+hc) to {avg_out}")
-    out3d = base_dir / "residual_scatter_3d.png"
-    plot_residual_scatter_3d(summaries, out3d)
-    plot_residual_scatter_3d(summaries, base_dir / "residual_scatter_3d_hc.png",
-                             title="Candidate residual across frequency (high contrast, log scale)",
-                             norm=_hc_norm(np.stack([s.loss_grid for _, s in summaries])))
+    out3d = _emit_pair(plot_residual_scatter_3d,
+                       base_dir / "residual_scatter_3d.png", summaries)
     log.info(f"Wrote 3D residual scatter (+hc) to {out3d}")
     if len(summaries) > 1:
         out3d_diff = base_dir / "residual_scatter_3d_diff.png"
@@ -75,9 +73,8 @@ def _emit_multifreq_plots(summaries: List[Tuple[float, ResidualSummary]],
     for freq_hz, s in summaries:
         sub = base_dir / _freq_dir_name(freq_hz)
         if sub.is_dir():
-            plot_residual_freq_vs_avg(freq_hz, s, avg, sub / "residual_heatmap_vs_avg.png")
-            plot_residual_freq_vs_avg(freq_hz, s, avg,
-                                      sub / "residual_heatmap_vs_avg_hc.png", hc=True)
+            _emit_pair(plot_residual_freq_vs_avg,
+                       sub / "residual_heatmap_vs_avg.png", freq_hz, s, avg)
     log.info(f"Wrote {len(summaries)} per-frequency vs-average comparison(s) (+hc) under {base_dir}")
 
 

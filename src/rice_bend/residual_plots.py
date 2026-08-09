@@ -144,42 +144,72 @@ def _candidate_points(z_values: np.ndarray, x_values: np.ndarray, grid: np.ndarr
     value = grid[finite]
     dist = np.hypot(z - real_z, x - real_x_center)
     return z, x, value, dist
+# --- shared plot vocabulary --------------------------------------------------
+CMAP = "viridis_r"                 # low residual = bright yellow
+RESIDUAL_VMAX = 0.06               # fixed residual ceiling -> comparable across runs
+RESIDUAL_LABEL = "GS residual (lower = better fit)"
+HC_SUFFIX = " (high contrast, log scale)"
+DOT_MIN, DOT_MAX = 1.5, 60.0       # 3D dot-size range
+
+
+def _residual_norm(values: np.ndarray, hc: bool) -> Normalize:
+    """The colour/axis norm for a residual plot: fixed [0, 0.06] normally, or the
+    data-driven log scale when hc.
+
+    Every plot function calls this rather than being handed a norm. Passing norms in
+    leaked the choice upward -- callers had to know to np.stack a multi-frequency
+    list before calling _hc_norm, and one of them reached into _hc_norm(loss).vmin
+    to recover a floor it was never handed.
+    """
+    return _hc_norm(values) if hc else Normalize(vmin=0.0, vmax=RESIDUAL_VMAX)
+
+
+def _residual_mesh(ax, x_values: np.ndarray, z_values: np.ndarray,
+                   grid: np.ndarray, norm: Normalize):
+    """pcolormesh one (z, x_center) grid, masking the cells that were never run.
+
+    A LogNorm cannot take zeros, so values are clipped up to the norm's own floor;
+    NaNs survive np.maximum and stay masked. Four call sites spelled this out, two
+    of them writing the log clip differently to mean the same thing.
+    """
+    if isinstance(norm, LogNorm):
+        grid = np.maximum(grid, norm.vmin)
+    mesh_x, mesh_z = np.meshgrid(x_values, z_values)
+    return ax.pcolormesh(mesh_x, mesh_z, np.ma.masked_invalid(grid),
+                         shading="nearest", cmap=CMAP, norm=norm)
+
+
+def _mark_true_tx(ax, summary: "ResidualSummary", size: float = 170) -> None:
+    ax.scatter([summary.real_tx_x_center], [summary.real_tx_z], marker="X", s=size,
+               c="red", edgecolor="white", linewidth=1.5, label="True TX location",
+               zorder=5)
+
+
+def _hc_title(title: str, hc: bool) -> str:
+    return title + HC_SUFFIX if hc else title
 
 
 def plot_residual_heatmap(summary: ResidualSummary, out_path: Path,
                           title: str = "Candidate residual over speculative TX locations",
-                          norm: Optional[Normalize] = None) -> None:
-    """Render the residual heatmap with the true TX location and best candidate marked.
+                          hc: bool = False) -> None:
+    """The residual over (z, x_center), with the true TX and the best candidate marked.
 
-    By default the residual colour scale is fixed to [0, 0.06] so the map is directly
-    comparable across runs; pass `norm=_hc_norm(loss_grid)` for the high-contrast
-    log-scale variant (data-driven floor: low residuals spread over the colormap,
-    high residuals compress).
+    Lower residual = better fit to the measurement = more likely TX location, so this
+    is the figure the whole search exists to produce.
     """
     fig, ax = plt.subplots(figsize=(9, 6), layout="constrained")
-    if norm is None:
-        # Fixed residual scale [0, 0.06] + reversed colormap (low residual = bright
-        # yellow), matching plot_residual_scatter's fixed residual axis.
-        norm = Normalize(vmin=0.0, vmax=0.06)
-    loss_grid = summary.loss_grid
-    if isinstance(norm, LogNorm):
-        # Log scale can't take zeros; clip up to the norm's floor (NaNs propagate, stay masked).
-        loss_grid = np.maximum(loss_grid, norm.vmin)
-    grid = np.ma.masked_invalid(loss_grid)
-    mesh_x, mesh_z = np.meshgrid(summary.x_values, summary.z_values)
+    norm = _residual_norm(summary.loss_grid, hc)
+    mesh = _residual_mesh(ax, summary.x_values, summary.z_values, summary.loss_grid, norm)
+    fig.colorbar(mesh, ax=ax, label=RESIDUAL_LABEL)
 
-    mesh = ax.pcolormesh(mesh_x, mesh_z, grid, shading="nearest", cmap="viridis_r", norm=norm)
-    fig.colorbar(mesh, ax=ax, label="GS residual (lower = better fit)")
-
-    ax.scatter([summary.real_tx_x_center], [summary.real_tx_z], marker="X", s=170,
-               c="red", edgecolor="white", linewidth=1.5, label="True TX location", zorder=5)
+    _mark_true_tx(ax, summary)
     if summary.best is not None:
         ax.scatter([summary.best["x_center"]], [summary.best["z"]], marker="*", s=260,
                    c="lime", edgecolor="black", linewidth=1.0, zorder=6,
                    label=f"Best candidate (loss {summary.best['final_loss']:.4g})")
     ax.set_xlabel("x_center (m)")
     ax.set_ylabel("z (m)")
-    ax.set_title(title)
+    ax.set_title(_hc_title(title, hc))
     ax.legend(loc="upper right", framealpha=0.9)
     fig.savefig(out_path, dpi=120)
     plt.close(fig)
@@ -187,15 +217,11 @@ def plot_residual_heatmap(summary: ResidualSummary, out_path: Path,
 
 def plot_residual_scatter(summary: ResidualSummary, out_path: Path, *,
                           title: str = "Candidate residual distribution",
-                          log_scale: bool = False) -> None:
-    """Render a residual-vs-distance scatter that complements the (z, x_center) heatmap.
+                          hc: bool = False) -> None:
+    """Every candidate's residual against its distance to the true TX.
 
-    Every candidate's GS residual is plotted against its distance to the true TX. A
-    rising trend validates the premise that a lower GS residual marks a candidate
-    closer to the real transmitter. The residual axis is fixed to [0, 0.06] so the
-    plot is directly comparable across runs; `log_scale=True` is the high-contrast
-    variant — a log residual axis whose floor adapts to the data's own minimum
-    (rounded down to a decade), spreading the lowest residuals apart.
+    A rising trend is what validates the search's premise: that a lower GS residual
+    marks a candidate closer to the real transmitter.
     """
     _, _, loss, dist = _candidate_points(summary.z_values, summary.x_values,
                                          summary.loss_grid, summary.real_tx_z,
@@ -205,73 +231,61 @@ def plot_residual_scatter(summary: ResidualSummary, out_path: Path, *,
     if loss.size == 0:
         ax.text(0.5, 0.5, "no candidates", ha="center", va="center",
                 transform=ax.transAxes)
-        fig.suptitle(title)
+        fig.suptitle(_hc_title(title, hc))
         fig.savefig(out_path, dpi=120)
         plt.close(fig)
         return
 
-    floor = _hc_norm(loss).vmin if log_scale else 0.0   # data-driven decade floor
-    if log_scale:
-        loss = np.maximum(loss, floor)   # keep sub-floor losses visible on the log axis
+    norm = _residual_norm(loss, hc)
+    if hc:
+        loss = np.maximum(loss, norm.vmin)   # keep sub-floor losses on the log axis
     ax.scatter(dist, loss, s=40, color="C0", edgecolor="black", linewidth=0.3, zorder=3)
     ax.set_xlabel("distance from candidate to true TX (m)")
     ax.set_ylabel("GS residual")
-    if log_scale:
+    if hc:
         ax.set_yscale("log")
-        ax.set_ylim(floor, 0.06)     # floor adapts to the data's own minimum
-    else:
-        ax.set_ylim(0.0, 0.06)       # fixed residual range -> comparable across runs
+    ax.set_ylim(norm.vmin, RESIDUAL_VMAX)
     ax.set_title("Residual vs. distance to true TX")
     ax.grid(True, alpha=0.3)
 
-    fig.suptitle(title)
+    fig.suptitle(_hc_title(title, hc))
     fig.savefig(out_path, dpi=120)
     plt.close(fig)
 
 
-def plot_residual_scatter_3d(summaries: List[Tuple[float, ResidualSummary]], out_path: Path, *,
-                             title: str = "Candidate residual across frequency",
-                             norm: Optional[Normalize] = None) -> None:
-    """Render every candidate as a 3D point at (x_center, z, frequency), coloured by residual.
+def _scatter_3d(layers, out_path: Path, *, norm: Normalize, dot_size, title: str,
+                colorbar_label: str, footnote: str) -> None:
+    """The 3D residual scatter: (x_center, z) flat on the bottom, frequency rising,
+    one layer of candidate dots per frequency, coloured by `layers`' scalar.
 
-    This is the multi-frequency view of the 2D residual heatmap: the spatial (x_center, z)
-    plane lies flat on the bottom and frequency rises on the vertical axis, one layer of
-    candidate dots per frequency. Points share the heatmap's fixed [0, 0.06] `viridis_r`
-    colour scale by default (pass `norm=_hc_norm(losses)` for the high-contrast log-scale
-    variant with a data-driven floor); low residual = bright yellow. Dot size falls off cubically as the residual
-    grows, so only genuinely low-residual candidates stay large and the high-residual
-    bulk shrinks to near-invisible dots the eye can see through. The true TX location is
-    marked on every frequency layer and joined by a vertical guide line.
+    `layers` is [(freq_hz, summary, values_grid)] and `dot_size(values) -> sizes`.
+    Those two, the norm and the labels are the ENTIRE difference between the
+    absolute-residual view and the difference-from-baseline view; everything below
+    -- the loop, the red X per layer, the dashed guide, the axis labels, view_init,
+    the colorbar and the proxy legend handle -- was line-for-line identical in two
+    62-line functions.
     """
-    if norm is None:
-        norm = Normalize(vmin=0.0, vmax=0.06)
-    cmap = "viridis_r"
-    s_min, s_max = 1.5, 60.0            # dot-size range; largest = lowest residual
     fig = plt.figure(figsize=(11, 8), layout="constrained")
     ax = fig.add_subplot(projection="3d")
 
-    freqs_ghz = sorted(f / 1e9 for f, _ in summaries)
+    freqs_ghz = sorted(f / 1e9 for f, _, _ in layers)
     real_x = real_z = None
-    for freq_hz, summary in summaries:
+    for freq_hz, summary, values in layers:
         f_ghz = freq_hz / 1e9
-        z, x, loss, _ = _candidate_points(summary.z_values, summary.x_values,
-                                          summary.loss_grid, summary.real_tx_z,
-                                          summary.real_tx_x_center)
-        if loss.size:
-            # Cubic falloff: size collapses quickly as the residual (MSE) rises, so
-            # high-MSE dots are tiny and the layers stay see-through.
-            loss_norm = np.clip(loss / 0.06, 0.0, 1.0)
-            sizes = s_min + ((1.0 - loss_norm) ** 3) * (s_max - s_min)
+        z, x, val, _ = _candidate_points(summary.z_values, summary.x_values, values,
+                                         summary.real_tx_z, summary.real_tx_x_center)
+        if val.size:
             # Clip colours up to the norm's floor so a LogNorm never sees zero
-            # (a no-op under the default linear norm, whose vmin is 0).
-            ax.scatter(x, z, np.full_like(x, f_ghz), c=np.maximum(loss, norm.vmin),
-                       cmap=cmap, norm=norm, s=sizes, depthshade=False, edgecolor="none")
+            # (a no-op under a linear norm whose vmin is at or below the data).
+            ax.scatter(x, z, np.full_like(x, f_ghz), c=np.maximum(val, norm.vmin),
+                       cmap=CMAP, norm=norm, s=dot_size(val), depthshade=False,
+                       edgecolor="none")
         real_x, real_z = summary.real_tx_x_center, summary.real_tx_z
         ax.scatter([summary.real_tx_x_center], [summary.real_tx_z], [f_ghz], marker="X",
                    s=90, c="red", edgecolor="white", linewidth=1.0, depthshade=False,
                    zorder=6)
 
-    # Vertical guide connecting the true-TX markers up the frequency axis.
+    # vertical guide connecting the true-TX markers up the frequency axis
     if real_x is not None and len(freqs_ghz) > 1:
         ax.plot([real_x, real_x], [real_z, real_z], [min(freqs_ghz), max(freqs_ghz)],
                 color="red", linestyle="--", linewidth=1.0, alpha=0.6)
@@ -281,14 +295,12 @@ def plot_residual_scatter_3d(summaries: List[Tuple[float, ResidualSummary]], out
     ax.set_zlabel("frequency (GHz)")
     ax.set_zticks(freqs_ghz)
     ax.set_title(title)
-    ax.text2D(0.02, 0.02, "dot size shrinks cubically as residual grows",
-              transform=ax.transAxes, fontsize=8, alpha=0.7)
+    ax.text2D(0.02, 0.02, footnote, transform=ax.transAxes, fontsize=8, alpha=0.7)
     ax.view_init(elev=22, azim=-60)
 
-    sm = ScalarMappable(norm=norm, cmap=cmap)
-    fig.colorbar(sm, ax=ax, shrink=0.6, pad=0.1,
-                 label="GS residual (lower = better fit)")
-    # A proxy handle so the legend documents the red X without duplicating it per layer.
+    fig.colorbar(ScalarMappable(norm=norm, cmap=CMAP), ax=ax, shrink=0.6, pad=0.1,
+                 label=colorbar_label)
+    # a proxy handle, so the legend documents the red X without one entry per layer
     ax.scatter([], [], [], marker="X", s=90, c="red", edgecolor="white",
                linewidth=1.0, label="True TX location")
     ax.legend(loc="upper left")
@@ -296,17 +308,36 @@ def plot_residual_scatter_3d(summaries: List[Tuple[float, ResidualSummary]], out
     plt.close(fig)
 
 
+def plot_residual_scatter_3d(summaries: List[Tuple[float, ResidualSummary]],
+                             out_path: Path, *,
+                             title: str = "Candidate residual across frequency",
+                             hc: bool = False) -> None:
+    """The multi-frequency view of the 2D residual heatmap.
+
+    Dot size falls off cubically as the residual grows, so only genuinely
+    low-residual candidates stay large and the high-residual bulk shrinks to dots
+    the eye can see through.
+    """
+    norm = _residual_norm(np.stack([s.loss_grid for _, s in summaries]), hc)
+
+    def dot_size(loss):
+        return DOT_MIN + ((1.0 - np.clip(loss / RESIDUAL_VMAX, 0.0, 1.0)) ** 3) * (DOT_MAX - DOT_MIN)
+
+    _scatter_3d([(f, s, s.loss_grid) for f, s in summaries], out_path, norm=norm,
+                dot_size=dot_size, title=_hc_title(title, hc),
+                colorbar_label=RESIDUAL_LABEL,
+                footnote="dot size shrinks cubically as residual grows")
+
+
 def plot_residual_scatter_3d_diff(summaries: List[Tuple[float, ResidualSummary]],
                                   out_path: Path, *,
                                   baseline_freq: Optional[float] = None) -> None:
-    """3D scatter of per-candidate residual DIFFERENCES from a baseline frequency.
+    """The same 3D scatter, but of residual DIFFERENCES from a baseline frequency.
 
-    The baseline defaults to the center frequency (middle element of the sorted
-    list). Each layer shows loss(f) − loss(baseline) on a symmetric `viridis_r`
-    scale matching the other difference plots: bright yellow = fits BETTER than the
-    baseline, dark purple = worse, mid-teal = unchanged (the baseline layer itself
-    is uniformly zero). Dot size grows with the magnitude of the deviation, so
-    candidates that behave like the baseline stay tiny and see-through.
+    The baseline defaults to the centre frequency. Bright yellow fits BETTER than the
+    baseline, dark purple worse, mid-teal unchanged (the baseline layer is uniformly
+    zero). Dot size grows with the deviation, so candidates that behave like the
+    baseline stay see-through.
     """
     ordered = sorted(summaries, key=lambda t: t[0])
     freqs = [f for f, _ in ordered]
@@ -314,109 +345,61 @@ def plot_residual_scatter_3d_diff(summaries: List[Tuple[float, ResidualSummary]]
         baseline_freq = freqs[len(freqs) // 2]
     base_grid = next(s for f, s in ordered if f == baseline_freq).loss_grid
 
-    diffs = [(f, s, s.loss_grid - base_grid) for f, s in ordered]
-    finite_all = np.concatenate([d[np.isfinite(d)].ravel() for _, _, d in diffs])
-    vlim = float(np.abs(finite_all).max()) if finite_all.size else 1e-6
-    vlim = max(vlim, 1e-12)
-    norm = Normalize(vmin=-vlim, vmax=vlim)
-    cmap = "viridis_r"
-    s_min, s_max = 1.5, 60.0            # dot-size range; largest = biggest deviation
+    layers = [(f, s, s.loss_grid - base_grid) for f, s in ordered]
+    finite = np.concatenate([d[np.isfinite(d)].ravel() for _, _, d in layers])
+    vlim = max(float(np.abs(finite).max()) if finite.size else 1e-6, 1e-12)
+    baseline_ghz = baseline_freq / 1e9
 
-    fig = plt.figure(figsize=(11, 8), layout="constrained")
-    ax = fig.add_subplot(projection="3d")
-    freqs_ghz = [f / 1e9 for f in freqs]
-    real_x = real_z = None
-    for f, s, d in diffs:
-        f_ghz = f / 1e9
-        z, x, dval, _ = _candidate_points(s.z_values, s.x_values, d,
-                                          s.real_tx_z, s.real_tx_x_center)
-        if dval.size:
-            sizes = s_min + (np.abs(dval) / vlim) * (s_max - s_min)
-            ax.scatter(x, z, np.full_like(x, f_ghz), c=dval, cmap=cmap, norm=norm,
-                       s=sizes, depthshade=False, edgecolor="none")
-        real_x, real_z = s.real_tx_x_center, s.real_tx_z
-        ax.scatter([s.real_tx_x_center], [s.real_tx_z], [f_ghz], marker="X", s=90,
-                   c="red", edgecolor="white", linewidth=1.0, depthshade=False, zorder=6)
+    def dot_size(diff):
+        return DOT_MIN + (np.abs(diff) / vlim) * (DOT_MAX - DOT_MIN)
 
-    if real_x is not None and len(freqs_ghz) > 1:
-        ax.plot([real_x, real_x], [real_z, real_z], [min(freqs_ghz), max(freqs_ghz)],
-                color="red", linestyle="--", linewidth=1.0, alpha=0.6)
-
-    ax.set_xlabel("x_center (m)")
-    ax.set_ylabel("z (m)")
-    ax.set_zlabel("frequency (GHz)")
-    ax.set_zticks(freqs_ghz)
-    ax.set_title(f"Candidate residual difference vs. {baseline_freq / 1e9:g} GHz baseline")
-    ax.text2D(0.02, 0.02, "dot size grows with deviation from the baseline",
-              transform=ax.transAxes, fontsize=8, alpha=0.7)
-    ax.view_init(elev=22, azim=-60)
-
-    sm = ScalarMappable(norm=norm, cmap=cmap)
-    fig.colorbar(sm, ax=ax, shrink=0.6, pad=0.1,
-                 label=f"residual difference vs. {baseline_freq / 1e9:g} GHz "
-                       "(yellow = better than baseline)")
-    ax.scatter([], [], [], marker="X", s=90, c="red", edgecolor="white",
-               linewidth=1.0, label="True TX location")
-    ax.legend(loc="upper left")
-    fig.savefig(out_path, dpi=120)
-    plt.close(fig)
+    _scatter_3d(layers, out_path, norm=Normalize(vmin=-vlim, vmax=vlim),
+                dot_size=dot_size,
+                title=f"Candidate residual difference vs. {baseline_ghz:g} GHz baseline",
+                colorbar_label=f"residual difference vs. {baseline_ghz:g} GHz "
+                               "(yellow = better than baseline)",
+                footnote="dot size grows with deviation from the baseline")
 
 
 def plot_residual_freq_vs_avg(freq_hz: float, summary: ResidualSummary,
                               avg: ResidualSummary, out_path: Path, *,
                               hc: bool = False) -> None:
-    """Compare one frequency's residual heatmap against the all-frequency average.
+    """One frequency's residual heatmap against the all-frequency average.
 
-    Three panels: this frequency's residuals and the frequency-averaged residuals
-    (shared linear [0, 0.06] scale), then their difference (frequency − average) on a
-    symmetric scale using the same `viridis_r` colormap as every other residual plot —
-    bright yellow where this frequency fits BETTER than the average, dark purple where
-    worse. The true TX is marked on each. With `hc=True` the two heatmaps use the
-    data-driven log scale (shared floor across both grids) and the difference panel a
-    symmetric log, spreading the smallest residuals/deviations apart.
+    Three panels: this frequency, the average (shared scale), and their difference on
+    a symmetric scale — bright yellow where this frequency fits BETTER than the
+    average, dark purple where worse.
     """
     f_ghz = freq_hz / 1e9
     fig, axes = plt.subplots(1, 3, figsize=(18, 5.5), layout="constrained")
-    mesh_x, mesh_z = np.meshgrid(avg.x_values, avg.z_values)
-    if hc:
-        # One data-driven log norm shared by both panels so they stay inter-comparable.
-        norm = _hc_norm(np.stack([summary.loss_grid, avg.loss_grid]))
-    else:
-        norm = Normalize(vmin=0.0, vmax=0.06)
+    # one norm shared by both heatmap panels so they stay inter-comparable
+    norm = _residual_norm(np.stack([summary.loss_grid, avg.loss_grid]), hc)
 
     mesh = None
     for ax, s, sub_title in ((axes[0], summary, f"{f_ghz:g} GHz"),
                              (axes[1], avg, "average across frequencies")):
-        loss_grid = np.maximum(s.loss_grid, norm.vmin) if hc else s.loss_grid
-        grid = np.ma.masked_invalid(loss_grid)
-        mesh = ax.pcolormesh(mesh_x, mesh_z, grid, shading="nearest",
-                             cmap="viridis_r", norm=norm)
+        mesh = _residual_mesh(ax, avg.x_values, avg.z_values, s.loss_grid, norm)
         ax.set_title(sub_title)
-    fig.colorbar(mesh, ax=list(axes[:2]), label="GS residual (lower = better fit)",
-                 shrink=0.9)
+    fig.colorbar(mesh, ax=list(axes[:2]), label=RESIDUAL_LABEL, shrink=0.9)
 
     diff = summary.loss_grid - avg.loss_grid
-    vlim = float(np.nanmax(np.abs(diff))) if np.isfinite(diff).any() else 1e-6
-    vlim = max(vlim, 1e-12)
+    vlim = max(float(np.nanmax(np.abs(diff))) if np.isfinite(diff).any() else 1e-6, 1e-12)
     if hc:
-        # Symmetric log: two decades of log range each side of a linear core, so
-        # small deviations from the average spread instead of washing out at teal.
+        # symmetric log: two decades either side of a linear core, so small
+        # deviations from the average spread instead of washing out at teal
         dnorm = SymLogNorm(linthresh=vlim / 100.0, vmin=-vlim, vmax=vlim, base=10)
     else:
         dnorm = Normalize(vmin=-vlim, vmax=vlim)
-    dmesh = axes[2].pcolormesh(mesh_x, mesh_z, np.ma.masked_invalid(diff),
-                               shading="nearest", cmap="viridis_r", norm=dnorm)
+    dmesh = _residual_mesh(axes[2], avg.x_values, avg.z_values, diff, dnorm)
     axes[2].set_title(f"difference ({f_ghz:g} GHz − average)")
     fig.colorbar(dmesh, ax=axes[2],
                  label="residual difference (yellow = better than average)", shrink=0.9)
 
     for ax in axes:
-        ax.scatter([avg.real_tx_x_center], [avg.real_tx_z], marker="X", s=120, c="red",
-                   edgecolor="white", linewidth=1.2, zorder=5, label="True TX location")
+        _mark_true_tx(ax, avg, size=120)
         ax.set_xlabel("x_center (m)")
     axes[0].set_ylabel("z (m)")
     axes[0].legend(loc="upper right", framealpha=0.9)
-    suffix = " (high contrast, log scale)" if hc else ""
-    fig.suptitle(f"Residual: {f_ghz:g} GHz vs. frequency average{suffix}")
+    fig.suptitle(_hc_title(f"Residual: {f_ghz:g} GHz vs. frequency average", hc))
     fig.savefig(out_path, dpi=120)
     plt.close(fig)
