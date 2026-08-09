@@ -33,6 +33,7 @@ from rice_bend.data_store import (c64, check_run_dir, f64, load_run_config, make
                                   provenance, save_config_snapshot, write_json, write_mp4)
 from rice_bend.interp import interp_amp_phase
 from rice_bend.parallel import map_workers, round_robin_chunks, worker_shared
+from rice_bend.plotting import draw_line_panel, draw_scene
 from rice_bend.mgs import MGS, gs_reconstruct
 from rice_bend.sim_scene import SimAperature, sampled_axis
 
@@ -817,21 +818,23 @@ def scenes_from_manifest(run_dir: Path) -> SceneContext:
                         meas["rx_aper_axis"])
 
 
-def _draw_scene(fig, ax, field: np.ndarray, ctx: SceneContext, tx_axis: np.ndarray,
-                tx_z: float, vmax: float, title: str) -> None:
-    """imshow a re-illuminated |field|, marking the RX aperture (red) and TX aperture (blue)."""
-    x_min, x_max, z_min, z_max = ctx.scene_bounds
-    im = ax.imshow(field, extent=[x_min, x_max, z_min, z_max], origin="lower",
-                   aspect="auto", cmap="inferno", vmin=0.0, vmax=vmax)
-    fig.colorbar(im, ax=ax, label="|field| (V/m)")
-    ax.scatter(ctx.rx_aper_axis, np.full(len(ctx.rx_aper_axis), z_min), s=6, c="red",
-               label="RX aperture", zorder=5)
-    ax.scatter(tx_axis, np.full(len(tx_axis), tx_z), s=6, c="blue",
-               label="TX aperture", zorder=5)
-    ax.set_xlabel("x (m)")
-    ax.set_ylabel("z (m)")
-    ax.set_title(title)
-    ax.legend(loc="upper right", framealpha=0.9, markerscale=2)
+def _scene_panel(fig, ax, field: np.ndarray, ctx: SceneContext, tx_axis: np.ndarray,
+                 tx_z: float, vmax: float, title: str) -> None:
+    """plotting.draw_scene bound to a SceneContext.
+
+    The RX plane is passed as scene z_min explicitly. That is an assumption, not a
+    fact: it holds for every simulated config (rx.z == 0 == z_min) and the grid
+    search only ever runs on simulated scenes, but a SceneContext does not carry the
+    RX z, so this is where the assumption lives.
+
+    Legend pinned to "upper right" rather than "best": these panels also become mp4
+    frames, and a legend that relocates between frames is worse than one that
+    occasionally overlaps.
+    """
+    draw_scene(fig, ax, field, bounds=ctx.scene_bounds,
+               rx_axis=ctx.rx_aper_axis, rx_z=ctx.scene_bounds[2],
+               tx_axis=tx_axis, tx_z=tx_z, vmax=vmax, title=title,
+               legend_loc="upper right")
 
 
 def _on_scene_axis(scene_x: np.ndarray, aper_axis: np.ndarray,
@@ -862,11 +865,11 @@ def _plot_candidate_quad(cand_field: np.ndarray, real_field: Optional[np.ndarray
 
     tag = " (best)" if best else ""
     note = "" if item.stop_reason == "converged" else f" [{item.stop_reason}]"
-    _draw_scene(fig, ax_cand, cand_field, ctx, item.aper_axis, item.z, vmax,
+    _scene_panel(fig, ax_cand, cand_field, ctx, item.aper_axis, item.z, vmax,
                 f"Candidate #{item.index}{tag} beam — MSE={item.final_loss:.4g}{note}")
 
     if real_field is not None:
-        _draw_scene(fig, ax_real, real_field, ctx, ctx.real_tx_aper_axis, ctx.real_tx_z,
+        _scene_panel(fig, ax_real, real_field, ctx, ctx.real_tx_aper_axis, ctx.real_tx_z,
                     vmax, "Real beam")
     else:
         ax_real.text(0.5, 0.5, "real beam unavailable", ha="center", va="center",
@@ -880,15 +883,12 @@ def _plot_candidate_quad(cand_field: np.ndarray, real_field: Optional[np.ndarray
     phase = _on_scene_axis(scene_x, item.aper_axis, np.unwrap(np.angle(item.aper_profile)))
     amp = _on_scene_axis(scene_x, item.aper_axis, np.abs(item.aper_profile))
 
-    ax_phase.plot(scene_x, phase, color="C0")
-    ax_phase.set_title("Candidate TX phase")
-    ax_phase.set_xlabel("x (m)"); ax_phase.set_ylabel("phase unwrapped [rad]")
-    ax_phase.set_xlim(x_min, x_max); ax_phase.grid(True)
-
-    ax_amp.plot(scene_x, amp, color="C3")
-    ax_amp.set_title("Candidate TX amplitude")
-    ax_amp.set_xlabel("x (m)"); ax_amp.set_ylabel("amplitude (V/m)")
-    ax_amp.set_xlim(x_min, x_max); ax_amp.set_ylim(0.0, 1.1); ax_amp.grid(True)
+    draw_line_panel(ax_phase, [(None, scene_x, phase, "C0")],
+                    title="Candidate TX phase", xlabel="x (m)",
+                    ylabel="phase unwrapped [rad]", xlim=(x_min, x_max))
+    draw_line_panel(ax_amp, [(None, scene_x, amp, "C3")],
+                    title="Candidate TX amplitude", xlabel="x (m)",
+                    ylabel="amplitude (V/m)", xlim=(x_min, x_max), ylim=(0.0, 1.1))
 
     fig.savefig(out_path, dpi=120)
     plt.close(fig)
@@ -1001,7 +1001,7 @@ def make_candidate_scenes(ctx: SceneContext, out_dir: Path, *, z_planes: int = 2
     if average and acc is not None:
         avg = (acc / count).astype(np.float32)
         fig, ax = plt.subplots(figsize=(8, 8), layout="constrained")
-        _draw_scene(fig, ax, avg, ctx, ctx.real_tx_aper_axis, ctx.real_tx_z,
+        _scene_panel(fig, ax, avg, ctx, ctx.real_tx_aper_axis, ctx.real_tx_z,
                     float(avg.max()) or 1.0,
                     f"Average of {count} candidate beams (TX shown = real)")
         avg_path = out_dir / "scene_average.png"

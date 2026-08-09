@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 from rice_bend import rs
 from rice_bend.config import DEFAULT_CONFIG, GerchbergSaxtonConfig, SimConfig, load_config
 from rice_bend.interp import interp_amp_phase, interp_real_imag
+from rice_bend.plotting import draw_line_panel, draw_scene
 from rice_bend.data_store import GSHistory, check_run_dir, make_run_dir, save_run
 from rice_bend.sim_scene import SimAperature, SimScene, parse_oscope_rx_data, parse_oscope_heatmap_data
 
@@ -364,152 +365,49 @@ class MGS():
         opens an interactive window when `show` is True (set False for headless/batch)."""
         self.log.info("Plotting scene")
 
+        scene, gs_tx = self.scene, self.gs_tx
+        bounds = (scene.x_axis.min(), scene.x_axis.max(),
+                  scene.z_axis.min(), scene.z_axis.max())
+        panel = dict(bounds=bounds, rx_axis=scene.rx_ap.aper_axis, rx_z=scene.rx_ap.z,
+                     tx_axis=scene.tx_ap.aper_axis, tx_z=scene.tx_ap.z,
+                     colorbar_label="EMW (V/m)")
+
         fig = plt.figure(figsize=(20, 10), layout="constrained")
-        rows = 2
-        cols = 2
-        plt_index = 1
-        ax_1 = fig.add_subplot(rows, cols, plt_index)
-        plt_index += 1
-        ax_1.set_title(f"Scene Amplitude")
-        ax_1.set_xlabel("x (m)")
-        ax_1.set_ylabel("z (m)")
-        ax_1.grid(True)
+        (ax_real, ax_rec), (ax_phase, ax_amp) = fig.subplots(2, 2)
 
-        v_max = np.nanmax([
-            np.nanmax(np.abs(self.scene.data)),
-            np.nanmax(np.abs(self.gs_rec_scene.data))
-        ])
+        v_max = np.nanmax([np.nanmax(np.abs(scene.data)),
+                           np.nanmax(np.abs(self.gs_rec_scene.data))])
+        draw_scene(fig, ax_real, np.abs(scene.data), title="Scene Amplitude",
+                   vmax=v_max, **panel)
+        # Panel 2 autoscales. v_max above was computed to make the two panels
+        # comparable and then commented out at the call; the reconstruction renders
+        # dimmer than the real scene, so an independent scale is easier to read.
+        # Pass vmax=v_max here instead to put them on one scale.
+        draw_scene(fig, ax_rec, np.abs(self.gs_rec_scene.data),
+                   title="MGS reconstruction Scene Amplitude", vmax=None, **panel)
 
-        implot = ax_1.imshow(
-            np.abs(self.scene.data),
-            extent=[
-                self.scene.x_axis.min(),
-                self.scene.x_axis.max(),
-                self.scene.z_axis.min(),
-                self.scene.z_axis.max()
-            ],
-            cmap="inferno",
-            vmin=0.0,
-            vmax=v_max,
-            aspect="auto",
-            origin="lower"
-        )
-        fig.colorbar(implot, orientation="vertical", label="EMW (V/m)")
+        # both aperture panels are drawn against the full scene x extent
+        xlim = (scene.x_min, scene.x_max)
+        tx_interp = interp_real_imag(scene.tx_ap.aper_axis, scene.tx_ap.aper_profile,
+                                     scene.x_axis)
+        gs_amp = scipy.interpolate.interp1d(
+            gs_tx.aper_axis, np.abs(gs_tx.aper_profile), kind="linear",
+            fill_value=0, bounds_error=False, assume_sorted=True)(scene.x_axis)
 
-        rx_z_array = self.scene.rx_ap.z * np.ones(shape=self.scene.rx_ap.aper_axis.shape)
-        tx_z_array = self.scene.tx_ap.z * np.ones(shape=self.scene.tx_ap.aper_axis.shape)
-        ax_1.scatter(
-            self.scene.rx_ap.aper_axis,
-            rx_z_array,
-            10,
-            "r",
-            label=f"Rx aperture location"
-        )
-        ax_1.scatter(
-            self.scene.tx_ap.aper_axis,
-            tx_z_array,
-            10,
-            "b",
-            label="TX aperture location"
-        )
-        ax_1.legend()
-
-        ax_gs = fig.add_subplot(rows, cols, plt_index)
-        plt_index += 1
-        ax_gs.set_title(f"MGS reconstruction Scene Amplitude")
-        ax_gs.set_xlabel("x (m)")
-        ax_gs.set_ylabel("z (m)")
-        ax_gs.grid(True)
-
-        implot = ax_gs.imshow(
-            np.abs(self.gs_rec_scene.data),
-            extent=[
-                self.gs_rec_scene.x_axis.min(),
-                self.gs_rec_scene.x_axis.max(),
-                self.gs_rec_scene.z_axis.min(),
-                self.gs_rec_scene.z_axis.max()
-            ],
-            cmap="inferno",
-            #vmin=0.0,
-            #vmax=v_max,
-            aspect="auto",
-            origin="lower"
-        )
-        fig.colorbar(implot, orientation="vertical", label="EMW (V/m)")
-
-        ax_gs.scatter(
-            self.scene.rx_ap.aper_axis,
-            rx_z_array,
-            10,
-            "r",
-            label=f"RX aperture location"
-        )
-        ax_gs.scatter(
-            self.scene.tx_ap.aper_axis,
-            tx_z_array,
-            10,
-            "b",
-            label="TX aperture location"
-        )
-        ax_gs.legend()
-
-        ax_2 = fig.add_subplot(rows, cols, plt_index)
-        plt_index += 1
-        ax_2.set_title("TX Aperature Phase")
-        ax_2.set_xlabel("x (m)")
-        ax_2.set_ylabel("Phase [rad]")
-        ax_2.set_xlim(self.scene.x_min, self.scene.x_max)
-        #rx_ax.set_ylim(0, )
-        ax_2.grid(True)
-
-        # interp from tx axis to scene x_axis
-        tx_interp = interp_real_imag(self.scene.tx_ap.aper_axis,
-                                     self.scene.tx_ap.aper_profile, self.scene.x_axis)
-
-        # interp from gs axis to scene x_axis
-        gs_interp_amp_func = scipy.interpolate.interp1d(
-            self.gs_tx.aper_axis,
-            np.abs(self.gs_tx.aper_profile),
-            kind="linear",
-            fill_value=0,
-            bounds_error=False,
-            assume_sorted=True
-        )
-        gs_interp = gs_interp_amp_func(self.scene.x_axis)
+        phase_series, amp_series = [], []
         if self.has_real_aper:
-            ax_2.plot(
-                self.scene.tx_ap.aper_axis,
-                np.unwrap(np.angle(self.scene.tx_ap.aper_profile)),
-                label="Real TX"
-            )
-        ax_2.plot(
-            self.gs_tx.aper_axis,
-            np.unwrap(np.angle(self.gs_tx.aper_profile)),
-            label="MGS Reconstructed TX"
-        )
-        ax_2.legend()
+            phase_series.append(("Real TX", scene.tx_ap.aper_axis,
+                                 np.unwrap(np.angle(scene.tx_ap.aper_profile))))
+            amp_series.append(("Real TX", scene.x_axis, np.abs(tx_interp)))
+        phase_series.append(("MGS Reconstructed TX", gs_tx.aper_axis,
+                             np.unwrap(np.angle(gs_tx.aper_profile))))
+        amp_series.append(("MGS Reconstructed TX", scene.x_axis, gs_amp))
 
+        draw_line_panel(ax_phase, phase_series, title="TX Aperature Phase",
+                        xlabel="x (m)", ylabel="Phase [rad]", xlim=xlim)
+        draw_line_panel(ax_amp, amp_series, title="TX Aperature Amplitude",
+                        xlabel="x (m)", ylabel="Amplitude EMF (V/m)", xlim=xlim)
 
-        ax_3 = fig.add_subplot(rows, cols, plt_index)
-        plt_index += 1
-        ax_3.set_title("TX Aperature Amplitude")
-        ax_3.set_xlabel("x (m)")
-        ax_3.set_ylabel("Amplitude EMF (V/m)")
-        ax_3.set_xlim(self.scene.x_min, self.scene.x_max)
-        ax_3.grid(True)
-
-        if self.has_real_aper:
-            ax_3.plot(
-                self.scene.x_axis,
-                np.abs(tx_interp),
-                label="Real TX"
-            )
-        ax_3.plot(
-            self.scene.x_axis,
-            gs_interp,
-            label="MGS Reconstructed TX"
-        )
-        ax_3.legend()
         out_path = save_path if save_path is not None else self.plot_path
         self.log.info(f"Saving scene plot to {out_path}")
         fig.savefig(out_path)
