@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 
 from rice_bend import rs
 from rice_bend.config import DEFAULT_CONFIG, GerchbergSaxtonConfig, SimConfig, load_config
+from rice_bend.interp import interp_amp_phase, interp_real_imag
 from rice_bend.data_store import GSHistory, check_run_dir, make_run_dir, save_run
 from rice_bend.sim_scene import SimAperature, SimScene, parse_oscope_rx_data, parse_oscope_heatmap_data
 
@@ -22,19 +23,6 @@ GSResult = namedtuple(
     "GSResult",
     "curr_aper_f final_loss n_iters_run stop_reason seed loss_full history",
 )
-
-
-def interp_complex_to_axis(x_axis: np.ndarray, aper_f: np.ndarray,
-                           target_axis: np.ndarray) -> np.ndarray:
-    """Interpolate a complex aperture from `x_axis` onto `target_axis`, amplitude and
-    phase separately (matches the project's interpolation convention)."""
-    amp = scipy.interpolate.interp1d(
-        x_axis, np.abs(aper_f), kind="linear", fill_value=0,
-        bounds_error=False, assume_sorted=True)(target_axis)
-    phs = scipy.interpolate.interp1d(
-        x_axis, np.angle(aper_f), kind="linear", fill_value=0,
-        bounds_error=False, assume_sorted=True)(target_axis)
-    return amp * np.exp(1j * phs)
 
 
 def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
@@ -269,17 +257,9 @@ class MGS():
         else:
             tx_ap = self.gs_tx
 
-        # redefine tx aperature coordinates and interp data.
-        #assert self.scene.spacing < self.scene.tx_ap.dx
-        tx_profile_interp_func = scipy.interpolate.interp1d(
-            tx_ap.aper_axis,
-            tx_ap.aper_profile,
-            kind="linear",
-            fill_value=complex(0, 0),
-            bounds_error=False,
-            assume_sorted=True
-        )
-        tx_profile_interp = tx_profile_interp_func(self.scene.x_axis)
+        # redefine tx aperature coordinates and interp data
+        tx_profile_interp = interp_real_imag(tx_ap.aper_axis, tx_ap.aper_profile,
+                                             self.scene.x_axis)
 
         self.log.info("Computing wave propogation across scene")
         data = rs.rs(self.scene.x_axis, self.scene.z_axis, tx_profile_interp, self.wavelength,
@@ -310,15 +290,8 @@ class MGS():
         scene_rx_slice = self.scene.data[scene_r_z_idx]
 
         # interpolate from scene rx coordinates to rx aperature axis
-        rx_interp_func = scipy.interpolate.interp1d(
-            self.scene.x_axis,
-            scene_rx_slice,
-            kind="linear",
-            fill_value=complex(0, 0),
-            bounds_error=False,
-            assume_sorted=True
-        )
-        self.scene.rx_ap.aper_profile = rx_interp_func(self.scene.rx_ap.aper_axis)
+        self.scene.rx_ap.aper_profile = interp_real_imag(
+            self.scene.x_axis, scene_rx_slice, self.scene.rx_ap.aper_axis)
 
     def measure(self) -> None:
         """Sample the measured RX field onto the scene grid and build the error
@@ -330,10 +303,10 @@ class MGS():
         single measurement shared across every hypothesized TX location.
         """
         x_axis = self.scene.x_axis
-        orig_prop_f = self.scene.rx_ap.interp_axis(x_axis)
+        rx_ap = self.scene.rx_ap
+        orig_prop_f = interp_amp_phase(rx_ap.aper_axis, rx_ap.aper_profile, x_axis)
         # error computations are weighted to favor higher amplitude data, and ignore things outside the recieve aperature
         error_weighting = (np.abs(orig_prop_f) / np.abs(orig_prop_f).max()) + 0.25
-        rx_ap = self.scene.rx_ap
         error_weighting[(x_axis < rx_ap.x_min) | (x_axis > rx_ap.x_max)] = 0.0
         self._rx_field = orig_prop_f
         self._error_weighting = error_weighting
@@ -347,7 +320,12 @@ class MGS():
         """
         self.log.info(f"Running modified Gerchberg-saxton algorithm")
         self.measure()
-        orig_aper_amp = np.abs(self.scene.tx_ap.interp_axis(self.scene.x_axis))
+        # amplitude-only ON PURPOSE: this is the solver's fixed amplitude constraint
+        # and its support mask, not a field. Forcing it cartesian changes the
+        # constraint by 3.0-5.3% rel L2 with no error raised and no visibly broken plot.
+        tx_ap = self.scene.tx_ap
+        orig_aper_amp = np.abs(interp_amp_phase(tx_ap.aper_axis, tx_ap.aper_profile,
+                                                self.scene.x_axis))
         self.gs_history = self.reconstruct_at(
             tx_z=self.scene.tx_ap.z,
             orig_aper_amp=orig_aper_amp,
@@ -381,7 +359,7 @@ class MGS():
             capture=True,
             log=self.log,
         )
-        out_aper.aper_profile = interp_complex_to_axis(
+        out_aper.aper_profile = interp_amp_phase(
             self.scene.x_axis, result.curr_aper_f, out_aper.aper_axis)
         return result.history
 
@@ -490,15 +468,8 @@ class MGS():
         ax_2.grid(True)
 
         # interp from tx axis to scene x_axis
-        tx_interp_func = scipy.interpolate.interp1d(
-            self.scene.tx_ap.aper_axis,
-            self.scene.tx_ap.aper_profile,
-            kind="linear",
-            fill_value=complex(0, 0),
-            bounds_error=False,
-            assume_sorted=True
-        )
-        tx_interp = tx_interp_func(self.scene.x_axis)
+        tx_interp = interp_real_imag(self.scene.tx_ap.aper_axis,
+                                     self.scene.tx_ap.aper_profile, self.scene.x_axis)
 
         # interp from gs axis to scene x_axis
         gs_interp_amp_func = scipy.interpolate.interp1d(
