@@ -65,12 +65,24 @@ On a headless machine, force a non-interactive matplotlib backend so it writes
 MPLBACKEND=Agg mgs
 ```
 
-Each run is persisted to `<output_dir>/<run_name>/` (default `results/data_dump/`;
-existing contents are cleared on each run) — `run.npz` numeric arrays, `run.json`
-metadata + start/stop conditions, config snapshots, and a copy of the plot. Use
-`--seed` for reproducibility and `--no-save` to skip persistence. Tune the
+Each run is persisted to `<output_dir>/<run_name>/` (default `results/data_dump/`) —
+`run.npz` numeric arrays, `run.json` metadata + start/stop conditions, config
+snapshots, and a copy of the plot. Use `-o/--out PATH` to name the run directory
+outright, `--seed` for reproducibility and `--no-save` to skip persistence. Tune the
 `gerchberg_saxton` / `output` blocks in the config (e.g. `history_stride`, which controls
 how often per-iteration state is captured).
+
+An existing run directory is cleared when a new run saves into it, but **only if it
+was written by the same tool** — `mgs` will not clear a `grid-search-mgs` run or vice
+versa, and neither will clear a directory holding neither's marker file. The check
+runs before the solve, so a collision costs you nothing, and the directory is created
+only once the solve has finished, so an interrupted run never destroys previous
+results without producing new ones.
+
+To run against experimental `.mat` captures, see `--rx-path` / `--heatmap-path` below;
+the bench constants for that path (down-conversion chain, aperture edges, coordinate
+origins, amplitude normalisation, scene margins) live in the config's `experimental:`
+block.
 
 ### `grid-search-mgs`
 
@@ -81,36 +93,46 @@ plane (a fixed-width aperture with uniform assumed amplitude) against that one
 measurement, and saves each reconstruction as a **candidate beam**.
 
 ```bash
-grid-search-mgs                                # full sweep from the config's grid_search block
+grid-search-mgs                                 # full sweep from the config's grid_search block
 grid-search-mgs --freq 140e9 150e9 160e9        # run the whole sweep at each frequency (see below)
 grid-search-mgs --dry-run                       # enumerate the grid (counts + skipped points), no MGS
-grid-search-mgs --limit 10 --max-iters 500      # quick partial run
-grid-search-mgs --summary                       # also write residual_heatmap.png
-grid-search-mgs --scatter                        # also write residual_scatter.png (residual vs. distance to true TX)
-grid-search-mgs --scenes                         # one PNG per candidate beam (scenes/) + an averaged scene
-grid-search-mgs --anim                           # animate the candidate beams -> candidate_beams.mp4 (ffmpeg)
-grid-search-mgs --replot results/grid_search    # re-plot residual heatmap + scatter (+hc twins) + the true MGS run (TX known)
-grid-search-mgs --replot results/grid_search --skip-true-mgs   # plots only: skip the true-MGS recompute (no MGS solve)
-grid-search-mgs --replot results/grid_search --scenes          # + the averaged scene and per-candidate scenes
+grid-search-mgs --limit 10                      # quick partial run
+grid-search-mgs -j 8                            # worker processes (default: all cores; 1 = serial)
+grid-search-mgs -o results/my_run               # name the run directory outright
+grid-search-mgs --scenes                        # one PNG per candidate beam (scenes/) + an averaged scene
+grid-search-mgs --anim                          # animate the candidate beams -> candidate_beams.mp4 (ffmpeg)
+grid-search-mgs --true-mgs                      # also recompute the baseline MGS run at the KNOWN TX
+grid-search-mgs --replot results/grid_search    # re-plot a saved run (single- or multi-frequency)
 grid-search-mgs --replot results/grid_search --scenes --anim   # standalone scenes + animation for a saved run
 ```
 
+The residual heatmap and scatter (with their high-contrast twins) are always written.
+One rule sets everything else: **cheap plots always run; anything that re-solves MGS
+or renders per-candidate PNGs is opt-in** (`--true-mgs`, `--scenes`, `--anim`). A
+fresh run and a `--replot` of it therefore produce the same set of files.
+
+```bash
+```
+
 Configure the sweep in the `grid_search` block of the config: the `z` / `x_center` sweeps,
-the assumed aperture `width`/`dx`, a fixed `seed` (reused across candidates so residuals are
-comparable), and `gs_overrides.max_iters` for a cheaper search. Each run is saved to
+the assumed aperture `width` (its `dx` is provenance-only — candidates are sampled on the
+scene grid), a fixed `seed` (reused across candidates so residuals are comparable), and
+`gs_overrides.max_iters` for a cheaper search. Each run is saved to
 `<output_dir>/<run_name>/` — the run name comes from the config's `output.run_name`
-(overridable with `--run-name`; fallback `grid_search`), e.g. `results/scenario_caustic_hit/`.
-**Caveat:** plain `mgs` uses the same `output.run_name`, and a run directory is cleared when a
-new run starts saving into it — so running `mgs` with a scenario config replaces that
-scenario's saved grid-search run (and vice versa). Use `--run-name` to keep them apart:
+(fallback `grid_search`), e.g. `results/scenario_caustic_hit/`, or `-o/--out` names the
+directory outright.
+
+Plain `mgs` resolves `output.run_name` to the same path, but the two tools will no longer
+clear each other's runs: each refuses to clear a directory that does not carry its own
+marker file, and says so before starting work. Use `-o/--out` to keep them apart.
 
 - `candidate_beams.json` — manifest: ground-truth TX location, the grid spec, and the
   indexed candidate list (z, x_center, final residual, iters, stop reason) plus any skipped points.
 - `measurement.npz` — the shared RX field, error weighting, and RX / real-TX apertures.
 - `candidates/cand_####.{npz,json}` — each reconstructed aperture + loss curve, and its metadata.
-- `residual_heatmap.png` — (with `--summary`) GS residual over `(z, x_center)`; lower = better
+- `residual_heatmap.png` — GS residual over `(z, x_center)`; lower = better
   data fit, with the true location and best candidate marked.
-- `residual_scatter.png` — (with `--scatter`) a scatter of every candidate's GS residual (fixed
+- `residual_scatter.png` — a scatter of every candidate's GS residual (fixed
   `[0, 0.06]` axis, no colorbar) against its distance to the true TX, so the trend (a lower residual
   marking a candidate closer to the real transmitter) is visible.
 - `residual_heatmap_hc.png` / `residual_scatter_hc.png` — **high-contrast** twins written alongside
@@ -119,20 +141,25 @@ scenario's saved grid-search run (and vice versa). Use `--run-name` to keep them
   equal share of the colormap (or y-axis). The lowest (best-fit) residuals differentiate maximally
   while high residuals compress into nearly one dark color. Because the floor is data-driven, hc
   colors are NOT comparable across runs — use the linear `[0, 0.06]` plots for cross-run comparison.
-- `true_mgs_scene.png` — (on `--replot`) the single baseline MGS run at the *known* (true) TX
+- `true_mgs_scene.png` — (with `--true-mgs`) the single baseline MGS run at the *known* (true) TX
   location: the real scene vs. its MGS reconstruction plus the TX aperture phase/amplitude, exactly
   as plain `mgs` would produce. Unlike the residual plots this recomputes one full MGS solve.
 - `scenes/cand_####.png` + `scene_average.png` — (with `--scenes`) one 4-panel PNG per candidate
   (candidate beam, real beam at the same color scale, candidate aperture phase, candidate aperture
   amplitude; scenes mark the RX aperture in red and the TX aperture in blue), plus a single plot
-  averaging every candidate beam. Use `--scene-top N` to render only the N lowest-residual candidates,
-  and `--scene-z-planes` to trade resolution for speed.
+  averaging every candidate beam. Use `--scene-top N` to render only the N lowest-residual candidates.
 - `candidate_beams.mp4` — (with `--anim`) an animation sweeping the candidate beams, one frame per
-  candidate re-illuminating the scene (needs ffmpeg; `--fps` sets the frame rate, `--scene-top N` /
-  `--scene-z-planes` apply as for scenes).
+  candidate re-illuminating the scene (needs ffmpeg). Every frame is held in memory at once to fix
+  a shared colour scale, so `--anim` renders the 100 lowest-residual candidates by default;
+  `--scene-top N` overrides that, and warns past 400 frames.
 
 Lower residual = better data fit = more likely TX location, which is the input to the
-candidate-ranking step. On a headless machine set `MPLBACKEND=Agg` when using `--summary`/`--scatter`/`--replot`.
+candidate-ranking step. On a headless machine set `MPLBACKEND=Agg`.
+
+`--jobs/-j` sets the worker-process count for the sweep and for scene/animation rendering
+(default: all cores; `1` = serial). Results do not depend on it — every candidate uses the
+same fixed seed, and results are assembled by input index, so the manifest and every
+candidate `.npz` are byte-identical whatever `-j` you pass.
 
 #### Multiple frequencies
 
@@ -174,9 +201,14 @@ scales with wavelength when `rx_aperture.dx` is null). Results are laid out as:
   candidates that behave like the baseline stay see-through.
 
 `grid-search-mgs --replot <run_name>` detects the multi-frequency layout automatically: it regenerates
-every per-frequency plot, the frequency-averaged heatmap pair, and both 3D scatters — add
-`--skip-true-mgs` for a pure plots-only pass (no MGS solves rerun). A single frequency keeps the
-original flat layout (no `freq_<GHz>/` subdirs, no 3D/averaged plots).
+every per-frequency plot, the frequency-averaged heatmap pair, and both 3D scatters. It re-solves
+nothing unless you pass `--true-mgs`. A single frequency keeps the original flat layout (no
+`freq_<GHz>/` subdirs, no 3D/averaged plots).
+
+**When comparing results, re-run rather than `--replot`.** `--replot --true-mgs` regenerates
+`true_mgs_scene.png` from a fresh solve while reading residuals from the saved manifest, so
+replotting a run made by older code produces a figure pair that silently disagrees with itself.
+`schema_version` in `candidate_beams.json` / `run.json` distinguishes result sets.
 
 ### `mgs-animate`
 
@@ -194,8 +226,10 @@ mgs-animate --fps 20 --show
 How many frames each mode renders:
 
 - `--mode phase` animates **every captured iteration**, so its frame count is set by
-  `gerchberg_saxton.history_stride` (`1` = every iteration). Capturing more enlarges
-  `run.npz`; raise `mgs-animate --fps` to keep the video short.
+  `gerchberg_saxton.history_stride`. Capturing more enlarges `run.npz`; raise
+  `mgs-animate --fps` to keep the video short. Every shipped config now uses
+  `history_stride: 50` — at `1`, a default `mgs` run wrote 576 MB of capture arrays and
+  `--mode phase` rendered 10,000 frames rather than 200.
 - `--mode scene` recomputes a full Rayleigh-Sommerfeld propagation per frame (expensive),
   so it **subsamples the captured iterations to ~60 frames by default** regardless of
   `history_stride`. Use `--frame-stride 1` for every captured iteration (slow), and
@@ -205,11 +239,45 @@ How many frames each mode renders:
 
 All code lives in `src/rice_bend/`:
 
-- `rs.py` — Rayleigh-Sommerfeld wave propagation
+Numerics and geometry:
+
+- `rs.py` — Rayleigh-Sommerfeld propagation: the kernel, applying it, and whole-scene illumination
 - `caustic.py` — phase-plate design for parabolic beam trajectories
-- `sim_scene.py` — aperture/scene data structures and experimental `.mat` I/O
-- `config.py` — pydantic config models (scene, TX beam, RX aperture, Gerchberg-Saxton, output, grid search)
-- `data_store.py` — per-run persistence (run.npz / run.json)
-- `mgs.py` — modified Gerchberg-Saxton driver (entry point `mgs`)
-- `grid_search.py` — speculative TX-location sweep producing candidate beams (entry point `grid-search-mgs`)
-- `animate.py` — TX-estimate animation from a saved run (entry point `mgs-animate`)
+- `sim_scene.py` — aperture and scene geometry
+- `interp.py` — the complex-interpolation conventions, named (cartesian for fields, amplitude-only
+  for magnitudes, polar for the caustic construction). They are **not** interchangeable
+- `config.py` — pydantic config models (scene, TX beam, RX aperture, Gerchberg-Saxton, output,
+  grid search, experimental bench constants)
+
+Infrastructure:
+
+- `data_store.py` — per-run persistence (run.npz / run.json / config snapshots) and the small
+  I/O helpers both entry points share
+- `parallel.py` — one parallel map; `jobs=1` runs the same task function the pool would
+- `plotting.py` — the scene panel and line panel both entry points draw
+- `cli.py` — shared logging setup
+- `exp_data.py` — readers for the experimental `.mat` captures
+
+Entry points:
+
+- `mgs.py` — the MGS solver core and driver (`mgs`)
+- `animate.py` — TX-estimate animation from a saved run (`mgs-animate`)
+- `grid_search.py` — orchestration + CLI for the sweep (`grid-search-mgs`), over three modules:
+  - `grid_sweep.py` — enumerate the grid, solve at each point, persist. No matplotlib
+  - `residual_plots.py` — the residual grid and its five plots
+  - `candidate_scenes.py` — re-illuminated candidate beams and the true-MGS baseline
+
+## Tests
+
+There is no test suite; `scripts/characterize.sh` is the net. It runs a fixed command list
+into a scratch directory, extracts a numeric digest (final losses, iteration counts, stop
+reasons, npz key lists and content hashes, output file lists, the grid loss vectors and their
+index → (z, x_center) map) and diffs it against `scripts/characterize_expected.json`:
+
+```bash
+scripts/characterize.sh            # run + diff, non-zero exit on any difference
+scripts/characterize.sh --bless    # regenerate the expected digest
+```
+
+Takes ~25 s. The expected values are generated, never transcribed — hand-typed float literals
+rot the moment nobody re-blesses them.
