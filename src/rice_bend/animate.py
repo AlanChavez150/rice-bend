@@ -18,9 +18,10 @@ from pathlib import Path
 import coloredlogs
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation, FFMpegWriter, writers
+from matplotlib.animation import FuncAnimation
 
 from rice_bend import rs
+from rice_bend.data_store import write_mp4
 from rice_bend.parallel import map_workers, worker_shared
 
 
@@ -166,7 +167,7 @@ def animate_tx_estimate(run_dir: Path, out_path: Path, fps: int = 15,
         return est_line, loss_dot
 
     anim = FuncAnimation(fig, update, init_func=init, frames=n_frames, blit=False)
-    return _write_mp4(anim, fig, out_path, fps, dpi, show, log)
+    return write_mp4(anim, fig, out_path, fps, dpi, show, log)
 
 
 def animate_scene_reillumination(run_dir: Path, out_path: Path, fps: int = 15,
@@ -251,23 +252,7 @@ def animate_scene_reillumination(run_dir: Path, out_path: Path, fps: int = 15,
         return [im]
 
     anim = FuncAnimation(fig, update, frames=len(fsel), blit=False)
-    return _write_mp4(anim, fig, out_path, fps, dpi, show, log)
-
-
-def _write_mp4(anim, fig, out_path: Path, fps: int, dpi: int, show: bool, log) -> Path:
-    if not writers.is_available("ffmpeg"):
-        raise RuntimeError(
-            "ffmpeg is not available — install it (e.g. `apt install ffmpeg`) to render .mp4 animations."
-        )
-    out_path = Path(out_path).with_suffix(".mp4")
-    writer = FFMpegWriter(fps=fps)
-    log.info(f"Writing animation to {out_path} ({fps} fps)")
-    anim.save(out_path, writer=writer, dpi=dpi)
-
-    if show:
-        plt.show()
-    plt.close(fig)
-    return out_path
+    return write_mp4(anim, fig, out_path, fps, dpi, show, log)
 
 
 def main():
