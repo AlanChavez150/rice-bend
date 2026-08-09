@@ -79,7 +79,10 @@ class SimScene():
         self.tx_ap = tx_ap
         self.rx_ap = rx_ap
 
-        self.data = np.zeros(shape=(len(self.z_axis), len(self.x_axis)), dtype=np.complex128)
+        # Lazily filled by MGS.illuminate_real(). Allocating it here cost 130.6 MB
+        # of complex128 that the first propagation immediately overwrote with
+        # complex64 -- and in the grid-search path was never written at all.
+        self.data = None
 
 def parse_oscope_rx_data(path: Path, freq_c: float, lo_freq: float = 25e9, trx_n: float = 6) -> SimAperature:
     """

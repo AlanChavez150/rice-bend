@@ -280,10 +280,15 @@ def _collect_arrays(mgs) -> dict:
     out["scene_x_axis"] = f64(scene.x_axis)
     out["scene_z_axis"] = f64(scene.z_axis)
 
-    # large 2D scene fields (opt-in)
+    # large 2D scene fields (opt-in). Both are lazily filled, so a run that saved
+    # before illuminating would otherwise fail with an opaque TypeError on None.
     if mgs.output_cfg.save_scene_fields:
+        if scene.data is None or mgs.gs_rec_data is None:
+            raise RuntimeError(
+                "output.save_scene_fields is set but the scene has not been "
+                "illuminated; call illuminate_real() and illuminate_reconstructed()")
         out["scene_data"] = c64(scene.data)
-        out["gs_rec_scene_data"] = c64(mgs.gs_rec_scene.data)
+        out["gs_rec_scene_data"] = c64(mgs.gs_rec_data)
 
     return out
 

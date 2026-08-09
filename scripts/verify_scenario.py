@@ -39,7 +39,7 @@ def main() -> int:
         cfg.sim_scene.spacing = args.spacing
 
     mgs = MGS(args.freq, cfg)
-    mgs.run_sim(gs_rec=False, measure_rx=True)
+    mgs.illuminate_real()
 
     x = mgs.scene.x_axis
     amp0 = np.abs(mgs.scene.data[0])          # |field| on the RX plane (z = z_min = 0)

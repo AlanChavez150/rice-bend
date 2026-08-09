@@ -203,9 +203,11 @@ def run_grid_search(config: SimConfig, freq: float, *, limit: Optional[int] = No
         raise ValueError("config.grid_search is required for grid-search-mgs")
     log = log or logging.getLogger()
 
-    # 1. real scene + the single shared RX measurement
+    # 1. the single shared RX measurement. measure() synthesizes it by propagating
+    #    to the RX plane alone -- the sweep never reads mgs.scene.data, so illuminating
+    #    all 3400 planes here cost 1.71 s and +190 MB RSS per frequency, held in the
+    #    parent for the whole sweep, to keep one row.
     mgs = MGS(freq, config)
-    mgs.run_sim(gs_rec=False, measure_rx=True)
     mgs.measure()
 
     # 2. apply grid-only GS overrides (cheaper sweep + one fixed seed for comparability)
@@ -730,9 +732,9 @@ def make_true_mgs_plot(run_dir: Path, log: Optional[logging.Logger] = None) -> O
     out_path = run_dir / "true_mgs_scene.png"
     log.info(f"Reconstructing the true MGS run (TX known) at {freq/1e9:.3g} GHz -> {out_path}")
     mgs = MGS(freq, config)
-    mgs.run_sim(gs_rec=False)     # illuminate the real scene
-    mgs.run_gerch_sax()           # MGS solve at the true TX plane
-    mgs.run_sim(gs_rec=True)      # re-illuminate with the reconstructed aperture
+    mgs.illuminate_real()             # illuminate the real scene
+    mgs.run_gerch_sax()               # MGS solve at the true TX plane
+    mgs.illuminate_reconstructed()    # re-illuminate with the reconstructed aperture
     mgs.plot_scene(save_path=out_path, show=False)
     log.info(f"Wrote true MGS scene to {out_path}")
     return out_path
@@ -762,7 +764,7 @@ def _reilluminate(x_axis: np.ndarray, z_axis: np.ndarray, aper_axis: np.ndarray,
     """
     # zero-fill beyond the aperture extent. np.interp clamps to the edge values by
     # default, which would smear a spurious ~unit-amplitude source across the whole
-    # scene (energy from outside the aperture); match MGS run_sim's fill_value=0.
+    # scene (energy from outside the aperture); match MGS's fill_value=0.
     #
     # Deliberately np.interp and not interp.interp_real_imag: the two disagree at ULP
     # level (1.3e-7 on complex64), and this is the only thing keeping --replot
