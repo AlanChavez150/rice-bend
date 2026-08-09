@@ -71,7 +71,7 @@
     "stop_reason": "max_iters"
   },
   "check3_grid_serial": {
-    "cand_0003_sha256": "e64e3e96d30ed035ddf955fd4cd6fc1c21015ffe46be17c8b8064d187b229632",
+    "cand_0003_sha256": "473efaef18f7edc125cd93d08308dba375c090e3822ddddd2719683dadb91ece",
     "counts": {
       "ran": 6,
       "skipped": 0,
@@ -148,7 +148,7 @@
   "check4_grid_parallel": {
     "cand_0003_matches_serial": true,
     "digest": {
-      "cand_0003_sha256": "e64e3e96d30ed035ddf955fd4cd6fc1c21015ffe46be17c8b8064d187b229632",
+      "cand_0003_sha256": "473efaef18f7edc125cd93d08308dba375c090e3822ddddd2719683dadb91ece",
       "counts": {
         "ran": 6,
         "skipped": 0,
