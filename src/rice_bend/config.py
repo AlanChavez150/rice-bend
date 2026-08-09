@@ -138,7 +138,10 @@ class GridApertureConfig(BaseModel):
     given lateral `width` and sampling `dx`, with amplitude assumed uniform across
     it (the unknown real amplitude is not used by the search)."""
     width: float = Field(gt=0, description="Lateral span of the assumed aperture (m)")
-    dx: float = Field(gt=0, description="Aperture sampling spacing (m)")
+    dx: float = Field(gt=0,
+        description="PROVENANCE ONLY: recorded in the manifest, but no longer used. "
+                    "Candidate apertures are stored on the scene grid, so the scene's "
+                    "`spacing` is what samples them.")
 
 
 class GridGSOverrides(BaseModel):

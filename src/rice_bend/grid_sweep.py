@@ -24,10 +24,9 @@ from rice_bend import rs
 from rice_bend.config import GridSearchConfig, SimConfig, SimSceneConfig
 from rice_bend.data_store import (c64, f64, provenance, save_config_snapshot,
                                   write_json)
-from rice_bend.interp import interp_real_imag
 from rice_bend.mgs import MGS, gs_reconstruct
 from rice_bend.parallel import map_workers, worker_shared
-from rice_bend.sim_scene import SimAperature, sampled_axis
+from rice_bend.sim_scene import sampled_axis
 
 # Tolerance for inclusive bounds checks, to absorb float round-off in the sweep
 # endpoints (e.g. an aperture edge landing exactly on the scene boundary).
@@ -103,22 +102,28 @@ def _reconstruct_candidate(p: "GridPoint", shared: "SharedMeasurement") -> "Cand
     """Reconstruct one candidate beam at grid point `p`. Pure given `shared` — runs
     identically in the parent process or a worker."""
     x_axis = shared.x_axis
-    hyp = SimAperature(x_min=p.x_min, x_max=p.x_max, z=p.z, dx=p.dx)
     # uniform assumed amplitude over the hypothesized window (support = window)
-    assumed_amp = np.where((x_axis >= p.x_min) & (x_axis <= p.x_max), 1.0, 0.0)
+    support = (x_axis >= p.x_min) & (x_axis <= p.x_max)
+    assumed_amp = np.where(support, 1.0, 0.0)
     result = gs_reconstruct(
         tx_z=p.z, orig_aper_amp=assumed_amp, x_axis=x_axis, rx_z=shared.rx_z,
         rx_field=shared.rx_field, error_weighting=shared.error_weighting,
         wavelength=shared.wavelength, params=shared.params,
         capture=False, log=None,
     )
-    # the converged aperture is a FIELD, and across this window it wraps dozens of
-    # times, so cartesian: polar resampling destroyed 13.7% of its energy
-    aper_profile = interp_real_imag(x_axis, result.curr_aper_f, hyp.aper_axis)
+    # Stored on the SCENE grid, sliced to the window. curr_aper_f already lives on
+    # x_axis and is already zero outside the support, so resampling it down to a
+    # separate aperture axis -- only so a CandidateResult.aper_axis existed -- was
+    # pure loss, undone again by _reilluminate resampling it back up and a third
+    # time by _on_scene_axis.
+    #
+    # The slice is mandatory, not tidiness: storing the full scene axis would paint
+    # the blue TX marker across the entire scene in every candidate PNG and mp4
+    # frame, and would collapse _on_scene_axis's NaN gaps.
     return CandidateResult(
         point=p,
-        aper_axis=hyp.aper_axis.copy(),
-        aper_profile=aper_profile,
+        aper_axis=x_axis[support].copy(),
+        aper_profile=result.curr_aper_f[support].copy(),
         final_loss=result.final_loss,
         n_iters_run=int(result.n_iters_run),
         stop_reason=str(result.stop_reason),
