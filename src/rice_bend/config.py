@@ -163,6 +163,41 @@ class GridSearchConfig(BaseModel):
     gs_overrides: GridGSOverrides = Field(default_factory=GridGSOverrides)
 
 
+class ExperimentalConfig(BaseModel):
+    """Bench constants for the experimental (.mat) path, used only by
+    MGS.from_experiment. All lengths in meters.
+
+    These were thirteen magic numbers spread across two modules. They describe one
+    physical rig: how the capture is down-converted, where the TX aperture's edges
+    sit in rig coordinates, and how rig coordinates map into the scene.
+    """
+    lo_freq: float = Field(default=25e9, gt=0,
+        description="Local-oscillator frequency of the receive chain (Hz)")
+    trx_n: float = Field(default=6, gt=0,
+        description="LO multiplication factor; the carrier is down-mixed to "
+                    "freq - lo_freq*trx_n, which must be >= 0")
+    rig_x_origin: float = Field(default=0.3,
+        description="Rig x coordinates are mirrored about this point to get scene x")
+    rig_z_origin: float = Field(default=0.3,
+        description="Rig z coordinates are mirrored about this point to get scene z "
+                    "(heatmap capture)")
+    rx_z_origin: float = Field(default=0.35,
+        description="RX plane height: rx.z = rx_z_origin - (captured z), measured "
+                    "during experiment setup")
+    tx_left_edge: float = Field(default=0.2558,
+        description="TX aperture left edge in rig x coordinates")
+    tx_right_edge: float = Field(default=0.1573,
+        description="TX aperture right edge in rig x coordinates")
+    rx_amplitude_scale: float = Field(default=6.0,
+        description="The captured RX profile is renormalised to this peak amplitude, "
+                    "so the solver's error weighting and step size behave the same "
+                    "across captures")
+    scene_x_margin: float = Field(default=0.2,
+        description="Scene x extends this far either side of the TX aperture")
+    scene_z_min: float = Field(default=0.0, description="Scene floor (m)")
+    scene_z_max: float = Field(default=0.4, description="Scene ceiling (m)")
+
+
 class SimConfig(BaseModel):
     """Top-level simulation config."""
     sim_scene: SimSceneConfig
@@ -171,6 +206,9 @@ class SimConfig(BaseModel):
     plot_path: Path = Field(description="Path that plot_scene() writes the output figure to")
     gerchberg_saxton: GerchbergSaxtonConfig = Field(default_factory=GerchbergSaxtonConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
+    experimental: ExperimentalConfig = Field(default_factory=ExperimentalConfig,
+        description="Bench constants for the experimental .mat path (ignored by "
+                    "the simulated workflows)")
     grid_search: Optional[GridSearchConfig] = Field(default=None,
         description="Optional speculative TX-location sweep (used by grid-search-mgs)")
     frequencies: Optional[List[float]] = Field(default=None,
