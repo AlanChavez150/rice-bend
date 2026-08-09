@@ -189,6 +189,11 @@ class SimConfig(BaseModel):
         return self
 
 
+# Default config shipped in the repo's configs/ folder, used by both entry points
+# when --config is omitted.
+DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "configs" / "caustic_config.yml"
+
+
 def load_config(path: Path) -> SimConfig:
     """Loads and validates a simulation config .yml into a SimConfig model."""
     with open(path, "r") as f:

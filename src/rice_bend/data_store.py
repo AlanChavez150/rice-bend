@@ -162,7 +162,7 @@ def _f64(a: np.ndarray) -> np.ndarray:
     return np.asarray(a, dtype=np.float64)
 
 
-def _collect_arrays(mgs, is_exp: bool) -> dict:
+def _collect_arrays(mgs) -> dict:
     """Build the dict of arrays for run.npz. Guards every optional array."""
     out = {}
     scene = mgs.scene
@@ -204,7 +204,7 @@ def _collect_arrays(mgs, is_exp: bool) -> dict:
     return out
 
 
-def _collect_metadata(mgs, run_dir: Path, config, freq: float,
+def _collect_metadata(mgs, run_dir: Path, freq: float,
                       args_dict: dict, is_exp: bool, npz_keys) -> dict:
     """Build the JSON-safe metadata dict (scalars only)."""
     scene = mgs.scene
@@ -266,10 +266,10 @@ def _collect_metadata(mgs, run_dir: Path, config, freq: float,
 def save_run(mgs, run_dir: Path, config, config_path: Path, freq: float,
              args_dict: dict, is_exp: bool) -> None:
     """Persist a completed MGS run into run_dir."""
-    arrays = _collect_arrays(mgs, is_exp)
+    arrays = _collect_arrays(mgs)
     np.savez_compressed(run_dir / "run.npz", **arrays)
 
-    meta = _collect_metadata(mgs, run_dir, config, freq, args_dict, is_exp,
+    meta = _collect_metadata(mgs, run_dir, freq, args_dict, is_exp,
                              list(arrays.keys()))
     with open(run_dir / "run.json", "w") as f:
         json.dump(meta, f, indent=2, default=_json_safe)

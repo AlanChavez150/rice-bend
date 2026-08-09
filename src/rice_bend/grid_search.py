@@ -31,13 +31,11 @@ from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers the 3d project
 
 from rice_bend import __version__, rs
 from rice_bend.animate import _write_mp4
-from rice_bend.config import AxisSweep, GridSearchConfig, SimConfig, SimSceneConfig, load_config
+from rice_bend.config import (DEFAULT_CONFIG, AxisSweep, GridSearchConfig, SimConfig,
+                              SimSceneConfig, load_config)
 from rice_bend.data_store import _c64, _f64, _json_safe, check_run_dir, make_run_dir
-from rice_bend.mgs import MGS, gs_params_from_cfg, gs_reconstruct, interp_complex_to_axis
+from rice_bend.mgs import MGS, gs_reconstruct, interp_complex_to_axis
 from rice_bend.sim_scene import SimAperature
-
-# Default config shipped in the repo's configs/ folder (repo_root/configs/caustic_config.yml)
-DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "configs" / "caustic_config.yml"
 
 # Tolerance for inclusive bounds checks, to absorb float round-off in the sweep
 # endpoints (e.g. an aperture edge landing exactly on the scene boundary).
@@ -118,7 +116,7 @@ def grid_summary(points: List[GridPoint]) -> str:
 # Read-only measurement + GS hyperparameters shared by every candidate. It is small
 # (the measurement vectors, NOT the full 2D scene), so it is cheap to hand to workers.
 SharedMeasurement = namedtuple(
-    "SharedMeasurement", "x_axis rx_z rx_field error_weighting wavelength params seed")
+    "SharedMeasurement", "x_axis rx_z rx_field error_weighting wavelength params")
 
 # Per-worker copy of the shared measurement, set once by the pool initializer so it is
 # not re-pickled for every one of the (potentially hundreds of) candidate tasks.
@@ -135,7 +133,7 @@ def _reconstruct_candidate(p: "GridPoint", shared: "SharedMeasurement") -> "Cand
     result = gs_reconstruct(
         tx_z=p.z, orig_aper_amp=assumed_amp, x_axis=x_axis, rx_z=shared.rx_z,
         rx_field=shared.rx_field, error_weighting=shared.error_weighting,
-        wavelength=shared.wavelength, params=shared.params, seed=shared.seed,
+        wavelength=shared.wavelength, params=shared.params,
         capture=False, log=None,
     )
     aper_profile = interp_complex_to_axis(x_axis, result.curr_aper_f, hyp.aper_axis)
@@ -259,8 +257,8 @@ def run_grid_search(config: SimConfig, freq: float, *, limit: Optional[int] = No
         rx_field=np.asarray(mgs._rx_field).copy(),
         error_weighting=np.asarray(mgs._error_weighting).copy(),
         wavelength=float(wavelength),
-        params=gs_params_from_cfg(mgs.gs_cfg),
-        seed=mgs.gs_cfg.seed,
+        # snapshot, not an alias: the workers must not see a later mutation
+        params=mgs.gs_cfg.model_copy(),
     )
 
     total = len(usable)

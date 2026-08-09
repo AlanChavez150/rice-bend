@@ -43,7 +43,9 @@ gerchberg_saxton:
   bt_shrink: 0.5                   # backtracking shrink factor
   bt_tries: 8                      # max step reductions per iteration
   seed: null                       # null -> a seed is drawn at runtime and recorded
-  history_stride: 1                # capture phase/RX field every Nth iteration
+  history_stride: 50               # capture phase/RX field every Nth iteration
+                                   # (1 captured every iteration: ~50 s and 576 MB
+                                   #  of capture arrays for a single default run)
 
 # Run-output persistence.
 output:

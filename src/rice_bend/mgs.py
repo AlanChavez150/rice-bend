@@ -11,33 +11,9 @@ import scipy.interpolate
 import matplotlib.pyplot as plt
 
 from rice_bend import rs
-from rice_bend.config import SimConfig, load_config
+from rice_bend.config import DEFAULT_CONFIG, GerchbergSaxtonConfig, SimConfig, load_config
 from rice_bend.data_store import GSHistory, check_run_dir, make_run_dir, save_run
 from rice_bend.sim_scene import SimAperature, SimScene, parse_oscope_rx_data, parse_oscope_heatmap_data
-
-# Default config shipped in the repo's configs/ folder (repo_root/configs/caustic_config.yml)
-DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "configs" / "caustic_config.yml"
-
-
-# Modified Gerchberg-Saxton hyperparameters bundled as a plain (picklable) tuple so
-# the solver core can be handed to worker processes without an MGS/SimConfig instance.
-GSParams = namedtuple(
-    "GSParams",
-    "max_iters convergence_count lr0 bt_shrink bt_tries convergence_threshold history_stride",
-)
-
-
-def gs_params_from_cfg(gs_cfg) -> "GSParams":
-    """Pull the GS hyperparameters out of a GerchbergSaxtonConfig into a GSParams."""
-    return GSParams(
-        max_iters=gs_cfg.max_iters,
-        convergence_count=gs_cfg.convergence_count,
-        lr0=gs_cfg.lr0,
-        bt_shrink=gs_cfg.bt_shrink,
-        bt_tries=gs_cfg.bt_tries,
-        convergence_threshold=gs_cfg.convergence_threshold,
-        history_stride=gs_cfg.history_stride,
-    )
 
 
 # Result of one solver run. `curr_aper_f` is the reconstructed complex aperture on the
@@ -63,14 +39,14 @@ def interp_complex_to_axis(x_axis: np.ndarray, aper_f: np.ndarray,
 
 def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
                    rx_z: float, rx_field: np.ndarray, error_weighting: np.ndarray,
-                   wavelength: float, params: "GSParams", seed,
+                   wavelength: float, params: GerchbergSaxtonConfig,
                    capture: bool = False, log=None) -> "GSResult":
     """Modified Gerchberg-Saxton solver core (no MGS/SimScene instance required).
 
     Solves for the aperture phase at plane `tx_z` that best reproduces the measured RX
     field `rx_field`, holding the amplitude fixed at `orig_aper_amp` (defined on
-    `x_axis`; its nonzero region is the support). Pure given its arguments — every input
-    is a plain array/scalar, so this runs unchanged in a worker process.
+    `x_axis`; its nonzero region is the support). Pure given its arguments — arrays,
+    scalars and a picklable config model — so this runs unchanged in a worker process.
 
     With `capture=True` a GSHistory is built and per-iteration state recorded (the
     single-shot `mgs` path, used by animation); with `capture=False` only the dense loss
@@ -90,6 +66,7 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
     conv_threshold = params.convergence_threshold
 
     # seeded initial phase for reproducibility; draw + record a seed if none given
+    seed = params.seed
     if seed is None:
         seed = int(np.random.SeedSequence().entropy % (2**32))
     rng = np.random.default_rng(seed)
@@ -165,11 +142,8 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
                 n_iters_run = iter_idx + 1
                 break
 
-        if iter_idx == max_iters-1:
-            if log is not None:
-                log.error(f"MGS did not converge after {iter_idx+1} iterations")
-            stop_reason = "max_iters"
-            n_iters_run = max_iters
+    if stop_reason == "max_iters" and log is not None:
+        log.error(f"MGS did not converge after {max_iters} iterations")
 
     if history is not None:
         history.capture_final(iter_idx, loss, curr_aper_phase, curr_prop_f)
@@ -359,9 +333,8 @@ class MGS():
         orig_prop_f = self.scene.rx_ap.interp_axis(x_axis)
         # error computations are weighted to favor higher amplitude data, and ignore things outside the recieve aperature
         error_weighting = (np.abs(orig_prop_f) / np.abs(orig_prop_f).max()) + 0.25
-        for idx, x_val in enumerate(x_axis):
-            if x_val < self.scene.rx_ap.x_min or x_val > self.scene.rx_ap.x_max:
-                error_weighting[idx] = 0.0
+        rx_ap = self.scene.rx_ap
+        error_weighting[(x_axis < rx_ap.x_min) | (x_axis > rx_ap.x_max)] = 0.0
         self._rx_field = orig_prop_f
         self._error_weighting = error_weighting
 
@@ -404,59 +377,13 @@ class MGS():
             rx_field=self._rx_field,
             error_weighting=self._error_weighting,
             wavelength=self.wavelength,
-            params=gs_params_from_cfg(self.gs_cfg),
-            seed=self.gs_cfg.seed,
+            params=self.gs_cfg,
             capture=True,
             log=self.log,
         )
         out_aper.aper_profile = interp_complex_to_axis(
             self.scene.x_axis, result.curr_aper_f, out_aper.aper_axis)
         return result.history
-
-    def plot_mgs_helper(self, x_axis: np.ndarray, real_f: np.ndarray, test_f: np.ndarray, title: str):
-        fig = plt.figure(figsize=(20, 10), layout="constrained")
-        self.log.info(f"Plotting MGS helper: '{title}'")
-        fig.suptitle(title)
-        rows = 1
-        cols = 2
-        plot_index = 1
-        ampl_ax = fig.add_subplot(rows, cols, plot_index)
-        plot_index += 1
-        ampl_ax.set_title(f"Amplitude")
-        ampl_ax.set_xlabel("x (m)")
-        ampl_ax.set_ylabel("EMF (V/m)")
-        ampl_ax.grid(True)
-        ampl_ax.plot(
-            x_axis,
-            np.abs(real_f),
-            label="Real F"
-        )
-        ampl_ax.plot(
-            x_axis,
-            np.abs(test_f),
-            label="Test F"
-        )
-        ampl_ax.legend()
-
-        phs_ax = fig.add_subplot(rows, cols, plot_index)
-        plot_index += 1
-        phs_ax.set_title(f"Phase")
-        phs_ax.set_xlabel("x (m)")
-        phs_ax.set_ylabel("Phase [rad]")
-        phs_ax.grid(True)
-
-        phs_ax.plot(
-            x_axis,
-            np.unwrap(np.angle(real_f)),
-            label="Real TX"
-        )
-        phs_ax.plot(
-            x_axis,
-            np.unwrap(np.angle(test_f)),
-            label="MGS TX"
-        )
-        phs_ax.legend()
-        plt.show()
 
     def plot_scene(self, save_path=None, show=True):
         """Save the 4-panel scene plot (real vs MGS-reconstructed scene + TX aperture
@@ -767,7 +694,8 @@ def main():
     parser.add_argument(
         "--run-name",
         type=str,
-        help="Override output.run_name (suffix appended to the run directory name)",
+        help="Override output.run_name (the run directory NAME under output_dir; "
+             "it replaces the name, it is not appended to it)",
         default=None
     )
     parser.add_argument(
