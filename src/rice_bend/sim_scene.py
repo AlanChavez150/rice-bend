@@ -2,11 +2,26 @@ from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
-import scipy.constants
 import scipy.interpolate
 import h5py
 
-from rice_bend import caustic
+from rice_bend import caustic, rs
+from rice_bend.interp import interp_amp_phase
+
+
+def sampled_axis(lo: float, hi: float, spacing: float) -> np.ndarray:
+    """The project's scene sampling: linspace over [lo, hi] with as many points as
+    `spacing` fits into the span.
+
+    Note linspace's actual step is (hi - lo) / (n - 1), NOT `spacing` -- the
+    configured spacing sets the point COUNT and is never the step used. The "dx N
+    wavelengths" log lines are slightly wrong for the same reason. Changing this is
+    a real physics improvement that shifts every saved number in the 2nd-3rd
+    significant digit, so it is a decision to make between result sets, not during
+    a refactor.
+    """
+    return np.linspace(lo, hi, int((hi - lo) / spacing))
+
 
 class SimAperature():
     def __init__(self, x_min: float, x_max: float, z: float, dx: float):
@@ -15,12 +30,13 @@ class SimAperature():
         self.x_max = x_max
         self.z = z
         self.dx = dx
+        # Floor division on purpose (for now): `/` and `//` genuinely disagree in
+        # three shipped configs -- 0.11/0.00025 == 440.0 but // gives 439.0 -- so
+        # unifying this with sampled_axis perturbs those apertures by one sample.
+        # That is Stage 7d, its own commit.
         self.num_points = int((x_max - x_min) // dx)
         self.aper_axis = np.linspace(self.x_min, self.x_max, self.num_points)
         self.aper_profile = np.zeros(len(self.aper_axis), dtype=np.complex128)
-
-    def _wavenumber(self, freq: float) -> float:
-        return 2 * np.pi / (scipy.constants.c / freq)
 
     def make_caustic(self, freq: float, z_max: float, a: float, b: float, c: float):
         self.aper_profile = caustic.generate_aperature(
@@ -38,7 +54,7 @@ class SimAperature():
         Implements -k * x * sin(theta).
         Where theta trajectory of the beam, and k is the wavenumber
         """
-        k = self._wavenumber(freq)
+        k = rs.wavenumber(freq)
         theta_rad = theta_deg * (np.pi / 180)
         phase = -1.0  * k * self.aper_axis * np.sin(theta_rad)
         self.aper_profile = 1.0 * np.exp(1j * phase)
@@ -57,11 +73,8 @@ class SimScene():
         self.z_max = z_max
         self.spacing = spacing
 
-        x_points = int((self.x_max - self.x_min) / spacing)
-        self.x_axis = np.linspace(self.x_min, self.x_max, x_points)
-
-        z_points = int((self.z_max - self.z_min) / spacing)
-        self.z_axis = np.linspace(self.z_min, self.z_max, z_points)
+        self.x_axis = sampled_axis(self.x_min, self.x_max, spacing)
+        self.z_axis = sampled_axis(self.z_min, self.z_max, spacing)
 
         self.tx_ap = tx_ap
         self.rx_ap = rx_ap

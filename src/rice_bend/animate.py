@@ -27,7 +27,7 @@ from rice_bend import rs
 
 # Per-worker shared state for parallel scene-frame re-illumination (set by the pool
 # initializer so the read-only arrays are not re-pickled for every frame).
-_SceneAnimShared = namedtuple("_SceneAnimShared", "x amp phases z_axis wavelength tx_z behind_tx")
+_SceneAnimShared = namedtuple("_SceneAnimShared", "x amp phases z_axis wavelength tx_z")
 _SCENE_ANIM = None
 
 
@@ -42,9 +42,7 @@ def _reilluminate_frame(k: int) -> np.ndarray:
     """Re-illuminate the scene with the TX estimate at captured iteration k (worker task)."""
     s = _SCENE_ANIM
     u0 = s.amp * np.exp(1j * s.phases[k])
-    frame = np.abs(rs.rs(s.x, s.z_axis, u0, s.wavelength, z_src=s.tx_z, forward_dir=-1.0))
-    frame[s.behind_tx, :] = 0
-    return frame.astype(np.float32)
+    return np.abs(rs.illuminate(s.x, s.z_axis, u0, s.wavelength, s.tx_z))
 
 
 def find_latest_run(base: Path) -> Path:
@@ -236,16 +234,12 @@ def animate_scene_reillumination(run_dir: Path, out_path: Path, fps: int = 15,
 
     log.info(f"Re-illuminating scene for {len(fsel)} frames over {len(z_axis)} z-planes "
              f"(frame_stride={frame_stride}, z_stride={z_stride})")
-    # the aperture only radiates into the -Z half-space; zero the field behind the TX plane
-    behind_tx = z_axis > tx_z
     n_jobs = max(1, int(jobs))
     if n_jobs == 1 or len(fsel) <= 1:
         frames = []
         for j, k in enumerate(fsel):
             u0 = amp * np.exp(1j * phases[k])
-            frame = np.abs(rs.rs(x, z_axis, u0, wavelength, z_src=tx_z, forward_dir=-1.0))
-            frame[behind_tx, :] = 0
-            frames.append(frame)
+            frames.append(np.abs(rs.illuminate(x, z_axis, u0, wavelength, tx_z)))
             if j % 10 == 0:
                 log.info(f"  propagated frame {j + 1}/{len(fsel)} (iteration {int(iters[k])})")
     else:
@@ -253,7 +247,7 @@ def animate_scene_reillumination(run_dir: Path, out_path: Path, fps: int = 15,
         n_workers = min(n_jobs, len(fsel))
         log.info(f"  propagating {len(fsel)} frames across {n_workers} worker process(es)")
         shared = _SceneAnimShared(x=x, amp=amp, phases=phases, z_axis=z_axis,
-                                  wavelength=wavelength, tx_z=tx_z, behind_tx=behind_tx)
+                                  wavelength=wavelength, tx_z=tx_z)
         with ProcessPoolExecutor(max_workers=n_workers, initializer=_init_scene_anim_worker,
                                  initargs=(shared,)) as ex:
             # map preserves input order, so frames line up with fsel

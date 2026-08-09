@@ -23,7 +23,6 @@ from typing import List, Optional, Tuple
 import coloredlogs
 import matplotlib.pyplot as plt
 import numpy as np
-import scipy.constants
 from matplotlib.animation import FuncAnimation
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import LogNorm, Normalize, SymLogNorm
@@ -36,7 +35,7 @@ from rice_bend.config import (DEFAULT_CONFIG, AxisSweep, GridSearchConfig, SimCo
 from rice_bend.data_store import _c64, _f64, _json_safe, check_run_dir, make_run_dir
 from rice_bend.interp import interp_amp_phase
 from rice_bend.mgs import MGS, gs_reconstruct
-from rice_bend.sim_scene import SimAperature
+from rice_bend.sim_scene import SimAperature, sampled_axis
 
 # Tolerance for inclusive bounds checks, to absorb float round-off in the sweep
 # endpoints (e.g. an aperture edge landing exactly on the scene boundary).
@@ -62,12 +61,6 @@ class GridPoint:
         return self.skip_reason is None
 
 
-def _scene_x_axis(scene_cfg: SimSceneConfig) -> np.ndarray:
-    """Rebuild the scene's x sampling exactly as SimScene does (for the RS guard)."""
-    nx = int((scene_cfg.x_max - scene_cfg.x_min) / scene_cfg.spacing)
-    return np.linspace(scene_cfg.x_min, scene_cfg.x_max, nx)
-
-
 def enumerate_grid(grid_cfg: GridSearchConfig, scene_cfg: SimSceneConfig,
                    wavelength: float) -> List[GridPoint]:
     """Enumerate the (z, x_center) grid, flagging out-of-bounds / undersampled points.
@@ -78,7 +71,7 @@ def enumerate_grid(grid_cfg: GridSearchConfig, scene_cfg: SimSceneConfig,
     """
     half = grid_cfg.aperture.width / 2.0
     dx = grid_cfg.aperture.dx
-    x_axis = _scene_x_axis(scene_cfg)
+    x_axis = sampled_axis(scene_cfg.x_min, scene_cfg.x_max, scene_cfg.spacing)
     rx_plane = np.array([scene_cfg.z_min])  # RX/origin plane the field propagates to
 
     points: List[GridPoint] = []
@@ -837,9 +830,8 @@ def _reilluminate(x_axis: np.ndarray, z_axis: np.ndarray, aper_axis: np.ndarray,
     # against a 2400-point scene.
     ap = (np.interp(x_axis, aper_axis, aper_profile.real, left=0.0, right=0.0)
           + 1j * np.interp(x_axis, aper_axis, aper_profile.imag, left=0.0, right=0.0))
-    field = np.abs(rs.rs(x_axis, z_axis, ap, wavelength, z_src=tx_z, forward_dir=-1.0))
-    field[z_axis > tx_z, :] = 0.0
-    return field.astype(np.float32)
+    # np.abs of a complex64 field is already float32, so no cast is needed here.
+    return np.abs(rs.illuminate(x_axis, z_axis, ap, wavelength, tx_z))
 
 
 @dataclass
@@ -1541,7 +1533,7 @@ def main():
         if len(freqs) > 1:
             log.info(f"Dry run: enumerating grid at {freqs[0] / 1e9:g} GHz "
                      f"(of {len(freqs)} frequencies)")
-        wavelength = scipy.constants.c / freqs[0]
+        wavelength = rs.wavelength(freqs[0])
         points = enumerate_grid(config.grid_search, config.sim_scene, wavelength)
         log.info(grid_summary(points))
         for p in points:
