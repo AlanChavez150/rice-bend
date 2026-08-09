@@ -1,6 +1,5 @@
 import logging
 import argparse
-import copy
 from collections import namedtuple
 from pathlib import Path
 
@@ -145,159 +144,161 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
 class MGS():
     def __init__(self, freq: float, config: SimConfig):
         self.log = logging.getLogger()
-        # set up simulation scene from config
-        scene_cfg = config.sim_scene
-        x_min = scene_cfg.x_min
-        x_max = scene_cfg.x_max
-        z_min = scene_cfg.z_min
-        z_max = scene_cfg.z_max
-        spacing = scene_cfg.spacing
+        self.freq = freq
+        self.wavelength = rs.wavelength(freq)
         self.plot_path = config.plot_path
         self.gs_cfg = config.gerchberg_saxton
         self.output_cfg = config.output
         self.gs_history = None
         self._rx_field = None          # measured RX field on scene.x_axis (set by measure())
         self._error_weighting = None   # phase-retrieval error weighting (set by measure())
-        self.freq = freq
-        self.wavelength = rs.wavelength(freq)
-        rx_spacing_ratio = 1 / 20
-        rx_spacing = self.wavelength * rx_spacing_ratio
+        self.gs_rec_data = None        # scene re-illuminated by the reconstruction
 
         # Convention: the RX aperture sits at the origin (z=0), the bottom of the
-        # image. The TX aperture sits at the top of the scene (z=z_max) and projects
-        # toward -Z, so its beam travels *down* the full scene height to the RX.
-        # Move the TX around by changing tx.z (height) and its x_min/x_max (lateral).
-        # RX geometry comes from config (rx_aperture): a window of `width` centered
-        # at `x_center`. dx defaults to wavelength/20 (rx_spacing) when left null.
-        rx_cfg = config.rx_aperture
-        rx_dx = rx_cfg.dx if rx_cfg.dx is not None else rx_spacing
-        rx = SimAperature(
+        # image. The TX aperture sits above it and projects toward -Z, so its beam
+        # travels *down* to the RX. Move the TX by changing tx.z (height) and its
+        # x_min/x_max (lateral).
+        scene_cfg = config.sim_scene
+        rx = self._build_rx(config.rx_aperture)
+        tx = self._build_tx(config.tx_aperture, scene_cfg.z_min)
+        self.gs_tx = SimAperature(x_min=tx.x_min, x_max=tx.x_max, z=tx.z, dx=tx.dx)
+        self.scene = SimScene(
+            x_min=scene_cfg.x_min, x_max=scene_cfg.x_max,
+            z_min=scene_cfg.z_min, z_max=scene_cfg.z_max,
+            spacing=scene_cfg.spacing, rx_ap=rx, tx_ap=tx,
+        )
+        self._log_geometry()
+
+    def _build_rx(self, rx_cfg) -> SimAperature:
+        """The receive aperture: a window of `width` centred at `x_center`, at the
+        scene origin (z=0). `dx` defaults to wavelength/20 when left null, and is what
+        sets the receiver element count -- the independent variable in the
+        scenario_caustic_hit_lambda2/lambda4 experiments."""
+        # written as a multiply by 1/20, not a divide by 20: 0.05 is not exactly 1/20
+        # in binary, so the two disagree by an ulp (measured on 28 config x frequency
+        # combinations, though none of them moved num_points)
+        rx_dx = rx_cfg.dx if rx_cfg.dx is not None else self.wavelength * (1 / 20)
+        return SimAperature(
             x_min=rx_cfg.x_center - rx_cfg.width / 2.0,
             x_max=rx_cfg.x_center + rx_cfg.width / 2.0,
             z=0,
-            dx=rx_dx
+            dx=rx_dx,
         )
 
-        # TX aperture location/sampling/trajectory come from config (tx_aperture),
-        # defined independently of the scene grid.
-        tx_cfg = config.tx_aperture
-        tx = SimAperature(
-            x_min=tx_cfg.x_min,
-            x_max=tx_cfg.x_max,
-            z=tx_cfg.z,
-            dx=tx_cfg.dx
-        )
+    def _build_tx(self, tx_cfg, z_min: float) -> SimAperature:
+        """The transmit aperture and the beam it emits, defined independently of the
+        scene grid. Sets self.beam_type and self.has_real_aper."""
+        tx = SimAperature(x_min=tx_cfg.x_min, x_max=tx_cfg.x_max, z=tx_cfg.z, dx=tx_cfg.dx)
         assert tx.z > z_min, f"tx_aperture.z ({tx.z}) must be above the scene floor z_min ({z_min})"
-        # the caustic is parameterised by *distance from the aperture* along the
-        # beam, so feed it the downstream propagation length (TX plane down to the RX)
-        prop_length = tx.z - z_min
-        # The emitted beam is selected by tx_aperture.beam.type. `has_real_aper`
-        # marks that a known real aperture exists (true for both simulated beams;
-        # false for ExpMGS, where the TX aperture is unknown).
+
         beam = tx_cfg.beam
         self.beam_type = beam.type
+        # a known real aperture exists (both simulated beams); false for the
+        # experimental path, where the TX aperture is what we are trying to recover
         self.has_real_aper = True
         if beam.type == "caustic":
-            # caustic beam x(d) = a*d^2 + b*d + c (d = distance from TX)
+            # caustic beam x(d) = a*d^2 + b*d + c, d = distance travelled from the TX,
+            # so it is parameterised by the downstream propagation length
             a, b, c = beam.trajectory
-            tx.make_caustic(self.freq, prop_length, a, b, c)
+            tx.make_caustic(self.freq, tx.z - z_min, a, b, c)
         elif beam.type == "directional":
             # steered plane wave at the configured angle
             tx.make_steer(self.freq, theta_deg=beam.steer_angle_deg)
         else:
             raise ValueError(f"unknown beam type: {beam.type}")
+        return tx
 
-        self.gs_tx = SimAperature(
-            x_min=tx.x_min,
-            x_max=tx.x_max,
-            z=tx.z,
-            dx=tx.dx
-        )
-
-        self.scene = SimScene(
-            x_min=x_min,
-            x_max=x_max,
-            z_min=z_min,
-            z_max=z_max,
-            spacing=spacing,
-            rx_ap=rx,
-            tx_ap=tx
-        )
-
-        # reconstructed scene created be re-illumitating the TX aperature computed by gs
-        self.gs_rec_scene = copy.deepcopy(self.scene)
-
-        # Log parameters
+    def _log_geometry(self) -> None:
+        scene = self.scene
         self.log.info(f"Simulation scene:")
-        self.log.info(f" - X axis: {self.scene.x_min:0.3f} - {self.scene.x_max:0.3f}")
-        self.log.info(f" - Z axis: {self.scene.z_min:0.3f} - {self.scene.z_max:0.3f}")
+        self.log.info(f" - X axis: {scene.x_min:0.3f} - {scene.x_max:0.3f}")
+        self.log.info(f" - Z axis: {scene.z_min:0.3f} - {scene.z_max:0.3f}")
         self.log.info(f"RX aperature:")
-        rx_wl_ratio = self.scene.rx_ap.dx / self.wavelength
-        rx_width = self.scene.rx_ap.x_max - self.scene.rx_ap.x_min
-        self.log.info(f" - X axis: {self.scene.rx_ap.x_min:0.3f} {self.scene.rx_ap.x_max:0.3f} (width {rx_width:0.3f} m, dx {rx_wl_ratio:0.3f} wavelength)")
-        self.log.info(f" - Z: {self.scene.rx_ap.z:0.3f}")
+        rx_wl_ratio = scene.rx_ap.dx / self.wavelength
+        rx_width = scene.rx_ap.x_max - scene.rx_ap.x_min
+        self.log.info(f" - X axis: {scene.rx_ap.x_min:0.3f} {scene.rx_ap.x_max:0.3f} (width {rx_width:0.3f} m, dx {rx_wl_ratio:0.3f} wavelength)")
+        self.log.info(f" - Z: {scene.rx_ap.z:0.3f}")
         self.log.info(f"TX aperature ({self.beam_type} beam)")
-        tx_wl_ratio = self.scene.tx_ap.dx / self.wavelength
-        self.log.info(f" - X axis: {self.scene.tx_ap.x_min:0.3f} {self.scene.tx_ap.x_max:0.3f} (dx {tx_wl_ratio:0.3f} wavelength)")
-        self.log.info(f" - Z: {self.scene.tx_ap.z:0.3f}")
+        tx_wl_ratio = scene.tx_ap.dx / self.wavelength
+        self.log.info(f" - X axis: {scene.tx_ap.x_min:0.3f} {scene.tx_ap.x_max:0.3f} (dx {tx_wl_ratio:0.3f} wavelength)")
+        self.log.info(f" - Z: {scene.tx_ap.z:0.3f}")
 
-    def run_sim(self, gs_rec: bool = False, measure_rx: bool = True):
-        """
-        Simulates RF energy in entire scene for pretty plots.
-        Also optionally measures data at RX antennes for later use.
-        """
-        if gs_rec:
-            self.log.info("Running scene simulation with MGS reconstructed aperature")
-        else:
-            self.log.info("Running scene simulation with real aperature")
-
-        tx_ap = None
-        if not gs_rec:
-            tx_ap = self.scene.tx_ap
-        else:
-            tx_ap = self.gs_tx
-
-        # redefine tx aperature coordinates and interp data
-        tx_profile_interp = interp_real_imag(tx_ap.aper_axis, tx_ap.aper_profile,
-                                             self.scene.x_axis)
-
+    # ----------------------------------------------------------------- scene ---
+    def _propagate(self, tx_ap: SimAperature) -> np.ndarray:
+        """Illuminate the whole scene from `tx_ap`: resample its profile onto the
+        scene x-axis, then RS-propagate down through every z plane."""
+        u0 = interp_real_imag(tx_ap.aper_axis, tx_ap.aper_profile, self.scene.x_axis)
         self.log.info("Computing wave propogation across scene")
-        data = rs.illuminate(self.scene.x_axis, self.scene.z_axis, tx_profile_interp,
+        return rs.illuminate(self.scene.x_axis, self.scene.z_axis, u0,
                              self.wavelength, tx_ap.z)
-        if gs_rec:
-            self.gs_rec_scene.data = data
-        else:
-            self.scene.data = data
 
-        if gs_rec or not measure_rx:
-            # dont fill receiver data if doing re-construction
-            return
-        # Fill data at recievers
-        scene_r_z_idx = np.searchsorted(self.scene.z_axis, self.scene.rx_ap.z)-1
-        scene_r_z_idx = np.max([0, scene_r_z_idx]) # prevents indexes under zero
-        scene_r_z = self.scene.z_axis[scene_r_z_idx]
-        scene_r_z_next = self.scene.z_axis[scene_r_z_idx+1]
-        # check if closer to other z point
-        if np.abs(scene_r_z - self.scene.rx_ap.z) < np.abs(scene_r_z_next - self.scene.rx_ap.z):
-            scene_r_z_idx += 1
-            scene_r_z = scene_r_z_next
+    def illuminate_real(self) -> None:
+        """Fill scene.data with the field radiated by the real TX aperture.
 
-        # take slice of data from scene matrix
-        scene_rx_slice = self.scene.data[scene_r_z_idx]
+        Only the plots need this. The RX measurement does NOT come from here -- see
+        _synthesize_rx, which propagates to one plane instead of all 3400 of them.
+        """
+        self.log.info("Running scene simulation with real aperature")
+        self.scene.data = self._propagate(self.scene.tx_ap)
 
-        # interpolate from scene rx coordinates to rx aperature axis
-        self.scene.rx_ap.aper_profile = interp_real_imag(
-            self.scene.x_axis, scene_rx_slice, self.scene.rx_ap.aper_axis)
+    def illuminate_reconstructed(self) -> None:
+        """Fill gs_rec_data with the field radiated by the MGS-reconstructed aperture."""
+        self.log.info("Running scene simulation with MGS reconstructed aperature")
+        self.gs_rec_data = self._propagate(self.gs_tx)
+
+    # ----------------------------------------------------------- measurement ---
+    def _rx_plane_index(self) -> int:
+        """Index of the scene z-plane the RX measurement is taken from.
+
+        KNOWN BUG, preserved here so this stage moves no numbers: the comparison
+        steps to the NEXT (farther) plane when the current one is closer, so this
+        returns 1 rather than 0 for all 11 shipped configs. The measurement is
+        therefore synthesized one grid cell -- 0.25 mm, lambda/8 at 150 GHz -- away
+        from the plane gs_reconstruct actually models (rx_z = 0.0). Stage 7a deletes
+        this method; do not "tidy" it into an argmin here, because that is the fix
+        and it belongs in its own commit.
+        """
+        z_axis = self.scene.z_axis
+        rx_z = self.scene.rx_ap.z
+        idx = max(0, int(np.searchsorted(z_axis, rx_z)) - 1)
+        if np.abs(z_axis[idx] - rx_z) < np.abs(z_axis[idx + 1] - rx_z):
+            idx += 1
+        return idx
+
+    def _synthesize_rx(self) -> np.ndarray:
+        """Propagate the real TX aperture to the RX measurement plane and sample it
+        onto the RX element axis. Returns the complex RX aperture profile.
+
+        Propagates to ONE plane, not all of them. run_grid_search used to call
+        run_sim purely to get this, paying a full 3400 x 2400 scene (1.71 s and
+        +190 MB RSS per frequency, held in the parent for the whole sweep) to keep a
+        single row. Verified bit-identical: rs.rs(x, [z_k], ...)[0] equals
+        rs.rs(x, z_axis, ...)[k], since each row is computed independently from u0.
+
+        The round trip through rx_ap.aper_axis is kept deliberately -- it models the
+        receiver element spacing (lambda/2 vs lambda/20), which is the whole point of
+        scenario_caustic_hit_lambda2.yml.
+        """
+        scene = self.scene
+        tx_ap = scene.tx_ap
+        u0 = interp_real_imag(tx_ap.aper_axis, tx_ap.aper_profile, scene.x_axis)
+        z_meas = scene.z_axis[self._rx_plane_index()]
+        row = rs.rs(scene.x_axis, np.array([z_meas]), u0, self.wavelength,
+                    z_src=tx_ap.z, forward_dir=-1.0)[0]
+        return interp_real_imag(scene.x_axis, row, scene.rx_ap.aper_axis)
 
     def measure(self) -> None:
         """Sample the measured RX field onto the scene grid and build the error
         weighting used by phase retrieval. Idempotent.
 
-        For the pure-simulation path, run_sim(False) must have already filled
-        scene.rx_ap.aper_profile; for ExpMGS it is filled from experimental data
-        in __init__. The result (self._rx_field / self._error_weighting) is the
-        single measurement shared across every hypothesized TX location.
+        On the simulated path the measurement is synthesized here, by propagating
+        the known TX aperture to the RX plane. On the experimental path there is no
+        known TX aperture (has_real_aper is False) and rx_ap.aper_profile already
+        holds the measured data. The result (self._rx_field / self._error_weighting)
+        is the single measurement shared across every hypothesized TX location.
         """
+        if self.has_real_aper:
+            self.scene.rx_ap.aper_profile = self._synthesize_rx()
         x_axis = self.scene.x_axis
         rx_ap = self.scene.rx_ap
         orig_prop_f = interp_amp_phase(rx_ap.aper_axis, rx_ap.aper_profile, x_axis)
@@ -372,18 +373,23 @@ class MGS():
                      tx_axis=scene.tx_ap.aper_axis, tx_z=scene.tx_ap.z,
                      colorbar_label="EMW (V/m)")
 
+        if scene.data is None or self.gs_rec_data is None:
+            raise RuntimeError(
+                "plot_scene needs both scenes illuminated; call illuminate_real() and "
+                "illuminate_reconstructed() first")
+
         fig = plt.figure(figsize=(20, 10), layout="constrained")
         (ax_real, ax_rec), (ax_phase, ax_amp) = fig.subplots(2, 2)
 
         v_max = np.nanmax([np.nanmax(np.abs(scene.data)),
-                           np.nanmax(np.abs(self.gs_rec_scene.data))])
+                           np.nanmax(np.abs(self.gs_rec_data))])
         draw_scene(fig, ax_real, np.abs(scene.data), title="Scene Amplitude",
                    vmax=v_max, **panel)
         # Panel 2 autoscales. v_max above was computed to make the two panels
         # comparable and then commented out at the call; the reconstruction renders
         # dimmer than the real scene, so an independent scale is easier to read.
         # Pass vmax=v_max here instead to put them on one scale.
-        draw_scene(fig, ax_rec, np.abs(self.gs_rec_scene.data),
+        draw_scene(fig, ax_rec, np.abs(self.gs_rec_data),
                    title="MGS reconstruction Scene Amplitude", vmax=None, **panel)
 
         # both aperture panels are drawn against the full scene x extent
@@ -498,8 +504,7 @@ class ExpMGS(MGS):
         heatmap_scene = parse_oscope_heatmap_data(heatmap_path, base_scene, x_offset, self.freq)
         self.scene = heatmap_scene
 
-        # reconstructed scene created be re-illumitating the TX aperature computed by gs
-        self.gs_rec_scene = copy.deepcopy(self.scene)
+        self.gs_rec_data = None   # filled by illuminate_reconstructed()
 
         # Log parameters
         self.log.info(f"Simulation scene:")
@@ -607,16 +612,15 @@ def main():
         rx_path = Path(args.rx_path)
         heatmap_path = Path(args.heatmap_path)
         mgs = ExpMGS(rx_path, heatmap_path, args.freq, config)
-        #mgs.run_sim(False, False)
         mgs.run_gerch_sax()
-        mgs.run_sim(True, False)
+        mgs.illuminate_reconstructed()
         mgs.plot_scene()
         is_exp = True
     else:
         mgs = MGS(args.freq, config)
-        mgs.run_sim(False)
+        mgs.illuminate_real()
         mgs.run_gerch_sax()
-        mgs.run_sim(True)
+        mgs.illuminate_reconstructed()
         mgs.plot_scene()
         is_exp = False
 
