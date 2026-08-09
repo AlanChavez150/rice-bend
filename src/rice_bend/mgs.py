@@ -5,7 +5,6 @@ from pathlib import Path
 
 import numpy as np
 import scipy.interpolate
-import matplotlib.pyplot as plt
 
 from rice_bend import rs
 from rice_bend.cli import setup_logging
@@ -433,6 +432,10 @@ class MGS():
         """Save the 4-panel scene plot (real vs MGS-reconstructed scene + TX aperture
         phase/amplitude). Writes to `save_path` if given, else self.plot_path; only
         opens an interactive window when `show` is True (set False for headless/batch)."""
+        # imported here, not at module scope: pyplot costs ~137 ms and drags in
+        # mpl_toolkits.mplot3d, which the grid sweep imports mgs without ever wanting
+        import matplotlib.pyplot as plt
+
         self.log.info("Plotting scene")
 
         scene, gs_tx = self.scene, self.gs_tx
