@@ -48,6 +48,43 @@ def sampling_quality(x_axis: np.ndarray, z_targets: np.ndarray, wavelength: floa
     dr_ideal = np.sqrt(wave_ratio**2 + rmax**2 + 2 * wave_ratio * np.sqrt(rmax**2 + nearest**2)) - rmax
     return dr_ideal / dr_real
 
+def check_sampling(x_axis: np.ndarray, z_targets: np.ndarray, wavelength: float,
+                   z_src: float = 0.0, forward_dir: float = -1.0) -> None:
+    """Raise if the transverse sampling is too coarse for this propagation."""
+    quality = sampling_quality(x_axis, z_targets, wavelength, z_src=z_src,
+                               forward_dir=forward_dir)
+    if quality < 1:
+        dx = x_axis[1] - x_axis[0]
+        raise RuntimeError(f"needs denser sampling. {quality=} {dx=} {wavelength=}")
+
+
+def rs_kernel(x_axis: np.ndarray, wavelength: float, prop: float, n: float = 1.0):
+    """The RS kernel for one SIGNED propagation distance (see rs() for the sign
+    convention): forward when prop >= 0, adjoint / back-propagation when prop < 0.
+
+    Split out from rs() because the kernel is a constant of the geometry while the
+    field is not. Building it costs a scipy.special.hankel1 over the whole x axis --
+    0.375 ms against fftconvolve's 0.110 ms -- so a solver that holds its geometry
+    fixed should build it once, not 3 times per iteration for up to 10,000
+    iterations. See gs_reconstruct.
+    """
+    if prop >= 0:
+        return kernel_rs(x_axis, wavelength, prop, n)
+    return kernel_rs_inverse(x_axis, wavelength, prop, n)
+
+
+def rs_apply(u0: np.ndarray, h: np.ndarray, dx: float) -> np.ndarray:
+    """Propagate source field `u0` with a prebuilt kernel `h`.
+
+    The complex64 result is load-bearing, not incidental: it is what rs() produces
+    (it accumulates into a complex64 matrix), the solver's convergence test reads
+    the resulting loss at float32, and changing this quantisation flips candidate
+    rankings. Verified bit-identical to rs()'s own downcast.
+    """
+    return np.asarray(scipy.signal.fftconvolve(u0, h, mode="same") * dx,
+                      dtype=np.complex64)
+
+
 def rs(x_axis: np.ndarray, z_targets: np.ndarray, u0: np.ndarray, wavelength: float,
        z_src: float = 0.0, forward_dir: float = -1.0) -> np.ndarray:
     """
@@ -69,9 +106,7 @@ def rs(x_axis: np.ndarray, z_targets: np.ndarray, u0: np.ndarray, wavelength: fl
     dx = x_axis[1] - x_axis[0]
 
     # worst-case (densest) sampling requirement is set by the nearest target plane
-    quality = sampling_quality(x_axis, z_targets, wavelength, z_src=z_src, forward_dir=forward_dir)
-    if quality < 1:
-        raise RuntimeError(f"needs denser sampling. {quality=} {dx=} {wavelength=}")
+    check_sampling(x_axis, z_targets, wavelength, z_src=z_src, forward_dir=forward_dir)
 
     # Benchmarked (do not re-litigate): batching this loop into one 2D kernel matrix
     # and a single fftconvolve runs at 0.86-0.93x -- i.e. SLOWER -- at every size
@@ -80,13 +115,7 @@ def rs(x_axis: np.ndarray, z_targets: np.ndarray, u0: np.ndarray, wavelength: fl
     # gs_reconstruct does exactly that via rs_kernel/rs_apply.
     s_mat = np.zeros(shape=(len(prop), len(x_axis)), dtype=np.complex64)
     for z_idx, curr_prop in enumerate(prop):
-        h = None
-        if curr_prop >= 0:
-            h = kernel_rs(x_axis, wavelength, curr_prop, 1.0)
-        else:
-            h = kernel_rs_inverse(x_axis, wavelength, curr_prop, 1.0)
-        s = scipy.signal.fftconvolve(u0, h, mode="same") * dx
-        s_mat[z_idx] = s
+        s_mat[z_idx] = rs_apply(u0, rs_kernel(x_axis, wavelength, curr_prop), dx)
 
     return s_mat
 
