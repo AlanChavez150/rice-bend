@@ -3,12 +3,12 @@ import argparse
 from collections import namedtuple
 from pathlib import Path
 
-import coloredlogs
 import numpy as np
 import scipy.interpolate
 import matplotlib.pyplot as plt
 
 from rice_bend import rs
+from rice_bend.cli import setup_logging
 from rice_bend.config import DEFAULT_CONFIG, GerchbergSaxtonConfig, SimConfig, load_config
 from rice_bend.interp import interp_amp_phase, interp_real_imag
 from rice_bend.plotting import draw_line_panel, draw_scene
@@ -525,23 +525,10 @@ def main():
         default=DEFAULT_CONFIG
     )
     parser.add_argument(
-        "--output-dir",
-        type=Path,
-        help="Override output.output_dir from config (base dir for run folders)",
-        default=None
-    )
-    parser.add_argument(
-        "--run-name",
-        type=str,
-        help="Override output.run_name (the run directory NAME under output_dir; "
-             "it replaces the name, it is not appended to it)",
-        default=None
-    )
-    parser.add_argument(
         "--out", "-o",
         type=Path,
         help="Run directory to write this run into, named outright "
-             "(overrides output.output_dir + output.run_name)",
+             "(default: <output.output_dir>/<output.run_name>)",
         default=None
     )
     parser.add_argument(
@@ -557,17 +544,11 @@ def main():
         default=False
     )
     args = parser.parse_args()
-
-    fmt = "%(levelname)s: %(message)s"
-    level = "INFO"
-    if bool(args.debug): level = "DEBUG"
-    coloredlogs.install(level=level, fmt=fmt)
+    setup_logging(args.debug)
 
     config = load_config(args.config)
 
     # apply CLI overrides onto the config
-    if args.output_dir is not None: config.output.output_dir = args.output_dir
-    if args.run_name is not None: config.output.run_name = args.run_name
     if args.out is not None:
         config.output.output_dir = Path(args.out).parent
         config.output.run_name = Path(args.out).name

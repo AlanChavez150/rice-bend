@@ -84,7 +84,11 @@
       "candidate_beams.json",
       "config_snapshot.json",
       "config_source.yml",
-      "measurement.npz"
+      "measurement.npz",
+      "residual_heatmap.png",
+      "residual_heatmap_hc.png",
+      "residual_scatter.png",
+      "residual_scatter_hc.png"
     ],
     "grid_map": [
       [
@@ -157,7 +161,11 @@
         "candidate_beams.json",
         "config_snapshot.json",
         "config_source.yml",
-        "measurement.npz"
+        "measurement.npz",
+        "residual_heatmap.png",
+        "residual_heatmap_hc.png",
+        "residual_scatter.png",
+        "residual_scatter_hc.png"
       ],
       "grid_map": [
         [
@@ -224,14 +232,22 @@
       "freq_140GHz/config_snapshot.json",
       "freq_140GHz/config_source.yml",
       "freq_140GHz/measurement.npz",
+      "freq_140GHz/residual_heatmap.png",
+      "freq_140GHz/residual_heatmap_hc.png",
       "freq_140GHz/residual_heatmap_vs_avg.png",
       "freq_140GHz/residual_heatmap_vs_avg_hc.png",
+      "freq_140GHz/residual_scatter.png",
+      "freq_140GHz/residual_scatter_hc.png",
       "freq_150GHz/candidate_beams.json",
       "freq_150GHz/config_snapshot.json",
       "freq_150GHz/config_source.yml",
       "freq_150GHz/measurement.npz",
+      "freq_150GHz/residual_heatmap.png",
+      "freq_150GHz/residual_heatmap_hc.png",
       "freq_150GHz/residual_heatmap_vs_avg.png",
       "freq_150GHz/residual_heatmap_vs_avg_hc.png",
+      "freq_150GHz/residual_scatter.png",
+      "freq_150GHz/residual_scatter_hc.png",
       "frequencies.json",
       "residual_heatmap_avg.png",
       "residual_heatmap_avg_hc.png",
@@ -266,8 +282,12 @@
           "config_snapshot.json",
           "config_source.yml",
           "measurement.npz",
+          "residual_heatmap.png",
+          "residual_heatmap_hc.png",
           "residual_heatmap_vs_avg.png",
-          "residual_heatmap_vs_avg_hc.png"
+          "residual_heatmap_vs_avg_hc.png",
+          "residual_scatter.png",
+          "residual_scatter_hc.png"
         ],
         "freq_hz": 140000000000.0,
         "grid_map": [
@@ -337,8 +357,12 @@
           "config_snapshot.json",
           "config_source.yml",
           "measurement.npz",
+          "residual_heatmap.png",
+          "residual_heatmap_hc.png",
           "residual_heatmap_vs_avg.png",
-          "residual_heatmap_vs_avg_hc.png"
+          "residual_heatmap_vs_avg_hc.png",
+          "residual_scatter.png",
+          "residual_scatter_hc.png"
         ],
         "freq_hz": 150000000000.0,
         "grid_map": [

@@ -15,12 +15,12 @@ import logging
 from collections import namedtuple
 from pathlib import Path
 
-import coloredlogs
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 
 from rice_bend import rs
+from rice_bend.cli import setup_logging
 from rice_bend.data_store import write_mp4
 from rice_bend.parallel import map_workers, worker_shared
 
@@ -289,7 +289,7 @@ def main():
     parser.add_argument("--debug", action="store_true", default=False)
     args = parser.parse_args()
 
-    coloredlogs.install(level="DEBUG" if args.debug else "INFO", fmt="%(levelname)s: %(message)s")
+    setup_logging(args.debug)
 
     run_dir = resolve_run_dir(args.run)
     if args.mode == "scene":
