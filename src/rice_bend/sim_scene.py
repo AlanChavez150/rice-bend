@@ -27,12 +27,11 @@ class SimAperature():
         self.x_max = x_max
         self.z = z
         self.dx = dx
-        # Floor division on purpose (for now): `/` and `//` genuinely disagree in
-        # three shipped configs -- 0.11/0.00025 == 440.0 but // gives 439.0 -- so
-        # unifying this with sampled_axis perturbs those apertures by one sample.
-        # That is Stage 7d, its own commit.
-        self.num_points = int((x_max - x_min) // dx)
-        self.aper_axis = np.linspace(self.x_min, self.x_max, self.num_points)
+        # Same sampling rule as the scene. This used to floor-divide, which disagrees
+        # with `/` wherever the span is an exact multiple of dx: 0.11/0.00025 is
+        # 440.0, but // gives 439.0.
+        self.aper_axis = sampled_axis(x_min, x_max, dx)
+        self.num_points = len(self.aper_axis)
         self.aper_profile = np.zeros(len(self.aper_axis), dtype=np.complex128)
 
     def make_caustic(self, freq: float, z_max: float, a: float, b: float, c: float):
