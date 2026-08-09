@@ -1,0 +1,406 @@
+{
+  "check1_mgs_tiny": {
+    "files": [
+      "config_snapshot.json",
+      "config_source.yml",
+      "run.json",
+      "run.npz",
+      "tiny_check.png"
+    ],
+    "final_loss": 0.018596000399317466,
+    "gs_iter_indices": [
+      0,
+      10,
+      20,
+      30,
+      39
+    ],
+    "n_iters_run": 40,
+    "npz_content_sha256": "23a3a85df6097b3b1844bc6078f935e9a71f1290f3f088242109a561160b02ee",
+    "npz_keys": [
+      "gs_error_weighting",
+      "gs_fixed_aper_amp",
+      "gs_initial_phase",
+      "gs_iter_indices",
+      "gs_loss_captured",
+      "gs_loss_full",
+      "gs_phase_captured",
+      "gs_prop_field_captured",
+      "gs_support",
+      "gs_target_rx_field",
+      "gs_tx_aper_axis",
+      "gs_tx_aper_profile",
+      "rx_aper_axis",
+      "rx_aper_profile",
+      "scene_x_axis",
+      "scene_z_axis",
+      "tx_real_aper_axis",
+      "tx_real_aper_profile",
+      "x_axis"
+    ],
+    "seed": 0,
+    "stop_reason": "max_iters"
+  },
+  "check2_mgs_caustic_hit": {
+    "files": [
+      "config_snapshot.json",
+      "config_source.yml",
+      "run.json",
+      "run.npz",
+      "scenario_caustic_hit.png"
+    ],
+    "final_loss": 0.0022510759819359084,
+    "gs_tx_aper_profile_norm": 16.957584381103516,
+    "n_iters_run": 800,
+    "npz_content_sha256": "830c1f31bb78da5f43f63912b0d9474731b39e9d296fff4019287a43ddb17e98",
+    "npz_keys": [
+      "gs_error_weighting",
+      "gs_fixed_aper_amp",
+      "gs_initial_phase",
+      "gs_loss_full",
+      "gs_support",
+      "gs_target_rx_field",
+      "gs_tx_aper_axis",
+      "gs_tx_aper_profile",
+      "rx_aper_axis",
+      "rx_aper_profile",
+      "scene_x_axis",
+      "scene_z_axis",
+      "tx_real_aper_axis",
+      "tx_real_aper_profile",
+      "x_axis"
+    ],
+    "stop_reason": "max_iters"
+  },
+  "check3_grid_serial": {
+    "cand_0003_sha256": "1df00fc9513712a5b5122d352d25c516de7862d62cc080df81deb8ee9cf1940e",
+    "counts": {
+      "ran": 6,
+      "skipped": 0,
+      "total": 144,
+      "usable": 144
+    },
+    "files": [
+      "candidate_beams.json",
+      "config_snapshot.json",
+      "config_source.yml",
+      "measurement.npz"
+    ],
+    "grid_map": [
+      [
+        0,
+        0.15,
+        -0.15
+      ],
+      [
+        1,
+        0.15,
+        -0.12272727272727273
+      ],
+      [
+        2,
+        0.15,
+        -0.09545454545454546
+      ],
+      [
+        3,
+        0.15,
+        -0.06818181818181818
+      ],
+      [
+        4,
+        0.15,
+        -0.04090909090909091
+      ],
+      [
+        5,
+        0.15,
+        -0.013636363636363641
+      ]
+    ],
+    "ground_truth": {
+      "real_tx_x_max": -0.035,
+      "real_tx_x_min": -0.167,
+      "real_tx_z": 0.3
+    },
+    "measurement_sha256": "d045855bad11abc6c731e7a73878e46accf98a57325e716bac445de1844ce9d5",
+    "n_candidate_files": 12,
+    "n_iters_run": [
+      800,
+      800,
+      800,
+      800,
+      800,
+      800
+    ],
+    "residuals": [
+      0.05123621424695353,
+      0.04874041374325273,
+      0.011344557215683162,
+      0.006351004362400713,
+      0.006355057160586937,
+      0.009858933243613024
+    ],
+    "seed": 0
+  },
+  "check4_grid_parallel": {
+    "cand_0003_matches_serial": true,
+    "digest": {
+      "cand_0003_sha256": "1df00fc9513712a5b5122d352d25c516de7862d62cc080df81deb8ee9cf1940e",
+      "counts": {
+        "ran": 6,
+        "skipped": 0,
+        "total": 144,
+        "usable": 144
+      },
+      "files": [
+        "candidate_beams.json",
+        "config_snapshot.json",
+        "config_source.yml",
+        "measurement.npz"
+      ],
+      "grid_map": [
+        [
+          0,
+          0.15,
+          -0.15
+        ],
+        [
+          1,
+          0.15,
+          -0.12272727272727273
+        ],
+        [
+          2,
+          0.15,
+          -0.09545454545454546
+        ],
+        [
+          3,
+          0.15,
+          -0.06818181818181818
+        ],
+        [
+          4,
+          0.15,
+          -0.04090909090909091
+        ],
+        [
+          5,
+          0.15,
+          -0.013636363636363641
+        ]
+      ],
+      "ground_truth": {
+        "real_tx_x_max": -0.035,
+        "real_tx_x_min": -0.167,
+        "real_tx_z": 0.3
+      },
+      "measurement_sha256": "d045855bad11abc6c731e7a73878e46accf98a57325e716bac445de1844ce9d5",
+      "n_candidate_files": 12,
+      "n_iters_run": [
+        800,
+        800,
+        800,
+        800,
+        800,
+        800
+      ],
+      "residuals": [
+        0.05123621424695353,
+        0.04874041374325273,
+        0.011344557215683162,
+        0.006351004362400713,
+        0.006355057160586937,
+        0.009858933243613024
+      ],
+      "seed": 0
+    },
+    "manifest_matches_serial": true
+  },
+  "check5_multifreq": {
+    "files": [
+      "freq_140GHz/candidate_beams.json",
+      "freq_140GHz/config_snapshot.json",
+      "freq_140GHz/config_source.yml",
+      "freq_140GHz/measurement.npz",
+      "freq_140GHz/residual_heatmap_vs_avg.png",
+      "freq_140GHz/residual_heatmap_vs_avg_hc.png",
+      "freq_150GHz/candidate_beams.json",
+      "freq_150GHz/config_snapshot.json",
+      "freq_150GHz/config_source.yml",
+      "freq_150GHz/measurement.npz",
+      "freq_150GHz/residual_heatmap_vs_avg.png",
+      "freq_150GHz/residual_heatmap_vs_avg_hc.png",
+      "frequencies.json",
+      "residual_heatmap_avg.png",
+      "residual_heatmap_avg_hc.png",
+      "residual_scatter_3d.png",
+      "residual_scatter_3d_diff.png",
+      "residual_scatter_3d_hc.png"
+    ],
+    "index": {
+      "frequencies": [
+        {
+          "dir": "freq_140GHz",
+          "freq_hz": 140000000000.0,
+          "wavelength_m": 0.0021413747
+        },
+        {
+          "dir": "freq_150GHz",
+          "freq_hz": 150000000000.0,
+          "wavelength_m": 0.0019986163866666665
+        }
+      ],
+      "ground_truth": {
+        "real_tx_x_center": -0.101,
+        "real_tx_z": 0.3
+      },
+      "schema_version": 1
+    },
+    "per_frequency": {
+      "freq_140GHz": {
+        "argmin": 3,
+        "files": [
+          "candidate_beams.json",
+          "config_snapshot.json",
+          "config_source.yml",
+          "measurement.npz",
+          "residual_heatmap_vs_avg.png",
+          "residual_heatmap_vs_avg_hc.png"
+        ],
+        "freq_hz": 140000000000.0,
+        "grid_map": [
+          [
+            0,
+            0.15,
+            -0.15
+          ],
+          [
+            1,
+            0.15,
+            0.0
+          ],
+          [
+            2,
+            0.15,
+            0.15
+          ],
+          [
+            3,
+            0.475,
+            -0.15
+          ],
+          [
+            4,
+            0.475,
+            0.0
+          ],
+          [
+            5,
+            0.475,
+            0.15
+          ],
+          [
+            6,
+            0.8,
+            -0.15
+          ],
+          [
+            7,
+            0.8,
+            0.0
+          ],
+          [
+            8,
+            0.8,
+            0.15
+          ]
+        ],
+        "losses": [
+          0.0580128868139121,
+          0.04200109146864706,
+          0.05613905775196221,
+          0.01859269248415896,
+          0.05245870430395392,
+          0.06029463850146869,
+          0.048529690427014945,
+          0.05210103463890442,
+          0.052592897564520735
+        ],
+        "n_candidate_files": 18
+      },
+      "freq_150GHz": {
+        "argmin": 3,
+        "files": [
+          "candidate_beams.json",
+          "config_snapshot.json",
+          "config_source.yml",
+          "measurement.npz",
+          "residual_heatmap_vs_avg.png",
+          "residual_heatmap_vs_avg_hc.png"
+        ],
+        "freq_hz": 150000000000.0,
+        "grid_map": [
+          [
+            0,
+            0.15,
+            -0.15
+          ],
+          [
+            1,
+            0.15,
+            0.0
+          ],
+          [
+            2,
+            0.15,
+            0.15
+          ],
+          [
+            3,
+            0.475,
+            -0.15
+          ],
+          [
+            4,
+            0.475,
+            0.0
+          ],
+          [
+            5,
+            0.475,
+            0.15
+          ],
+          [
+            6,
+            0.8,
+            -0.15
+          ],
+          [
+            7,
+            0.8,
+            0.0
+          ],
+          [
+            8,
+            0.8,
+            0.15
+          ]
+        ],
+        "losses": [
+          0.051755545574209624,
+          0.040463660874639436,
+          0.05381843263801013,
+          0.03659475778654576,
+          0.04953223168014387,
+          0.05665296463605689,
+          0.047472211689022464,
+          0.049184243363459584,
+          0.04957330629059996
+        ],
+        "n_candidate_files": 18
+      }
+    }
+  }
+}

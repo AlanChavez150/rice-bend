@@ -79,16 +79,59 @@ class GSHistory:
         self.final_loss = float(final_loss)
 
 
-def make_run_dir(output_base: Path, run_name: Optional[str]) -> Path:
-    """Create and return <output_base>/<run_name>/ (run_name defaults to 'data_dump').
+# Marker files identifying which entry point owns a run directory. `mgs` and
+# `grid-search-mgs` resolve output.run_name to the SAME path, so without this a
+# scenario config run through one tool silently deletes the other's saved results.
+RUN_DIR_MARKERS = {
+    "mgs": ("run.json",),
+    "grid": ("candidate_beams.json", "frequencies.json"),
+}
 
-    If the directory already exists its contents are cleared (with a warning), so each
-    run starts from a clean directory.
+
+def check_run_dir(output_base: Path, run_name: Optional[str], kind: str) -> Path:
+    """Resolve <output_base>/<run_name>/ and exit if clearing it would destroy data
+    this run does not own. Creates and deletes nothing.
+
+    Callers run this up front, because make_run_dir is deliberately deferred until
+    after the solve — without a pre-flight the sweep would discover the collision
+    only after burning hours of compute.
     """
-    name = run_name or "data_dump"
-    run_dir = Path(output_base) / name
+    if kind not in RUN_DIR_MARKERS:
+        raise ValueError(f"unknown run kind {kind!r}; expected one of {sorted(RUN_DIR_MARKERS)}")
+    markers = RUN_DIR_MARKERS[kind]
+    run_dir = Path(output_base) / (run_name or "data_dump")
+    if not run_dir.exists():
+        return run_dir
+
+    def refuse(why: str) -> None:
+        logging.getLogger().error(
+            f"Refusing to clear {run_dir}: {why}. Pass -o/--out to write somewhere else.")
+        raise SystemExit(2)
+
+    if not run_dir.is_dir():
+        refuse("it exists and is not a directory")
+    if any(run_dir.iterdir()) and not any((run_dir / m).exists() for m in markers):
+        refuse(f"it is not empty and holds none of {list(markers)}, so it was not "
+               f"written by this tool (kind={kind!r})")
+    return run_dir
+
+
+def make_run_dir(output_base: Path, run_name: Optional[str], kind: str) -> Path:
+    """Create and return <output_base>/<run_name>/ (run_name defaults to 'data_dump'),
+    cleared of any previous run. Refuses to clear a directory this run does not own
+    (see check_run_dir).
+
+    Ordering matters and is the caller's responsibility: invoke this only once the
+    expensive work has finished, so an interrupted run never destroys prior results
+    without producing new ones. A multi-frequency sweep additionally clears its base
+    directory once and only once (grid_search's `_get_base`) — clearing it per
+    frequency would delete the frequency subdirectory just written.
+    """
+    run_dir = check_run_dir(output_base, run_name, kind)
     if run_dir.exists():
-        logging.getLogger().warning(f"Run directory {run_dir} already exists — clearing its contents")
+        if any(run_dir.iterdir()):
+            logging.getLogger().warning(
+                f"Run directory {run_dir} already exists — clearing its contents")
         shutil.rmtree(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir
