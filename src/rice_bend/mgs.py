@@ -332,27 +332,17 @@ class MGS():
         self.gs_rec_data = self._propagate(self.gs_tx)
 
     # ----------------------------------------------------------- measurement ---
-    def _rx_plane_index(self) -> int:
-        """Index of the scene z-plane the RX measurement is taken from.
-
-        KNOWN BUG, preserved here so this stage moves no numbers: the comparison
-        steps to the NEXT (farther) plane when the current one is closer, so this
-        returns 1 rather than 0 for all 11 shipped configs. The measurement is
-        therefore synthesized one grid cell -- 0.25 mm, lambda/8 at 150 GHz -- away
-        from the plane gs_reconstruct actually models (rx_z = 0.0). Stage 7a deletes
-        this method; do not "tidy" it into an argmin here, because that is the fix
-        and it belongs in its own commit.
-        """
-        z_axis = self.scene.z_axis
-        rx_z = self.scene.rx_ap.z
-        idx = max(0, int(np.searchsorted(z_axis, rx_z)) - 1)
-        if np.abs(z_axis[idx] - rx_z) < np.abs(z_axis[idx + 1] - rx_z):
-            idx += 1
-        return idx
-
     def _synthesize_rx(self) -> np.ndarray:
         """Propagate the real TX aperture to the RX measurement plane and sample it
         onto the RX element axis. Returns the complex RX aperture profile.
+
+        Propagates directly to rx_ap.z -- the plane gs_reconstruct actually models.
+        It used to snap to the nearest scene z-plane, with the comparison inverted so
+        it landed on the FARTHER one (index 1, never 0, for all 12 shipped configs):
+        the measurement was synthesized 0.25 mm, lambda/8 at 150 GHz, away from where
+        it was then fitted. Snapping is not merely inverted but wrong in principle --
+        config.py permits z_min > 0, where rx.z sits below z_axis[0] and no scene
+        plane is the right answer.
 
         Propagates to ONE plane, not all of them. run_grid_search used to call
         run_sim purely to get this, paying a full 3400 x 2400 scene (1.71 s and
@@ -367,8 +357,7 @@ class MGS():
         scene = self.scene
         tx_ap = scene.tx_ap
         u0 = interp_real_imag(tx_ap.aper_axis, tx_ap.aper_profile, scene.x_axis)
-        z_meas = scene.z_axis[self._rx_plane_index()]
-        row = rs.rs(scene.x_axis, np.array([z_meas]), u0, self.wavelength,
+        row = rs.rs(scene.x_axis, np.array([scene.rx_ap.z]), u0, self.wavelength,
                     z_src=tx_ap.z, forward_dir=-1.0)[0]
         return interp_real_imag(scene.x_axis, row, scene.rx_ap.aper_axis)
 
