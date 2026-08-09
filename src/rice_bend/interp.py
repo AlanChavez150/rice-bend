@@ -1,5 +1,5 @@
-"""The two complex-interpolation conventions this project uses, named for what
-they do — because they are not interchangeable and the choice is physics.
+"""The complex-interpolation conventions this project uses, named for what they do —
+because they are not interchangeable and the choice is physics.
 
 `interp_amp_phase` interpolates |f| and angle(f) separately. That is right for a
 slowly varying phase and wrong across the ±π branch cut: a target sample landing
@@ -16,6 +16,16 @@ Naming them is what makes the convention a one-line, reviewable decision at each
 call site instead of nine lines of interp1d boilerplate. The names are
 load-bearing in the other direction too: these are same-signature siblings, so
 swapping one for the other is a one-keystroke way to silently change the physics.
+
+Which to use, as the code now stands:
+  interp_real_imag  — every FIELD: the RX measurement, and the converged aperture on
+                      both the single-shot and grid paths
+  interp_amplitude  — the solver's fixed amplitude constraint and support mask, and
+                      the scene plot's amplitude panel. Magnitudes, not fields
+  interp_amp_phase  — the caustic construction ONLY, where the aperture is built with
+                      |aper| == 1 on a descending axis. Changing it there would
+                      invalidate every HIT/MISS and FWHM claim in the config comments
+                      and the README table
 
 Deliberately NOT absorbed here: the two np.interp sites (grid_search's
 `_reilluminate` and animate's `_aligned_reference_phase`). np.interp and
@@ -46,6 +56,21 @@ def interp_amp_phase(src_x: np.ndarray, src_f: np.ndarray, target_x: np.ndarray,
         src_x, np.angle(src_f), kind="linear", fill_value=0,
         bounds_error=False, assume_sorted=assume_sorted)(target_x)
     return amp * np.exp(1j * phs)
+
+
+def interp_amplitude(src_x: np.ndarray, src_f: np.ndarray, target_x: np.ndarray, *,
+                     assume_sorted: bool = True) -> np.ndarray:
+    """Interpolate |src_f| onto `target_x`, discarding the phase. Real-valued, so no
+    branch cut can arise.
+
+    For the places that genuinely want a magnitude -- the solver's fixed amplitude
+    constraint and its support mask, and the amplitude panel of the scene plot.
+    Written as np.abs(interp_amp_phase(...)) those sites looked like a field
+    interpolation whose phase was thrown away, which invited "fixing" them.
+    """
+    return scipy.interpolate.interp1d(
+        src_x, np.abs(src_f), kind="linear", fill_value=0,
+        bounds_error=False, assume_sorted=assume_sorted)(target_x)
 
 
 def interp_real_imag(src_x: np.ndarray, src_f: np.ndarray,

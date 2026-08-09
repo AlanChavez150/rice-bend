@@ -4,12 +4,11 @@ from collections import namedtuple
 from pathlib import Path
 
 import numpy as np
-import scipy.interpolate
 
 from rice_bend import rs
 from rice_bend.cli import setup_logging
 from rice_bend.config import DEFAULT_CONFIG, GerchbergSaxtonConfig, SimConfig, load_config
-from rice_bend.interp import interp_amp_phase, interp_real_imag
+from rice_bend.interp import interp_amplitude, interp_real_imag
 from rice_bend.plotting import draw_line_panel, draw_scene
 from rice_bend.data_store import GSHistory, check_run_dir, make_run_dir, save_run
 from rice_bend.exp_data import parse_oscope_heatmap_data, parse_oscope_rx_data
@@ -375,7 +374,11 @@ class MGS():
             self.scene.rx_ap.aper_profile = self._synthesize_rx()
         x_axis = self.scene.x_axis
         rx_ap = self.scene.rx_ap
-        orig_prop_f = interp_amp_phase(rx_ap.aper_axis, rx_ap.aper_profile, x_axis)
+        # A FIELD, so cartesian: interpolating its phase through the ±π branch cut
+        # corrupted the measurement by 20.8% rel L2 on scenario_caustic_hit and 55%
+        # on the lambda/2-spaced variant, and the solver then fitted the corruption
+        # at full weight.
+        orig_prop_f = interp_real_imag(rx_ap.aper_axis, rx_ap.aper_profile, x_axis)
         # error computations are weighted to favor higher amplitude data, and ignore things outside the recieve aperature
         error_weighting = (np.abs(orig_prop_f) / np.abs(orig_prop_f).max()) + 0.25
         error_weighting[(x_axis < rx_ap.x_min) | (x_axis > rx_ap.x_max)] = 0.0
@@ -395,8 +398,8 @@ class MGS():
         # and its support mask, not a field. Forcing it cartesian changes the
         # constraint by 3.0-5.3% rel L2 with no error raised and no visibly broken plot.
         tx_ap = self.scene.tx_ap
-        orig_aper_amp = np.abs(interp_amp_phase(tx_ap.aper_axis, tx_ap.aper_profile,
-                                                self.scene.x_axis))
+        orig_aper_amp = interp_amplitude(tx_ap.aper_axis, tx_ap.aper_profile,
+                                         self.scene.x_axis)
         self.gs_history = self.reconstruct_at(
             tx_z=self.scene.tx_ap.z,
             orig_aper_amp=orig_aper_amp,
@@ -430,7 +433,8 @@ class MGS():
             capture=True,
             log=self.log,
         )
-        out_aper.aper_profile = interp_amp_phase(
+        # the converged aperture is a FIELD, and it is heavily wrapped -- cartesian
+        out_aper.aper_profile = interp_real_imag(
             self.scene.x_axis, result.curr_aper_f, out_aper.aper_axis)
         return result.history
 
@@ -474,9 +478,7 @@ class MGS():
         xlim = (scene.x_min, scene.x_max)
         tx_interp = interp_real_imag(scene.tx_ap.aper_axis, scene.tx_ap.aper_profile,
                                      scene.x_axis)
-        gs_amp = scipy.interpolate.interp1d(
-            gs_tx.aper_axis, np.abs(gs_tx.aper_profile), kind="linear",
-            fill_value=0, bounds_error=False, assume_sorted=True)(scene.x_axis)
+        gs_amp = interp_amplitude(gs_tx.aper_axis, gs_tx.aper_profile, scene.x_axis)
 
         phase_series, amp_series = [], []
         if self.has_real_aper:
