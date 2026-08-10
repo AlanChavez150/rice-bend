@@ -3,7 +3,8 @@
 **Status:** adopted (2026-08-09). **Implemented (noiseless variant, same date):**
 `src/rice_bend/analysis.py` computes `N_E(eps)` into every grid run's
 analysis.json, and `mgs-study` plots it against the two localization errors —
-argmin distance and top-10 mean distance to the true TX
+argmin distance and the adaptive top-candidates mean distance (the argmin's
+8-connected cluster of near-ties within 1.5× of the minimum loss)
 (`study_metrics_vs_ndof.png`).
 
 ## Implemented variant: N_E(eps), no noise model

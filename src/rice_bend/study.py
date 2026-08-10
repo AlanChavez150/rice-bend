@@ -27,7 +27,7 @@ from typing import Callable, List, Optional, Tuple
 import numpy as np
 import yaml
 
-from rice_bend.analysis import TOP_K, analysis_from_manifest, write_analysis
+from rice_bend.analysis import analysis_from_manifest, write_analysis
 from rice_bend.cli import setup_logging
 from rice_bend.config import SimConfig, load_config, resolve_frequencies
 from rice_bend.data_store import check_run_dir, make_run_dir, write_json
@@ -35,7 +35,7 @@ from rice_bend.grid_search import persist_and_plot
 from rice_bend.grid_sweep import run_grid_search
 from rice_bend.residual_plots import summary_from_manifest
 
-STUDY_SCHEMA_VERSION = 2
+STUDY_SCHEMA_VERSION = 3
 STUDY_NAME_FILE = "study.json"
 STUDY_DEFAULT_CONFIG = (Path(__file__).resolve().parents[2] / "configs"
                         / "scenario_caustic_hit_pm5.yml")
@@ -126,8 +126,9 @@ def _record(study: StudyDef, value: float, point_name: str, analysis: dict,
         "error_mm": 1000.0 * err_m if err_m is not None else None,
         "argmin": ({"z": argmin["z"], "x_center": argmin["x_center"],
                     "final_loss": argmin["final_loss"]} if argmin else None),
-        "top10_mean_dist_m": top_mean,
-        "top10_mean_dist_mm": 1000.0 * top_mean if top_mean is not None else None,
+        "top_mean_dist_m": top_mean,
+        "top_mean_dist_mm": 1000.0 * top_mean if top_mean is not None else None,
+        "n_top_candidates": analysis.get("n_top_candidates"),
         "energy_pct": 100.0 * mean_frac if mean_frac is not None else None,
         "n_dof_total": n_dof.get("total"),
         "n_dof_per_freq": ([p.get("n_dof") for p in n_dof.get("per_freq", [])]
@@ -266,7 +267,7 @@ def _write_study_json(root: Path, study: StudyDef, base_config, records: List[di
 # the two plotted error series: record key, legend label, color, marker
 _ERROR_SERIES = (
     ("error_mm", "argmin to true TX", "C0", "o"),
-    ("top10_mean_dist_mm", f"top-{TOP_K} mean to true TX", "C1", "s"),
+    ("top_mean_dist_mm", "top candidates mean to true TX", "C1", "s"),
 )
 
 
@@ -280,12 +281,19 @@ def _plot_study(study: StudyDef, records: List[dict], out_path: Path, log) -> No
     fig, ax = plt.subplots(figsize=(9, 6), layout="constrained")
     drew = False
     for key, label, color, marker in _ERROR_SERIES:
-        pts = [(r["x_value"], r[key]) for r in plotted if r.get(key) is not None]
+        pts = [(r["x_value"], r[key], r) for r in plotted if r.get(key) is not None]
         if not pts:
             continue
         drew = True
         ax.plot([p[0] for p in pts], [p[1] for p in pts], marker=marker,
                 color=color, label=label)
+        if key == "top_mean_dist_mm":
+            # the adaptive set size is part of the signal — annotate it
+            for x, y, r in pts:
+                if r.get("n_top_candidates"):
+                    ax.annotate(f"n={r['n_top_candidates']}", (x, y),
+                                textcoords="offset points", xytext=(6, -11),
+                                fontsize=7, alpha=0.8, color="C1")
     if drew:
         if study.x_axis == "energy_pct":
             # x is measured, not the swept parameter — label each point with it

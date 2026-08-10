@@ -219,9 +219,10 @@ def _hc_title(title: str, hc: bool) -> str:
 
 
 def _overlay_analysis(ax, summary: ResidualSummary, analysis: dict) -> None:
-    """Draw the numeric analysis on a heatmap: solid red outlines on the top-K
-    cells. Pure axes-space geometry over the pcolormesh cells (cell_edges
-    matches shading='nearest'), so it is identical on the linear and hc twins.
+    """Draw the numeric analysis on a heatmap: solid red outlines on the
+    adaptive top-candidates set (the argmin's 8-connected near-tie cluster).
+    Pure axes-space geometry over the pcolormesh cells (cell_edges matches
+    shading='nearest'), so it is identical on the linear and hc twins.
     Legend entry via a proxy handle."""
     z_e = cell_edges(summary.z_values)
     x_e = cell_edges(summary.x_values)
@@ -233,8 +234,11 @@ def _overlay_analysis(ax, summary: ResidualSummary, analysis: dict) -> None:
                                z_e[i + 1] - z_e[i], fill=False, edgecolor="red",
                                linewidth=1.3, zorder=4))
     if top:
+        n = analysis.get("n_top_candidates", len(top))
+        factor = (analysis.get("top_candidates_criterion") or {}).get("loss_factor")
+        crit = f", ≤{factor:g}× min" if factor else ""
         ax.plot([], [], color="red", linewidth=1.3,
-                label=f"top {len(top)} candidates")
+                label=f"top candidates (n={n}{crit})")
 
 
 def plot_residual_heatmap(summary: ResidualSummary, out_path: Path,

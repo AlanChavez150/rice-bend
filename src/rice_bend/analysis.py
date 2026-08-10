@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import List, Optional, Sequence, TYPE_CHECKING
 
 import numpy as np
+from scipy import ndimage
 
 from rice_bend import rs
 from rice_bend.data_store import write_json
@@ -34,8 +35,12 @@ if TYPE_CHECKING:
     from rice_bend.residual_plots import ResidualSummary
 
 ANALYSIS_NAME = "analysis.json"
-ANALYSIS_SCHEMA_VERSION = 3
-TOP_K = 10                 # candidates outlined solid red on the heatmaps
+ANALYSIS_SCHEMA_VERSION = 4
+TOP_LOSS_FACTOR = 1.5      # top candidates = the argmin's 8-connected cluster of
+                           # cells with loss <= factor * min; the count is
+                           # adaptive (calibrated on the observed ~1e-6 near-tie
+                           # band at the lambda/20 loss floor, as a fraction)
+TOP_MAX_STORED = 300       # cap on stored entries; stats always use the full set
 N_DOF_EPS = 0.1            # the project-wide accuracy convention (see the docs)
 
 
@@ -188,8 +193,8 @@ def analyze_grid(z_values: Sequence[float], x_values: Sequence[float],
     Cells are addressed as (z_idx, x_idx) with candidate index = z_idx*nx + x_idx
     (enumerate_grid's z-outer/x-inner order). NaN cells (skipped / not run) are
     excluded everywhere. `argmin.error_distance_m` and `top_mean_dist_to_truth_m`
-    (unweighted mean over the top-K cells, argmin included) are the two
-    localization errors the parameter studies put on their y-axis.
+    (unweighted mean over the adaptive top-candidates set, argmin included) are
+    the two localization errors the parameter studies put on their y-axis.
     """
     zs = np.asarray(z_values, dtype=float)
     xs = np.asarray(x_values, dtype=float)
@@ -199,7 +204,8 @@ def analyze_grid(z_values: Sequence[float], x_values: Sequence[float],
     n_finite = int(finite.sum())
     out = {
         "schema_version": ANALYSIS_SCHEMA_VERSION,
-        "top_k": TOP_K,
+        "top_candidates_criterion": {"loss_factor": TOP_LOSS_FACTOR,
+                                     "connectivity": 8},
         "ground_truth": {"real_tx_z": float(real_tx_z),
                          "real_tx_x_center": float(real_tx_x_center)},
         "loss": {"n_finite_cells": n_finite,
@@ -207,6 +213,9 @@ def analyze_grid(z_values: Sequence[float], x_values: Sequence[float],
                  "max": _f(np.nanmax(grid)) if n_finite else None},
         "argmin": None,
         "top_candidates": [],
+        "n_top_candidates": 0,
+        "n_qualifying_total": 0,
+        "top_candidates_truncated": False,
         "top_mean_dist_to_truth_m": None,
         "energy": energy,
         "n_dof": n_dof,
@@ -228,21 +237,29 @@ def analyze_grid(z_values: Sequence[float], x_values: Sequence[float],
         "error_distance_m": dist(ai, aj),
     }
 
-    # top-K by (loss, flat index): stable, deterministic ties
-    fi, fj = np.where(finite)
-    order = sorted(range(len(fi)),
-                   key=lambda t: (grid[fi[t], fj[t]], int(fi[t]) * nx + int(fj[t])))
-    for rank, t in enumerate(order[:TOP_K], start=1):
-        i, j = int(fi[t]), int(fj[t])
+    # top candidates: the 8-connected component (diagonals adjacent) containing
+    # the argmin, among cells with loss <= TOP_LOSS_FACTOR * min. The count is
+    # the size of the near-tie cluster, not a fixed K; qualifying cells that
+    # are NOT connected to the argmin (deceptive far minima) are excluded from
+    # the set but counted in n_qualifying_total.
+    mask = finite & (grid <= TOP_LOSS_FACTOR * float(grid[ai, aj]))
+    labels, _ = ndimage.label(mask, structure=np.ones((3, 3), dtype=bool))
+    comp = labels == labels[ai, aj]
+    ci, cj = np.where(comp)
+    order = sorted(range(len(ci)),
+                   key=lambda t: (grid[ci[t], cj[t]], int(ci[t]) * nx + int(cj[t])))
+    out["n_qualifying_total"] = int(mask.sum())
+    out["n_top_candidates"] = int(comp.sum())
+    out["top_candidates_truncated"] = len(order) > TOP_MAX_STORED
+    for rank, t in enumerate(order[:TOP_MAX_STORED], start=1):
+        i, j = int(ci[t]), int(cj[t])
         out["top_candidates"].append({
             "rank": rank, "index": i * nx + j, "z_idx": i, "x_idx": j,
             "z": float(zs[i]), "x_center": float(xs[j]),
             "final_loss": _f(grid[i, j]), "dist_to_truth_m": dist(i, j),
         })
-    dists = [c["dist_to_truth_m"] for c in out["top_candidates"]
-             if c["dist_to_truth_m"] is not None]
-    if dists:
-        out["top_mean_dist_to_truth_m"] = _f(float(np.mean(dists)))
+    out["top_mean_dist_to_truth_m"] = _f(float(
+        np.mean([dist(int(i), int(j)) for i, j in zip(ci, cj)])))
     return out
 
 
