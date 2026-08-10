@@ -24,6 +24,98 @@ from rice_bend.sim_scene import SimAperature, SimScene
 FreqChannel = namedtuple("FreqChannel", "freq wavelength rx_field error_weighting")
 
 
+# Warm-start stage 3: scan step for the absolute-offset search — fine enough to land
+# well inside the joint basin; the joint descent polishes the remainder. The scan is
+# elementwise work only (see _warm_start_phase), so a fine step costs nothing.
+WARM_START_SCAN_STEP = 2 * np.pi / 64
+
+# Backstop on offset samples for pathological near-duplicate frequency lists, whose
+# synthetic period (2π·f_ref/Δf_min) explodes as the frequency gaps shrink.
+WARM_START_MAX_SAMPLES = 100_000
+
+
+def _warm_start_phase(tx_z, orig_aper_amp, x_axis, rx_z, channels, params, seed,
+                      rho, ref_freq, h_fwd, support, curr_aper_amp, dx,
+                      log=None) -> np.ndarray:
+    """Multi-wavelength warm start: an initial psi inside the true basin.
+
+    The joint delay solve must recover the ABSOLUTE profile — the 2π degeneracy
+    that makes single-frequency retrieval easy is exactly what it breaks — and
+    plain gradient descent from a random start lands in a wrong basin it cannot
+    leave (measured: stuck ~100x above the reachable floor). The standard fix,
+    per docs/delay_model_warm_start.md:
+
+      1. solve the channel nearest the reference frequency ALONE — its degenerate
+         landscape is easy, and it recovers the profile's SHAPE;
+      2. unwrap that phase over the support — the per-point 2π ambiguities resolve
+         relative to each other, collapsing the unknown to ONE scalar, the
+         absolute offset delta;
+      3. scan delta over one synthetic-wavelength period of the frequency comb
+         against the joint loss — the comb makes the absolute offset observable
+         (multi-wavelength interferometry), unique within one period. Propagation
+         is linear, so each channel's field is propagated ONCE and every delta
+         sample costs elementwise work only.
+
+    The unwrap assumes a CONNECTED support and a smooth profile — true for every
+    shipped scene (box candidate windows; the contiguous plate aperture).
+    Returns the starting psi (zero off support).
+    """
+    # 1. reference solve. Pinning the PARENT's resolved seed keeps `seed: null`
+    # runs reproducible end-to-end (the parent draws once; the child must not draw
+    # its own); init='random' terminates the recursion.
+    c_idx = int(np.argmin(np.abs(rho - 1.0)))
+    ch_ref = channels[c_idx]
+    sub_params = params.model_copy(update={"init": "random", "seed": int(seed)})
+    stage1 = gs_reconstruct(tx_z=tx_z, orig_aper_amp=orig_aper_amp, x_axis=x_axis,
+                            rx_z=rx_z, channels=[ch_ref], params=sub_params,
+                            ref_freq=ch_ref.freq, capture=False, log=None)
+
+    # 2. unwrap over the support and rescale into psi units (theta_c = rho_c * psi)
+    psi0 = np.zeros(len(x_axis))
+    idx = np.where(support)[0]
+    psi0[idx] = np.unwrap(np.angle(stage1.curr_aper_f[idx])) / rho[c_idx]
+
+    # 3. the absolute-offset scan. Adding delta multiplies channel f's field by
+    # exp(1j*rho_f*delta); the joint loss is periodic in delta with the comb's
+    # synthetic wavelength 2π·f_ref/Δf_min (2π when all rho are 1 — the achromatic
+    # case, where this reduces to a global-phase search).
+    freqs = np.sort(np.array([ch.freq for ch in channels]))
+    gaps = np.diff(freqs)
+    gaps = gaps[gaps > 0]
+    period = 2 * np.pi * ref_freq / gaps.min() if gaps.size else 2 * np.pi
+    n_samples = int(np.ceil(period / WARM_START_SCAN_STEP))
+    if n_samples > WARM_START_MAX_SAMPLES:
+        if log is not None:
+            log.warning(f"warm start: synthetic period {period:.3g} rad needs "
+                        f"{n_samples} offset samples; capping at {WARM_START_MAX_SAMPLES} "
+                        "(nearly-duplicate frequencies?)")
+        n_samples = WARM_START_MAX_SAMPLES
+    deltas = np.linspace(0.0, period, n_samples, endpoint=False)
+
+    base_props = [rs.rs_apply(curr_aper_amp * np.exp(1j * (rho[f] * psi0)),
+                              h_fwd[f], dx)
+                  for f in range(len(channels))]
+    best_delta, best_loss = 0.0, np.inf
+    for delta in deltas:
+        loss = 0.0
+        for f, ch in enumerate(channels):
+            r = ch.error_weighting * (np.exp(1j * rho[f] * delta) * base_props[f]
+                                      - ch.rx_field)
+            loss += 0.5 * np.mean(np.abs(r) ** 2)
+        loss /= len(channels)
+        if loss < best_loss:
+            best_loss, best_delta = loss, float(delta)
+
+    if log is not None:
+        log.info(f"warm start: stage-1 loss {stage1.final_loss:.4g} at "
+                 f"{ch_ref.freq / 1e9:g} GHz; offset scan over {period:.1f} rad "
+                 f"({n_samples} samples) -> delta {best_delta:.3f} "
+                 f"(joint loss there {best_loss:.4g})")
+    psi = psi0 + best_delta
+    psi[~support] = 0.0
+    return psi
+
+
 # Result of one solver run. `curr_aper_f` is the reconstructed complex aperture on the
 # math (scene) x-axis (the field at `ref_freq` under the delay model); `history` is a
 # GSHistory when capture=True, else None. `final_loss`/`loss_full` are the joint
@@ -131,6 +223,17 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
     initial_phase = curr_aper_phase.copy()
 
     support = np.abs(orig_aper_amp) > 0  # aperature mask
+
+    # Multi-wavelength warm start: replace the random start with a point inside the
+    # true basin (reference-frequency solve -> unwrap -> absolute-offset scan). A
+    # strict no-op at a single frequency — the random path above runs untouched —
+    # which is what preserves the F=1 bit-identity guarantees under any config.
+    if params.init == "warm_start" and n_freq > 1:
+        curr_aper_phase = _warm_start_phase(
+            tx_z=tx_z, orig_aper_amp=orig_aper_amp, x_axis=x_axis, rx_z=rx_z,
+            channels=channels, params=params, seed=seed, rho=rho, ref_freq=ref_freq,
+            h_fwd=h_fwd, support=support, curr_aper_amp=curr_aper_amp, dx=dx, log=log)
+        initial_phase = curr_aper_phase.copy()
 
     history = None
     if capture:

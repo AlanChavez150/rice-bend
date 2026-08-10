@@ -38,6 +38,7 @@ frequencies: [140.0e9, 150.0e9]
 
 gerchberg_saxton:
   phase_model: achromatic  # the point of this config; everything else matches tiny_check
+  init: random             # pinned so check 6 keeps its pre-delay-era floats forever
   max_iters: 40
   convergence_count: 10
   convergence_threshold: -1.0e-8

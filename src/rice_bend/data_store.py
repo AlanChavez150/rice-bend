@@ -349,6 +349,7 @@ def _collect_metadata(mgs, run_dir: Path,
         "provenance": provenance(args_dict, plot_filename=Path(mgs.plot_path).name),
         "gerchberg_saxton": {
             "phase_model": gs_cfg.phase_model,
+            "init": gs_cfg.init,
             "max_iters": gs_cfg.max_iters,
             "convergence_count": gs_cfg.convergence_count,
             "convergence_threshold": gs_cfg.convergence_threshold,
