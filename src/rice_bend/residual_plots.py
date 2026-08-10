@@ -271,22 +271,24 @@ def plot_residual_heatmap(summary: ResidualSummary, out_path: Path,
 
 
 def _surface_height(values: np.ndarray, norm: Normalize) -> np.ndarray:
-    """Turn residuals into surface heights: low residual -> physically high.
+    """Turn residuals into surface heights: low residual -> physically LOW, so
+    the best candidates read as a basin the landscape drains into.
 
-    The floor clip mirrors _residual_mesh's `np.maximum(grid, norm.vmin)` -- a LogNorm
-    cannot take a zero -- and the ceiling clip keeps height >= 0, matching the way the
-    2D heatmap saturates above RESIDUAL_VMAX. NaN survives np.clip, so cells that never
-    ran stay NaN and plot_surface leaves them as holes.
+    Heights are <= 0 with the RESIDUAL_VMAX ceiling pinned at 0. The floor clip
+    mirrors _residual_mesh's `np.maximum(grid, norm.vmin)` -- a LogNorm cannot
+    take a zero. NaN survives np.clip, so cells that never ran stay NaN and
+    plot_surface leaves them as holes.
 
-    The two branches are the same inversion the 2D pair already draws: linear under
-    Normalize, decades under LogNorm. That is what makes residual_surface.png the
-    relief of residual_heatmap.png rather than a third, unrelated scaling.
+    The two branches are the same scaling the 2D pair already draws: linear
+    under Normalize, decades under LogNorm. That is what makes
+    residual_surface.png the relief of residual_heatmap.png rather than a
+    third, unrelated scaling.
     """
     lo = norm.vmin if isinstance(norm, LogNorm) else 0.0
     clipped = np.clip(values, lo, RESIDUAL_VMAX)
     if isinstance(norm, LogNorm):
-        return np.log10(RESIDUAL_VMAX / clipped)   # decades below the 0.06 ceiling
-    return RESIDUAL_VMAX - clipped                 # residual units, inverted
+        return np.log10(clipped / RESIDUAL_VMAX)   # decades below the 0.06 ceiling
+    return clipped - RESIDUAL_VMAX                 # residual units, ceiling at 0
 
 
 def _surface_zticks(norm: Normalize) -> Tuple[np.ndarray, List[str]]:
@@ -304,10 +306,10 @@ def _surface_zticks(norm: Normalize) -> Tuple[np.ndarray, List[str]]:
         exps = np.arange(int(np.ceil(np.log10(norm.vmin))),
                          int(np.floor(np.log10(RESIDUAL_VMAX))) + 1)
         decades = 10.0 ** exps.astype(float)
-        return (np.log10(RESIDUAL_VMAX / decades),
+        return (np.log10(decades / RESIDUAL_VMAX),
                 [f"$10^{{{int(e)}}}$" for e in exps])
     ticks = np.arange(0.0, RESIDUAL_VMAX + 1e-9, 0.01)
-    return RESIDUAL_VMAX - ticks, [f"{t:g}" for t in ticks]
+    return ticks - RESIDUAL_VMAX, [f"{t:g}" for t in ticks]
 
 
 def _surface_pole(ax, x: float, z: float, floor: float, ceiling: float, *, marker: str,
@@ -351,11 +353,13 @@ def _draw_surface(ax, summary: ResidualSummary, hc: bool) -> Normalize:
                     rcount=grid.shape[0], ccount=grid.shape[1],
                     edgecolor=(0, 0, 0, 0.22), linewidth=0.15)
 
-    h_max = float(np.nanmax(height))
-    if not np.isfinite(h_max) or h_max <= 0.0:
-        h_max = 1.0            # every candidate at or above the ceiling: keep zlim sane
-    floor = -SURFACE_FLOOR_FRAC * h_max
-    ceiling = h_max * (1.0 + SURFACE_HEAD_FRAC)
+    # heights are <= 0 (basin orientation): depth = how far the best candidate
+    # sinks below the 0 ceiling; the flat-map plane sits below the deepest basin
+    depth = -float(np.nanmin(height))
+    if not np.isfinite(depth) or depth <= 0.0:
+        depth = 1.0            # every candidate at the ceiling: keep zlim sane
+    floor = -depth * (1.0 + SURFACE_FLOOR_FRAC)
+    ceiling = SURFACE_HEAD_FRAC * depth
 
     levels = (np.logspace(np.log10(norm.vmin), np.log10(RESIDUAL_VMAX), SURFACE_LEVELS)
               if isinstance(norm, LogNorm)
@@ -377,7 +381,7 @@ def _draw_surface(ax, summary: ResidualSummary, hc: bool) -> Normalize:
     ax.set_zticklabels(labels)
     ax.set_xlabel("x_center (m)")
     ax.set_ylabel("z (m)")
-    ax.set_zlabel("GS residual (inverted)")
+    ax.set_zlabel("GS residual")
     return norm
 
 
@@ -391,8 +395,9 @@ def _finish_surface(fig, ax, norm: Normalize, title: str) -> None:
     fig.colorbar(ScalarMappable(norm=norm, cmap=CMAP), ax=ax, shrink=0.6, pad=0.10,
                  label=RESIDUAL_LABEL)
     ax.legend(loc="upper left")
-    fig.text(0.02, 0.015, "height = residual, inverted (higher = better fit); "
-                          "flat heatmap projected on the floor", fontsize=8, alpha=0.7)
+    fig.text(0.02, 0.015, "height = residual (lower = better fit, best candidates "
+                          "form a basin); flat heatmap projected on the floor",
+             fontsize=8, alpha=0.7)
     ax.view_init(elev=SURFACE_VIEW[0], azim=SURFACE_VIEW[1])
 
 

@@ -90,6 +90,7 @@ class StudyDef:
     apply: Callable[[SimConfig, float], SimConfig]
     tag: Callable[[float], str]
     plot_name: str
+    plot_argmin: bool = True   # include the argmin series on the study plot
 
 
 STUDIES = {
@@ -98,7 +99,8 @@ STUDIES = {
         x_axis="param_value", x_label="bandwidth (± % of 150 GHz)",
         values=BANDWIDTH_PCTS, apply=_apply_frequency,
         tag=lambda p: f"bw{int(round(p)):02d}pct",
-        plot_name="study_error_vs_bandwidth.png"),
+        plot_name="study_error_vs_bandwidth.png",
+        plot_argmin=False),   # argmin is grid-quantized noise on this axis
     "tx_shift": StudyDef(
         name="tx_shift", param_name="tx_shift_m", param_unit="m",
         x_axis="energy_pct", x_label="energy received in RX window (%, mean over comb)",
@@ -281,6 +283,8 @@ def _plot_study(study: StudyDef, records: List[dict], out_path: Path, log) -> No
     fig, ax = plt.subplots(figsize=(9, 6), layout="constrained")
     drew = False
     for key, label, color, marker in _ERROR_SERIES:
+        if key == "error_mm" and not study.plot_argmin:
+            continue
         pts = [(r["x_value"], r[key], r) for r in plotted if r.get(key) is not None]
         if not pts:
             continue
