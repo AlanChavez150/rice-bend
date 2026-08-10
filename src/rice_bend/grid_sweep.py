@@ -93,9 +93,11 @@ def grid_summary(points: List[GridPoint]) -> str:
 
 
 # Read-only measurement + GS hyperparameters shared by every candidate. It is small
-# (the measurement vectors, NOT the full 2D scene), so it is cheap to hand to workers.
+# (the per-frequency measurement vectors, NOT the full 2D scene), so it is cheap to
+# hand to workers. `channels` is the list of FreqChannel payloads from
+# MGS.measurement_channels(), in config frequency order.
 SharedMeasurement = namedtuple(
-    "SharedMeasurement", "x_axis rx_z rx_field error_weighting wavelength params")
+    "SharedMeasurement", "x_axis rx_z params channels")
 
 
 def _reconstruct_candidate(p: "GridPoint", shared: "SharedMeasurement") -> "CandidateResult":
@@ -107,8 +109,7 @@ def _reconstruct_candidate(p: "GridPoint", shared: "SharedMeasurement") -> "Cand
     assumed_amp = np.where(support, 1.0, 0.0)
     result = gs_reconstruct(
         tx_z=p.z, orig_aper_amp=assumed_amp, x_axis=x_axis, rx_z=shared.rx_z,
-        rx_field=shared.rx_field, error_weighting=shared.error_weighting,
-        wavelength=shared.wavelength, params=shared.params,
+        channels=shared.channels, params=shared.params,
         capture=False, log=None,
     )
     # Stored on the SCENE grid, sliced to the window. curr_aper_f already lives on
@@ -238,12 +239,11 @@ def run_grid_search(config: SimConfig, freq: float, *, limit: Optional[int] = No
     # 4. reconstruct at each usable grid point. Bundle the small, read-only measurement
     #    (vectors + GS params) once; it is shared by every candidate.
     x_axis = mgs.scene.x_axis
+    channels = mgs.measurement_channels()
     shared = SharedMeasurement(
         x_axis=np.asarray(x_axis).copy(),
         rx_z=float(mgs.scene.rx_ap.z),
-        rx_field=np.asarray(mgs._rx_field).copy(),
-        error_weighting=np.asarray(mgs._error_weighting).copy(),
-        wavelength=float(wavelength),
+        channels=channels,
         # snapshot, not an alias: the workers must not see a later mutation
         params=mgs.gs_cfg.model_copy(),
     )
@@ -268,8 +268,8 @@ def run_grid_search(config: SimConfig, freq: float, *, limit: Optional[int] = No
         grid_points=points,
         candidates=candidates,
         scene_x_axis=np.asarray(x_axis).copy(),
-        rx_field=np.asarray(mgs._rx_field).copy(),
-        error_weighting=np.asarray(mgs._error_weighting).copy(),
+        rx_field=np.asarray(channels[0].rx_field).copy(),
+        error_weighting=np.asarray(channels[0].error_weighting).copy(),
         rx_aper_axis=mgs.scene.rx_ap.aper_axis.copy(),
         rx_aper_profile=mgs.scene.rx_ap.aper_profile.copy(),
         real_tx_aper_axis=mgs.scene.tx_ap.aper_axis.copy(),

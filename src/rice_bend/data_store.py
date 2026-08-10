@@ -31,58 +31,71 @@ class GSHistory:
     iteration). Growing lists are used during the loop so early convergence
     doesn't waste a preallocated (max_iters, size) block; finalize() converts
     them to arrays.
+
+    A joint multi-frequency solve shares ONE phase/support/amplitude across all
+    frequencies, so the phase-side arrays are unchanged; the measurement-side
+    arrays carry a leading frequency axis (F, ...) aligned with `frequencies`,
+    and losses come in a joint (mean) form plus per-frequency components.
     """
     # one-time fixed arrays (set at construction, before the loop)
     x_axis: np.ndarray
-    orig_prop_f: np.ndarray        # target RX field
-    orig_aper_amp: np.ndarray      # fixed aperture amplitude
-    error_weighting: np.ndarray
-    support: np.ndarray            # bool mask
-    initial_phase: np.ndarray      # seeded RNG draw
+    frequencies: np.ndarray        # (F,) Hz — alignment order for every (F, ...) array
+    orig_prop_f: np.ndarray        # (F, size) target RX fields
+    orig_aper_amp: np.ndarray      # fixed aperture amplitude (shared across F)
+    error_weighting: np.ndarray    # (F, size)
+    support: np.ndarray            # bool mask (shared across F)
+    initial_phase: np.ndarray      # seeded RNG draw (shared across F)
     rx_z: float
     seed: int
     history_stride: int
 
-    # dense per-iteration loss (cheap, full length)
+    # dense per-iteration loss (cheap, full length); joint + per-frequency rows
     loss_full: List[float] = field(default_factory=list)
+    loss_full_per_freq: List[np.ndarray] = field(default_factory=list)   # rows (F,)
     # strided captures
     iter_indices: List[int] = field(default_factory=list)
-    loss_captured: List[float] = field(default_factory=list)
+    loss_captured: List[float] = field(default_factory=list)             # joint
     phase_captured: List[np.ndarray] = field(default_factory=list)
-    prop_field_captured: List[np.ndarray] = field(default_factory=list)
+    prop_field_captured: List[np.ndarray] = field(default_factory=list)  # each (F, size)
 
     # start/stop conditions (filled at finalize)
     stop_reason: Optional[str] = None
     n_iters_run: int = 0
     final_loss: float = float("nan")
+    final_loss_per_freq: Optional[np.ndarray] = None                     # (F,)
 
     def _capture(self, iter_idx: int, loss: float, phase: np.ndarray,
-                 prop_field: np.ndarray) -> None:
+                 prop_fields: List[np.ndarray]) -> None:
         # avoid duplicate capture (e.g. final iter also landing on the stride)
         if self.iter_indices and self.iter_indices[-1] == iter_idx:
             return
         self.iter_indices.append(int(iter_idx))
         self.loss_captured.append(float(loss))
         self.phase_captured.append(phase.copy())
-        self.prop_field_captured.append(prop_field.copy())
+        # np.stack copies, so the captured (F, size) block is decoupled from the loop
+        self.prop_field_captured.append(np.stack([np.asarray(p) for p in prop_fields]))
 
-    def record_iter(self, iter_idx: int, loss: float, phase: np.ndarray,
-                    prop_field: np.ndarray) -> None:
-        """Call once per iteration. Always records dense loss; captures
-        phase/field on the stride."""
+    def record_iter(self, iter_idx: int, loss: float, loss_per_freq: np.ndarray,
+                    phase: np.ndarray, prop_fields: List[np.ndarray]) -> None:
+        """Call once per iteration. Always records dense losses; captures
+        phase/fields on the stride."""
         self.loss_full.append(float(loss))
+        self.loss_full_per_freq.append(np.asarray(loss_per_freq, dtype=np.float64).copy())
         if iter_idx % self.history_stride == 0:
-            self._capture(iter_idx, loss, phase, prop_field)
+            self._capture(iter_idx, loss, phase, prop_fields)
 
     def capture_final(self, iter_idx: int, loss: float, phase: np.ndarray,
-                      prop_field: np.ndarray) -> None:
+                      prop_fields: List[np.ndarray]) -> None:
         """Force-capture the last iteration's strided state (no dense loss append)."""
-        self._capture(iter_idx, loss, phase, prop_field)
+        self._capture(iter_idx, loss, phase, prop_fields)
 
-    def finalize(self, stop_reason: str, n_iters_run: int, final_loss: float) -> None:
+    def finalize(self, stop_reason: str, n_iters_run: int, final_loss: float,
+                 final_loss_per_freq: np.ndarray) -> None:
         self.stop_reason = stop_reason
         self.n_iters_run = int(n_iters_run)
         self.final_loss = float(final_loss)
+        self.final_loss_per_freq = np.asarray(final_loss_per_freq,
+                                              dtype=np.float64).copy()
 
 
 # Marker files identifying which entry point owns a run directory. `mgs` and
@@ -247,16 +260,31 @@ def f64(a: np.ndarray) -> np.ndarray:
 
 
 def _collect_arrays(mgs) -> dict:
-    """Build the dict of arrays for run.npz. Guards every optional array."""
+    """Build the dict of arrays for run.npz. Guards every optional array.
+
+    Per-frequency arrays carry a leading (F,) axis aligned with `frequencies_hz`
+    — even at F == 1, so the key set and shapes never branch on the frequency
+    count. The one exception is the RX aperture element arrays, whose lengths are
+    genuinely ragged across frequencies (dx defaults to wavelength/20): those get
+    indexed keys rx_aper_axis_00, rx_aper_profile_00, ... instead (no object
+    arrays — they would break content hashing and require allow_pickle).
+    """
     out = {}
     scene = mgs.scene
     gs_tx = mgs.gs_tx
 
-    # apertures / axes (always)
+    # frequency axis (always) — the alignment order for every (F, ...) array
+    out["frequencies_hz"] = f64([fs.freq for fs in mgs.freq_states])
+    out["wavelengths_m"] = f64([fs.wavelength for fs in mgs.freq_states])
+
+    # apertures / axes (always). TX aperture AXES are geometry-only and identical
+    # across frequencies; the profiles differ (beam phase ∝ k) and stack to (F, n).
     out["tx_real_aper_axis"] = f64(scene.tx_ap.aper_axis)
-    out["tx_real_aper_profile"] = c64(scene.tx_ap.aper_profile)
-    out["rx_aper_axis"] = f64(scene.rx_ap.aper_axis)
-    out["rx_aper_profile"] = c64(scene.rx_ap.aper_profile)
+    out["tx_real_aper_profile"] = c64(
+        np.stack([fs.tx_ap.aper_profile for fs in mgs.freq_states]))
+    for i, fs in enumerate(mgs.freq_states):
+        out[f"rx_aper_axis_{i:02d}"] = f64(fs.rx_ap.aper_axis)
+        out[f"rx_aper_profile_{i:02d}"] = c64(fs.rx_ap.aper_profile)
     out["gs_tx_aper_axis"] = f64(gs_tx.aper_axis)
     out["gs_tx_aper_profile"] = c64(gs_tx.aper_profile)
 
@@ -264,17 +292,19 @@ def _collect_arrays(mgs) -> dict:
     hist = mgs.gs_history
     if hist is not None:
         out["x_axis"] = f64(hist.x_axis)
-        out["gs_target_rx_field"] = c64(hist.orig_prop_f)
+        out["gs_target_rx_field"] = c64(hist.orig_prop_f)            # (F, size)
         out["gs_fixed_aper_amp"] = f64(hist.orig_aper_amp)
-        out["gs_error_weighting"] = f64(hist.error_weighting)
+        out["gs_error_weighting"] = f64(hist.error_weighting)        # (F, size)
         out["gs_support"] = np.asarray(hist.support, dtype=bool)
         out["gs_initial_phase"] = f64(hist.initial_phase)
         out["gs_loss_full"] = np.asarray(hist.loss_full, dtype=np.float32)
+        out["gs_loss_full_per_freq"] = np.asarray(hist.loss_full_per_freq,
+                                                  dtype=np.float32)  # (n_iters, F)
         if mgs.output_cfg.save_gs_history and len(hist.iter_indices) > 0:
             out["gs_iter_indices"] = np.asarray(hist.iter_indices, dtype=np.int64)
             out["gs_loss_captured"] = np.asarray(hist.loss_captured, dtype=np.float32)
             out["gs_phase_captured"] = np.asarray(hist.phase_captured, dtype=np.float32)
-            out["gs_prop_field_captured"] = c64(np.asarray(hist.prop_field_captured))
+            out["gs_prop_field_captured"] = c64(np.asarray(hist.prop_field_captured))  # (K, F, size)
 
     # scene axes are always saved (cheap, 1D) so a run can be re-illuminated later
     out["scene_x_axis"] = f64(scene.x_axis)
@@ -293,20 +323,28 @@ def _collect_arrays(mgs) -> dict:
     return out
 
 
-def _collect_metadata(mgs, run_dir: Path, freq: float,
+def _collect_metadata(mgs, run_dir: Path,
                       args_dict: dict, is_exp: bool, npz_keys) -> dict:
-    """Build the JSON-safe metadata dict (scalars only)."""
+    """Build the JSON-safe metadata dict (scalars only).
+
+    `freq_hz`/`wavelength_m` remain, as the PRIMARY (first) frequency, so older
+    tooling keeps working; the full lists live in `frequencies_hz`/`wavelengths_m`
+    in the same order as every per-frequency array in run.npz.
+    """
     scene = mgs.scene
     hist = mgs.gs_history
     gs_cfg = mgs.gs_cfg
     out_cfg = mgs.output_cfg
 
     meta = {
-        "schema_version": 2,
+        "schema_version": 3,
         "run_dir": str(run_dir),
         "is_experimental": bool(is_exp),
-        "freq_hz": float(freq),
-        "wavelength_m": float(getattr(mgs, "wavelength", float("nan"))),
+        "freq_hz": float(mgs.freqs[0]),
+        "wavelength_m": float(mgs.freq_states[0].wavelength),
+        "frequencies_hz": [float(f) for f in mgs.freqs],
+        "wavelengths_m": [float(fs.wavelength) for fs in mgs.freq_states],
+        "n_frequencies": len(mgs.freqs),
         "provenance": provenance(args_dict, plot_filename=Path(mgs.plot_path).name),
         "gerchberg_saxton": {
             "max_iters": gs_cfg.max_iters,
@@ -340,6 +378,7 @@ def _collect_metadata(mgs, run_dir: Path, freq: float,
             "n_iters_run": hist.n_iters_run,
             "n_iters_captured": int(len(hist.iter_indices)),
             "final_loss": hist.final_loss,
+            "final_loss_per_freq": [float(v) for v in hist.final_loss_per_freq],
             "rx_z_m": hist.rx_z,
         }
     else:
@@ -347,13 +386,14 @@ def _collect_metadata(mgs, run_dir: Path, freq: float,
     return meta
 
 
-def save_run(mgs, run_dir: Path, config, config_path: Path, freq: float,
+def save_run(mgs, run_dir: Path, config, config_path: Path,
              args_dict: dict, is_exp: bool) -> None:
-    """Persist a completed MGS run into run_dir."""
+    """Persist a completed MGS run into run_dir. Frequencies come from the MGS
+    instance itself (mgs.freqs / mgs.freq_states)."""
     arrays = _collect_arrays(mgs)
     np.savez_compressed(run_dir / "run.npz", **arrays)
 
-    meta = _collect_metadata(mgs, run_dir, freq, args_dict, is_exp,
+    meta = _collect_metadata(mgs, run_dir, args_dict, is_exp,
                              list(arrays.keys()))
     write_json(run_dir / "run.json", meta)
     save_config_snapshot(run_dir, config, config_path)

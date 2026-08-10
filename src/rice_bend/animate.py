@@ -119,9 +119,13 @@ def animate_tx_estimate(run_dir: Path, out_path: Path, fps: int = 15,
     # optional real TX reference (sim runs only)
     ref_phase = None
     if not meta.get("is_experimental", False) and "tx_real_aper_axis" in z.files:
+        tx_profile = z["tx_real_aper_profile"]
+        if tx_profile.ndim == 2:
+            # schema 3: (F, n) stack of per-frequency profiles — use the primary row
+            tx_profile = tx_profile[0]
         ref_phase = _aligned_reference_phase(
             x, support, amp, phases[-1],
-            z["tx_real_aper_axis"], z["tx_real_aper_profile"],
+            z["tx_real_aper_axis"], tx_profile,
         )
 
     # phase-axis limits from all data (unwrapped phase is unbounded)
