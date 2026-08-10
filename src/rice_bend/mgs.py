@@ -9,7 +9,8 @@ import numpy as np
 
 from rice_bend import rs
 from rice_bend.cli import setup_logging
-from rice_bend.config import DEFAULT_CONFIG, GerchbergSaxtonConfig, SimConfig, load_config
+from rice_bend.config import (DEFAULT_CONFIG, GerchbergSaxtonConfig, SimConfig,
+                              load_config, resolve_frequencies)
 from rice_bend.interp import interp_amplitude, interp_real_imag
 from rice_bend.plotting import draw_line_panel, draw_scene
 from rice_bend.data_store import GSHistory, check_run_dir, make_run_dir, save_run
@@ -479,6 +480,23 @@ class MGS():
         a joint solve's mean loss weights frequencies equally regardless of their
         absolute RX power.
         """
+        # Fail fast, naming EVERY undersampled frequency at once — rs() would raise
+        # on only the first it meets, and the highest frequency binds, so "which
+        # frequencies are the problem" is exactly the question the error must answer.
+        if self.has_real_aper:
+            rx_plane = np.array([self.scene.rx_ap.z])
+            bad = []
+            for fs in self.freq_states:
+                q = rs.sampling_quality(self.scene.x_axis, rx_plane, fs.wavelength,
+                                        z_src=self.scene.tx_ap.z, forward_dir=-1.0)
+                if q < 1:
+                    bad.append(f"{fs.freq / 1e9:g} GHz (quality {q:.3f})")
+            if bad:
+                raise RuntimeError(
+                    f"RS undersampled for {len(bad)} of {len(self.freq_states)} "
+                    f"frequencies at the TX plane: {', '.join(bad)}. Use a finer "
+                    f"sim_scene.spacing or drop the highest frequencies.")
+
         x_axis = self.scene.x_axis
         for fs in self.freq_states:
             if self.has_real_aper:
@@ -636,9 +654,12 @@ def main():
     )
     parser.add_argument(
         "--freq", "-f",
-        help="Frequency in Hz",
+        help="One or more frequencies in Hz (overrides config `frequencies`). "
+             "Multiple values run ONE joint solve for a single phase mask across "
+             "all of them. Default: config `frequencies`, else 150e9.",
         type=float,
-        default=150e9
+        nargs="+",
+        default=None
     )
     parser.add_argument(
         "--rx-path",
@@ -693,16 +714,21 @@ def main():
     if config.output.save_run:
         check_run_dir(config.output.output_dir, config.output.run_name, kind="mgs")
 
+    freqs = resolve_frequencies(config, args.freq)
+
     if args.rx_path is not None and not args.heatmap_path is None:
+        if len(freqs) != 1:
+            parser.error("the experimental path (--rx-path/--heatmap-path) is a "
+                         "single-frequency capture; pass exactly one --freq")
         rx_path = Path(args.rx_path)
         heatmap_path = Path(args.heatmap_path)
-        mgs = MGS.from_experiment(rx_path, heatmap_path, args.freq, config)
+        mgs = MGS.from_experiment(rx_path, heatmap_path, freqs[0], config)
         mgs.run_gerch_sax()
         mgs.illuminate_reconstructed()
         mgs.plot_scene()
         is_exp = True
     else:
-        mgs = MGS(args.freq, config)
+        mgs = MGS(freqs, config)
         mgs.illuminate_real()
         mgs.run_gerch_sax()
         mgs.illuminate_reconstructed()

@@ -7,14 +7,14 @@
       "run.npz",
       "tiny_check.png"
     ],
-    "final_loss": 0.04448539195186108,
+    "final_loss": 0.06096355351884879,
     "gs_iter_indices": [
       0,
       10,
       11
     ],
     "n_iters_run": 12,
-    "npz_content_sha256": "c098d3e1d5445e3343b91875b33220d7463ae5b2f995f0267d916a0e23e12dc1",
+    "npz_content_sha256": "85bf35619de98bb2c1949ad65e9884894c00f9628dd71f267535d510f06ccc77",
     "npz_keys": [
       "frequencies_hz",
       "gs_error_weighting",
@@ -31,7 +31,9 @@
       "gs_tx_aper_axis",
       "gs_tx_aper_profile",
       "rx_aper_axis_00",
+      "rx_aper_axis_01",
       "rx_aper_profile_00",
+      "rx_aper_profile_01",
       "scene_x_axis",
       "scene_z_axis",
       "tx_real_aper_axis",

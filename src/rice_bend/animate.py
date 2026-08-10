@@ -84,8 +84,16 @@ def _aligned_reference_phase(x_axis, support, amp, final_phase, tx_axis, tx_prof
     return _unwrap_masked(np.angle(real_aligned), support)
 
 
+def _pick_freq(n_avail: int, freq_index: int) -> int:
+    """Validate --freq-index against a run's frequency count."""
+    if not (0 <= freq_index < n_avail):
+        raise ValueError(f"--freq-index {freq_index} out of range: this run has "
+                         f"{n_avail} frequenc{'y' if n_avail == 1 else 'ies'}")
+    return freq_index
+
+
 def animate_tx_estimate(run_dir: Path, out_path: Path, fps: int = 15,
-                        show: bool = False) -> Path:
+                        show: bool = False, freq_index: int = 0) -> Path:
     log = logging.getLogger()
     run_dir = Path(run_dir)
     z = np.load(run_dir / "run.npz")
@@ -116,13 +124,22 @@ def animate_tx_estimate(run_dir: Path, out_path: Path, fps: int = 15,
     # precompute all frames so the phase axis can be scaled once (stable across frames)
     all_phase = np.array([frame_phase(k) for k in range(n_frames)])
 
-    # optional real TX reference (sim runs only)
+    # optional real TX reference (sim runs only). The reconstructed mask is
+    # achromatic, but the real TX phase plate is per-frequency (phase ∝ k), so at
+    # F > 1 the overlay is one frequency's view — labelled as such.
     ref_phase = None
+    ref_label = "Real TX (global-phase aligned)"
     if not meta.get("is_experimental", False) and "tx_real_aper_axis" in z.files:
         tx_profile = z["tx_real_aper_profile"]
         if tx_profile.ndim == 2:
-            # schema 3: (F, n) stack of per-frequency profiles — use the primary row
-            tx_profile = tx_profile[0]
+            # schema 3: (F, n) stack of per-frequency profiles
+            idx = _pick_freq(tx_profile.shape[0], freq_index)
+            freqs = meta.get("frequencies_hz")
+            if freqs and len(freqs) > 1:
+                ref_label += f" @ {freqs[idx] / 1e9:g} GHz"
+            tx_profile = tx_profile[idx]
+        elif freq_index != 0:
+            raise ValueError("--freq-index needs a schema-3 (multi-frequency) run")
         ref_phase = _aligned_reference_phase(
             x, support, amp, phases[-1],
             z["tx_real_aper_axis"], tx_profile,
@@ -147,7 +164,7 @@ def animate_tx_estimate(run_dir: Path, out_path: Path, fps: int = 15,
     ax_ph.set_ylim(y_lo - pad, y_hi + pad)
     ax_ph.grid(True)
     if ref_phase is not None:
-        ax_ph.plot(x, ref_phase, "--", color="0.6", linewidth=2, label="Real TX (global-phase aligned)")
+        ax_ph.plot(x, ref_phase, "--", color="0.6", linewidth=2, label=ref_label)
     (est_line,) = ax_ph.plot([], [], color="C0", linewidth=2, label="MGS estimate")
     ax_ph.legend(loc="upper right")
 
@@ -176,7 +193,8 @@ def animate_tx_estimate(run_dir: Path, out_path: Path, fps: int = 15,
 
 def animate_scene_reillumination(run_dir: Path, out_path: Path, fps: int = 15,
                                  frame_stride: int = None, z_stride: int = None,
-                                 jobs: int = 1, show: bool = False) -> Path:
+                                 jobs: int = 1, show: bool = False,
+                                 freq_index: int = 0) -> Path:
     """Animate the 2D scene field re-illuminated by the TX aperture estimate at each
     captured iteration. The scene is NOT stored per iteration, so it is recomputed here
     via Rayleigh-Sommerfeld propagation of estimate = gs_fixed_aper_amp * exp(1j*phase[k])."""
@@ -202,7 +220,15 @@ def animate_scene_reillumination(run_dir: Path, out_path: Path, fps: int = 15,
     iters = z["gs_iter_indices"]
     loss_cap = z["gs_loss_captured"]
     z_axis_full = z["scene_z_axis"]
-    wavelength = meta["wavelength_m"]
+    # a re-illumination is monochromatic: --freq-index picks which frequency's
+    # wavelength drives it (schema-2 runs carry only the scalar wavelength_m)
+    wavelengths = meta.get("wavelengths_m")
+    if wavelengths:
+        wavelength = float(wavelengths[_pick_freq(len(wavelengths), freq_index)])
+    else:
+        if freq_index != 0:
+            raise ValueError("--freq-index needs a schema-3 (multi-frequency) run")
+        wavelength = meta["wavelength_m"]
     sc = meta["scene"]
     extent = [sc["x_min"], sc["x_max"], sc["z_min"], sc["z_max"]]
     # source (TX) plane; energy flows toward -Z. Fall back to z_max (the TX plane)
@@ -289,6 +315,10 @@ def main():
                         help="[scene] worker processes for frame re-illumination (1 = serial)")
     parser.add_argument("--z-stride", type=int, default=None,
                         help="[scene] subsample output z-planes (default: ~300 planes)")
+    parser.add_argument("--freq-index", type=int, default=0,
+                        help="On a multi-frequency run: which frequency's view to use "
+                             "(index into run.json frequencies_hz; default 0). Picks the "
+                             "scene-mode wavelength and the phase-mode Real-TX overlay.")
     parser.add_argument("--show", action="store_true", default=False, help="Also display interactively")
     parser.add_argument("--debug", action="store_true", default=False)
     args = parser.parse_args()
@@ -300,10 +330,12 @@ def main():
         out_path = args.out if args.out is not None else run_dir / "scene_reillum.mp4"
         animate_scene_reillumination(run_dir, out_path, fps=args.fps,
                                      frame_stride=args.frame_stride, z_stride=args.z_stride,
-                                     jobs=args.jobs, show=args.show)
+                                     jobs=args.jobs, show=args.show,
+                                     freq_index=args.freq_index)
     else:
         out_path = args.out if args.out is not None else run_dir / "tx_estimate.mp4"
-        animate_tx_estimate(run_dir, out_path, fps=args.fps, show=args.show)
+        animate_tx_estimate(run_dir, out_path, fps=args.fps, show=args.show,
+                            freq_index=args.freq_index)
 
 
 if __name__ == "__main__":
