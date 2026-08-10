@@ -42,8 +42,8 @@ STUDY_DEFAULT_CONFIG = (Path(__file__).resolve().parents[2] / "configs"
 
 FREQ_CENTER_HZ = 150e9
 # bandwidth half-widths (+/- % of the center) — dense at the small end where the
-# error curve moves fastest
-BANDWIDTH_PCTS = (1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 13.0, 16.0, 20.0)
+# error curve moves fastest; 0 is the no-diversity anchor (a single tone)
+BANDWIDTH_PCTS = (0.0, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 13.0, 16.0, 20.0)
 # the fixed comb the tx_shift study solves with (the pm5 comparison comb)
 PM5_COMB_HZ = (142.5e9, 150.0e9, 157.5e9)
 # rigid TX translations (m): dense at small s where the captured energy falls
@@ -53,8 +53,13 @@ TX_SHIFTS_M = (0.0, 0.010, 0.020, 0.030, 0.045, 0.065, 0.090, 0.115, 0.130)
 
 def _apply_frequency(cfg: SimConfig, pct: float) -> SimConfig:
     c = cfg.model_copy(deep=True)
-    c.frequencies = [FREQ_CENTER_HZ * (1 - pct / 100.0), FREQ_CENTER_HZ,
-                     FREQ_CENTER_HZ * (1 + pct / 100.0)]
+    if pct == 0:
+        # single tone, not three copies of the center (the config layer
+        # rejects duplicate frequencies): the 1f anchor of the sweep
+        c.frequencies = [FREQ_CENTER_HZ]
+    else:
+        c.frequencies = [FREQ_CENTER_HZ * (1 - pct / 100.0), FREQ_CENTER_HZ,
+                         FREQ_CENTER_HZ * (1 + pct / 100.0)]
     return c
 
 
