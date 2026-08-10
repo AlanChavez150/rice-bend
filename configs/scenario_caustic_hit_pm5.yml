@@ -32,12 +32,11 @@ rx_aperture:
 
 plot_path: scenario_caustic_hit_pm5.png
 
-# 150 GHz ±5%: ONE JOINT solve — a single phase mask fitted against all three
-# frequencies at once (loss = mean of the per-frequency losses).
+# 150 GHz ±5%: ONE JOINT solve — a single delay plate fitted against all three
+# frequencies at once (warm-started; loss = mean of the per-frequency losses).
 frequencies: [142.5e9, 150.0e9, 157.5e9]
 
 gerchberg_saxton:
-  phase_model: achromatic  # pinned: this case's saved results predate the delay default
   max_iters: 800
   convergence_count: 10
   convergence_threshold: -1.0e-8
