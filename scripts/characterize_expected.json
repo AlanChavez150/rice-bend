@@ -93,6 +93,7 @@
       "usable": 144
     },
     "files": [
+      "analysis.json",
       "candidate_beams.json",
       "config_snapshot.json",
       "config_source.yml",
@@ -166,7 +167,7 @@
     },
     "init": "warm_start",
     "joint_is_mean_of_valid": true,
-    "measurement_sha256": "606bd9854f609972df96956a136579f50abdbbf80272ff310f26747e9525c4cd",
+    "measurement_sha256": "f4978aac2428f3465a8340c1e345944eae45de682dba09627ea353bc6452c6d4",
     "n_candidate_files": 12,
     "n_iters_run": [
       800,
@@ -221,6 +222,7 @@
         "usable": 144
       },
       "files": [
+        "analysis.json",
         "candidate_beams.json",
         "config_snapshot.json",
         "config_source.yml",
@@ -294,7 +296,7 @@
       },
       "init": "warm_start",
       "joint_is_mean_of_valid": true,
-      "measurement_sha256": "606bd9854f609972df96956a136579f50abdbbf80272ff310f26747e9525c4cd",
+      "measurement_sha256": "f4978aac2428f3465a8340c1e345944eae45de682dba09627ea353bc6452c6d4",
       "n_candidate_files": 12,
       "n_iters_run": [
         800,
@@ -350,6 +352,7 @@
       "usable": 9
     },
     "files": [
+      "analysis.json",
       "candidate_beams.json",
       "config_snapshot.json",
       "config_source.yml",
@@ -464,7 +467,7 @@
     },
     "init": "warm_start",
     "joint_is_mean_of_valid": true,
-    "measurement_sha256": "1bb32710b6cd5500abeb3d5a1f584883a9074cad90b4c1b0507e90b62216f3f0",
+    "measurement_sha256": "956d425d89f9d4263e0140fd96e9e5a700f7244b5db38359ffc2583a1f620ab8",
     "n_candidate_files": 18,
     "n_iters_run": [
       12,

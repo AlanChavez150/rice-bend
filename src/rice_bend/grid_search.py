@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from rice_bend import rs
+from rice_bend.analysis import analysis_from_manifest, analysis_from_run, write_analysis
 from rice_bend.candidate_scenes import (ANIM_FPS, ANIM_TOP_DEFAULT, ANIM_WARN_FRAMES,
                                         SCENE_Z_PLANES, animate_candidate_beams,
                                         make_candidate_scenes, make_true_mgs_plot,
@@ -47,9 +48,12 @@ def _emit_pair(plot, out_path: Path, *args, **kwargs) -> Path:
     return out_path
 
 
-def _emit_heatmaps(summary: ResidualSummary, out_dir: Path, log) -> None:
-    """Write the residual heatmap plus its high-contrast (log-scale) twin."""
-    out = _emit_pair(plot_residual_heatmap, out_dir / "residual_heatmap.png", summary)
+def _emit_heatmaps(summary: ResidualSummary, out_dir: Path, log,
+                   analysis: Optional[dict] = None) -> None:
+    """Write the residual heatmap plus its high-contrast (log-scale) twin, with
+    the top-candidate/ROI outlines when the analysis dict is given."""
+    out = _emit_pair(plot_residual_heatmap, out_dir / "residual_heatmap.png", summary,
+                     analysis=analysis)
     log.info(f"Wrote residual heatmap (+hc) to {out}")
 
 
@@ -152,7 +156,8 @@ def _anim_top(args, log) -> Optional[int]:
 
 def _emit_run_plots(summary: ResidualSummary,
                     freq_summaries: List[Tuple[float, ResidualSummary]],
-                    out_dir: Path, args, log, make_ctx) -> None:
+                    out_dir: Path, args, log, make_ctx,
+                    analysis: Optional[dict] = None) -> None:
     """Everything one run directory gets.
 
     One rule: the cheap manifest-only plots always run; anything that re-solves MGS
@@ -165,7 +170,7 @@ def _emit_run_plots(summary: ResidualSummary,
     (or a legacy schema-2 replot, whose component list is empty) keeps exactly the
     flat plot set.
     """
-    _emit_heatmaps(summary, out_dir, log)
+    _emit_heatmaps(summary, out_dir, log, analysis=analysis)
     _emit_scatters(summary, out_dir, log)
     _emit_surfaces(summary, out_dir, args, log)
     if len(freq_summaries) > 1:
@@ -177,25 +182,38 @@ def _emit_run_plots(summary: ResidualSummary,
 
 
 def _replot_one_dir(run_dir: Path, args, log) -> ResidualSummary:
-    """Regenerate one saved run directory's plots from disk."""
+    """Regenerate one saved run directory's plots + analysis.json from disk.
+
+    The analysis is always RECOMPUTED (never read back), so a replot doubles as
+    the reproducibility check against the save-time analysis.json."""
     run_dir = Path(run_dir)
     summary = summary_from_manifest(run_dir)
+    analysis = analysis_from_manifest(run_dir, summary)
+    write_analysis(run_dir, analysis)
     freq_summaries = freq_summaries_from_manifest(run_dir)
     _emit_run_plots(summary, freq_summaries, run_dir, args, log,
-                    lambda: scenes_from_manifest(run_dir, scene_freq=args.scene_freq))
+                    lambda: scenes_from_manifest(run_dir, scene_freq=args.scene_freq),
+                    analysis=analysis)
     return summary
 
 
-def _persist_and_plot(run: GridSearchRun, out_dir: Path, config: SimConfig,
-                      args, log) -> ResidualSummary:
-    """Save a finished sweep into out_dir and emit its plots."""
+def persist_and_plot(run: GridSearchRun, out_dir: Path, config: SimConfig,
+                     args, log) -> dict:
+    """Save a finished sweep into out_dir, emit its plots and analysis.json.
+
+    Public because the study driver (mgs-study) persists its per-point runs
+    through the exact same path. Returns the analysis dict (the per-run numbers
+    a study aggregates)."""
     save_grid_run(run, out_dir, config, args.config, vars(args))
     log.info(f"Saved {len(run.candidates)} candidate beam(s) to {out_dir}")
     summary = summary_from_run(run)
+    analysis = analysis_from_run(run, summary)
+    write_analysis(out_dir, analysis)
     freq_summaries = freq_summaries_from_run(run)
     _emit_run_plots(summary, freq_summaries, out_dir, args, log,
-                    lambda: scenes_from_run(run, scene_freq=args.scene_freq))
-    return summary
+                    lambda: scenes_from_run(run, scene_freq=args.scene_freq),
+                    analysis=analysis)
+    return analysis
 
 
 def _dry_run(config: SimConfig, freqs: List[float], log) -> None:
@@ -330,7 +348,7 @@ def main():
     # created only once the sweep has finished, so an interrupted run never
     # destroys prior results without producing new ones
     out_dir = make_run_dir(config.output.output_dir, run_name, kind="grid")
-    _persist_and_plot(run, out_dir, config, args, log)
+    persist_and_plot(run, out_dir, config, args, log)
 
 
 if __name__ == "__main__":
