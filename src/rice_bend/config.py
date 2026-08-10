@@ -215,8 +215,10 @@ class SimConfig(BaseModel):
     grid_search: Optional[GridSearchConfig] = Field(default=None,
         description="Optional speculative TX-location sweep (used by grid-search-mgs)")
     frequencies: Optional[List[float]] = Field(default=None,
-        description="Frequencies (Hz) to run the grid search at; null -> single --freq/150e9. "
-                    "More than one runs the whole sweep independently per frequency.")
+        description="Frequencies (Hz) both entry points solve at; null -> --freq, else 150e9. "
+                    "More than one means ONE JOINT solve: a single phase mask fitted "
+                    "against every frequency at once, the loss being the mean of the "
+                    "per-frequency losses.")
 
     @model_validator(mode="after")
     def _check_frequencies(self) -> "SimConfig":
