@@ -86,12 +86,6 @@ class RxApertureConfig(BaseModel):
 
 class GerchbergSaxtonConfig(BaseModel):
     """Hyperparameters and start/stop conditions for the modified Gerchberg-Saxton solver."""
-    phase_model: Literal["achromatic", "delay"] = Field(default="delay",
-        description="What one profile is shared across frequencies in a joint solve: "
-                    "'delay' models a physical plate (per-frequency phase = (f/f_ref) "
-                    "times one shared profile — phase scales with wavenumber, like both "
-                    "simulated beams); 'achromatic' models a mask imposing the identical "
-                    "phase at every frequency. Identical at a single frequency.")
     init: Literal["random", "warm_start"] = Field(default="warm_start",
         description="Initial phase for a multi-frequency solve: 'warm_start' (default) "
                     "runs the multi-wavelength initialization — solve the reference "

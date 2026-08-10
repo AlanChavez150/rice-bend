@@ -184,9 +184,10 @@ def _worker_task(p: "GridPoint") -> "CandidateResult":
 class CandidateResult:
     """A single reconstructed candidate beam at a hypothesized TX location.
 
-    One aperture per candidate: the solved phase mask is shared across all
-    frequencies (achromatic) and the assumed amplitude is the same uniform box at
-    every frequency, so there is exactly one complex profile whatever F is.
+    One aperture per candidate: the solved profile is one delay plate shared
+    across all frequencies (stored as its reference-frequency field) and the
+    assumed amplitude is the same uniform box at every frequency, so there is
+    exactly one complex profile whatever F is.
     `final_loss` is the joint (mean-over-valid-frequencies) residual;
     `per_freq_losses` aligns with the run's frequency list, NaN where the
     candidate failed that frequency's RS sampling check (`freq_valid`)."""
@@ -214,7 +215,6 @@ class GridSearchRun:
     wavelengths: List[float]
     seed: Optional[int]
     effective_max_iters: int
-    phase_model: str                 # 'achromatic' | 'delay' (from gerchberg_saxton)
     init: str                        # 'random' | 'warm_start' (from gerchberg_saxton)
     ref_freq: float                  # run-level reference frequency for psi units
     grid_cfg: GridSearchConfig
@@ -330,7 +330,6 @@ def run_grid_search(config: SimConfig, freqs: List[float], *, limit: Optional[in
         wavelengths=[float(w) for w in wavelengths],
         seed=mgs.gs_cfg.seed,
         effective_max_iters=int(mgs.gs_cfg.max_iters),
-        phase_model=str(mgs.gs_cfg.phase_model),
         init=str(mgs.gs_cfg.init),
         ref_freq=float(ref_freq),
         grid_cfg=grid_cfg,
@@ -461,8 +460,7 @@ def save_grid_run(run: GridSearchRun, run_dir: Path, config: SimConfig,
                          "z_min": run.scene_bounds[2], "z_max": run.scene_bounds[3]},
         "ground_truth": ground_truth,
         "gs": {"effective_max_iters": run.effective_max_iters, "loss_combine": "mean",
-               "phase_model": run.phase_model, "init": run.init,
-               "ref_freq_hz": run.ref_freq},
+               "init": run.init, "ref_freq_hz": run.ref_freq},
         "provenance": provenance(args_dict),
         "counts": {"total": len(run.grid_points), "usable": n_usable,
                    "ran": len(run.candidates), "skipped": len(skipped_entries),

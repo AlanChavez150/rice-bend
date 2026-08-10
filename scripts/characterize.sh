@@ -83,11 +83,6 @@ run $GRID --config "$C/scenario_caustic_hit_sparse.yml" --freq 150e9 \
 #    pins the z-outer/x-inner ordering.
 run $GRID --config "$C/tiny_check.yml" --freq 140e9 150e9 -o "$S/c5_multifreq"
 
-# 6. the same joint run with phase_model pinned to ACHROMATIC — the non-default mode
-#    must not rot. Its residuals are exactly what check 5 produced before the delay
-#    model existed.
-run $GRID --config "$C/tiny_check_achromatic.yml" --freq 140e9 150e9 -o "$S/c6_achromatic"
-
 echo "---"
 set +e
 "$PYTHON" "$REPO_ROOT/scripts/characterize.py" "$S" $BLESS

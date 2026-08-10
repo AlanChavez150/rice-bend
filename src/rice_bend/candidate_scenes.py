@@ -97,16 +97,6 @@ def make_true_mgs_plot(run_dir: Path, log: Optional[logging.Logger] = None,
     if config is None:
         return None
 
-    # Pin the phase model to what THIS sweep actually ran (absent in pre-field
-    # manifests means achromatic — historically accurate, they all were). Without
-    # this, replotting an old achromatic run under the delay default would produce
-    # a baseline that silently disagrees with the manifest's residuals.
-    ran_model = manifest.get("gs", {}).get("phase_model", "achromatic")
-    if config.gerchberg_saxton.phase_model != ran_model:
-        log.info(f"true MGS run: pinning phase_model to {ran_model!r} (what this "
-                 "sweep ran) over the config's default")
-        config.gerchberg_saxton.phase_model = ran_model
-
     # Pin the GS seed so the baseline is reproducible across --replot calls. Plain mgs
     # leaves gerchberg_saxton.seed null -> a fresh random initial phase each run, which
     # would make true_mgs_scene.png differ every time. Reuse the run's recorded sweep
