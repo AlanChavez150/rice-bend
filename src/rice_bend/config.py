@@ -86,6 +86,12 @@ class RxApertureConfig(BaseModel):
 
 class GerchbergSaxtonConfig(BaseModel):
     """Hyperparameters and start/stop conditions for the modified Gerchberg-Saxton solver."""
+    phase_model: Literal["achromatic", "delay"] = Field(default="delay",
+        description="What one profile is shared across frequencies in a joint solve: "
+                    "'delay' models a physical plate (per-frequency phase = (f/f_ref) "
+                    "times one shared profile — phase scales with wavenumber, like both "
+                    "simulated beams); 'achromatic' models a mask imposing the identical "
+                    "phase at every frequency. Identical at a single frequency.")
     max_iters: int = Field(default=10000, gt=0, description="Max iterations before stopping")
     convergence_count: int = Field(default=10, gt=0,
         description="Window of recent losses checked for flatness")
@@ -230,6 +236,17 @@ class SimConfig(BaseModel):
             if len(set(self.frequencies)) != len(self.frequencies):
                 raise ValueError(f"frequencies must be unique (got {self.frequencies})")
         return self
+
+
+def center_freq_index(freqs: List[float]) -> int:
+    """Index of the centre-by-value frequency: the median of the sorted list.
+
+    One convention, three consumers: the delay solver's reference frequency, the
+    default display frequency for scene renders, and the scatter-3d-diff baseline.
+    Lives here (not in a consumer module) so mgs.py can use it without an import
+    cycle."""
+    order = sorted(range(len(freqs)), key=lambda i: freqs[i])
+    return order[len(order) // 2]
 
 
 def resolve_frequencies(config: "SimConfig",
