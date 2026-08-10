@@ -3,7 +3,7 @@
 # A deliberately coarse copy of scenario_caustic_hit: same geometry and beam, but a
 # 6x coarser scene grid, 40 GS iterations and a 3x3 speculative grid, so both
 # entry points finish in a fraction of a second while still exercising the caustic
-# branch, the GS history capture, the multi-frequency layout and the grid sweep.
+# branch, the GS history capture, the joint multi-frequency solve and the grid sweep.
 #
 # spacing must stay BELOW the wavelength (1.9986 mm at 150 GHz, 1.578 mm at 190 GHz)
 # or rs() raises "needs denser sampling" and every check fails at once.
@@ -31,8 +31,8 @@ rx_aperture:
 
 plot_path: tiny_check.png
 
-# Two frequencies only: enough to build the multi-frequency layout (freq_<GHz>/
-# subdirs, frequencies.json, the averaged + 3D plots) without paying for ten.
+# Two frequencies only: enough to exercise the joint solve (one shared phase mask,
+# per-frequency loss components, the 3D + vs-joint plots) without paying for ten.
 frequencies: [140.0e9, 150.0e9]
 
 gerchberg_saxton:

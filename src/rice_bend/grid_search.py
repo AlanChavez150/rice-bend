@@ -245,7 +245,8 @@ def _parse_args():
                              "(default: <output.output_dir>/<output.run_name>)")
     parser.add_argument("--freq", "-f", type=float, nargs="+", default=None,
                         help="One or more frequencies in Hz (overrides config `frequencies`). "
-                             "Multiple values run the whole sweep independently per frequency. "
+                             "Multiple values run ONE joint sweep: each candidate is solved "
+                             "once, for a single phase mask, against all of them. "
                              "Default: config `frequencies`, else 150e9.")
     parser.add_argument("--limit", type=int, default=None,
                         help="Only run the first N usable candidates (for quick tests)")

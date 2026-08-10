@@ -25,8 +25,16 @@ Runs the phase-retrieval pipeline. With no data paths it runs a pure simulation:
 mgs                                              # pure simulation (default: caustic beam)
 mgs --config configs/directional_config.yml      # directional (steered) beam scene
 mgs --freq 150e9                                 # set carrier frequency (Hz)
+mgs --freq 140e9 150e9 160e9                     # ONE joint solve across several frequencies
 mgs --debug                                      # verbose logging
 ```
+
+With more than one frequency (several `--freq` values, or a `frequencies:` list in
+the config — the CLI overrides it) `mgs` runs **one joint solve**: a single
+achromatic phase mask fitted against every frequency's measurement at once, the
+loss being the mean of the per-frequency losses. A single frequency is just the
+length-1 case of the same path. The scene panels render at the primary (first)
+frequency; `run.json` records the joint `final_loss` plus `final_loss_per_freq`.
 
 Two general configs ship in `configs/`: `caustic_config.yml` (an accelerating
 "caustic" beam — the `mgs` default) and `directional_config.yml` (a steered
@@ -87,15 +95,16 @@ block.
 ### `grid-search-mgs`
 
 Localizes a transmitter whose **location is unknown**. The real TX location/trajectory in
-the config is used only to synthesize the single shared RX measurement; the tool then
-sweeps a speculative `(z, x_center)` grid, runs MGS phase retrieval at each hypothesized
-plane (a fixed-width aperture with uniform assumed amplitude) against that one
-measurement, and saves each reconstruction as a **candidate beam**.
+the config is used only to synthesize the shared RX measurement set (one measurement per
+frequency); the tool then sweeps a speculative `(z, x_center)` grid, runs one joint MGS
+phase retrieval at each hypothesized plane (a fixed-width aperture with uniform assumed
+amplitude, one phase mask fitted against every frequency's measurement at once), and
+saves each reconstruction as a **candidate beam**.
 
 ```bash
 grid-search-mgs                                 # full sweep from the config's grid_search block
-grid-search-mgs --freq 140e9 150e9 160e9        # run the whole sweep at each frequency (see below)
-grid-search-mgs --dry-run                       # enumerate the grid (counts + skipped points), no MGS
+grid-search-mgs --freq 140e9 150e9 160e9        # joint sweep: one solve per candidate across all three
+grid-search-mgs --dry-run                       # enumerate the grid (counts + per-frequency validity), no MGS
 grid-search-mgs --limit 10                      # quick partial run
 grid-search-mgs -j 8                            # worker processes (default: all cores; 1 = serial)
 grid-search-mgs -o results/my_run               # name the run directory outright
@@ -103,7 +112,7 @@ grid-search-mgs --scenes                        # one PNG per candidate beam (sc
 grid-search-mgs --anim                          # animate the candidate beams -> candidate_beams.mp4 (ffmpeg)
 grid-search-mgs --surface-anim                  # orbit each residual surface -> residual_surface_orbit.mp4 (ffmpeg)
 grid-search-mgs --true-mgs                      # also recompute the baseline MGS run at the KNOWN TX
-grid-search-mgs --replot results/grid_search    # re-plot a saved run (single- or multi-frequency)
+grid-search-mgs --replot results/grid_search    # re-plot a saved run (joint or legacy layout)
 grid-search-mgs --replot results/grid_search --scenes --anim   # standalone scenes + animation for a saved run
 ```
 
@@ -112,9 +121,6 @@ written. One rule sets everything else: **cheap plots always run; anything that
 re-solves MGS, renders per-candidate PNGs or encodes video is opt-in** (`--true-mgs`,
 `--scenes`, `--anim`, `--surface-anim`). A fresh run and a `--replot` of it therefore
 produce the same set of files.
-
-```bash
-```
 
 Configure the sweep in the `grid_search` block of the config: the `z` / `x_center` sweeps,
 the assumed aperture `width` (its `dx` is provenance-only — candidates are sampled on the
@@ -128,9 +134,13 @@ Plain `mgs` resolves `output.run_name` to the same path, but the two tools will 
 clear each other's runs: each refuses to clear a directory that does not carry its own
 marker file, and says so before starting work. Use `-o/--out` to keep them apart.
 
-- `candidate_beams.json` — manifest: ground-truth TX location, the grid spec, and the
-  indexed candidate list (z, x_center, final residual, iters, stop reason) plus any skipped points.
-- `measurement.npz` — the shared RX field, error weighting, and RX / real-TX apertures.
+- `candidate_beams.json` — manifest: ground-truth TX location, the grid spec, the frequency
+  list (the alignment order for every per-frequency value in the run), and the indexed
+  candidate list (z, x_center, joint residual, `per_freq_losses` with `null` where a
+  frequency failed the sampling check, `freq_valid`, iters, stop reason) plus any skipped points.
+- `measurement.npz` — the per-frequency RX fields and error weightings (stacked `(F, nx)` on
+  the scene axis), the ragged per-frequency RX element arrays (`rx_aper_axis_00`, ...), and
+  the real-TX aperture (one shared axis, per-frequency profiles).
 - `candidates/cand_####.{npz,json}` — each reconstructed aperture + loss curve, and its metadata.
 - `residual_heatmap.png` — GS residual over `(z, x_center)`; lower = better
   data fit, with the true location and best candidate marked.
@@ -179,56 +189,69 @@ candidate `.npz` are byte-identical whatever `-j` you pass.
 
 #### Multiple frequencies
 
-To test the same scene at several carrier frequencies, list them in the config's top-level
-`frequencies` block (Hz), or pass several values to `--freq` (which overrides the config):
+To solve the same scene against several carrier frequencies at once, list them in the
+config's top-level `frequencies` block (Hz), or pass several values to `--freq` (which
+overrides the config):
 
 ```yaml
 # null / absent -> single --freq, default 150e9
 frequencies: [100.0e9, 110.0e9, 120.0e9, 130.0e9, 140.0e9, 150.0e9, 160.0e9, 170.0e9, 180.0e9, 190.0e9]
 ```
 
-With more than one frequency the whole sweep runs **independently per frequency** (each
-re-illuminates the scene and re-solves MGS at every candidate — note the RX element count
-scales with wavelength when `rx_aperture.dx` is null). Results are laid out as:
+With more than one frequency each candidate gets **one joint solve**: a single achromatic
+phase mask is fitted against every frequency's measurement simultaneously (the
+per-frequency forward operators all act on the same aperture field), and the residual the
+solver minimizes — and the plots rank by — is the **mean of the per-frequency losses**.
+The measurement set is still per-frequency: each frequency synthesizes its own RX field
+with its own TX beam phase (∝ wavenumber) and its own RX element count when
+`rx_aperture.dx` is null (λ/20 spacing).
 
-- `<output_dir>/<run_name>/freq_<GHz>/` — one complete run dir per frequency (`candidate_beams.json`,
-  `residual_heatmap.png`, etc., exactly as a single-frequency run), so `--scenes`/`--anim`/`--replot`
-  all work per frequency.
-- `<output_dir>/<run_name>/frequencies.json` — index tying the per-frequency subdirs together.
-- `<output_dir>/<run_name>/residual_scatter_3d.png` — the **3D residual scatter**: every candidate
-  plotted with `(x_center, z)` on the bottom plane and frequency rising vertically, colored by its GS
-  residual on the same fixed `[0, 0.06]` `viridis_r` scale as the 2D heatmap, with the true TX marked
-  on each frequency layer. Dot size shrinks cubically as the residual grows, so high-MSE dots are
-  near-invisible and the layers stay see-through. This is the 2D residual data with frequency as the
-  third axis. `residual_scatter_3d_hc.png` is its high-contrast (log color scale) twin.
-- `<output_dir>/<run_name>/residual_heatmap_avg.png` — the **frequency-averaged residual heatmap**:
-  each `(z, x_center)` cell is the mean GS residual across all frequencies where that candidate ran,
-  so a location that fits well at *every* frequency stands out. `residual_heatmap_avg_hc.png` is its
-  high-contrast twin.
-- `<output_dir>/<run_name>/residual_surface_avg.png` — the same frequency-averaged grid as relief,
-  drawn exactly like the per-frequency `residual_surface.png`. `residual_surface_avg_hc.png` is its
-  high-contrast twin. Note the average is an arithmetic `nanmean`, so a frequency that fits far worse
-  than the rest dominates it; the per-frequency surfaces are the place to see that happening.
-- `<output_dir>/<run_name>/freq_<GHz>/residual_heatmap_vs_avg.png` — per-frequency **vs-average
-  comparison**: that frequency's heatmap and the averaged heatmap side by side (shared linear scale),
-  plus their difference (frequency − average) on a symmetric `viridis_r` scale — yellow where that
-  frequency fits better than the average, dark purple where worse. `residual_heatmap_vs_avg_hc.png`
-  is its high-contrast twin (data-driven log scale on the heatmaps, symmetric log on the difference).
-- `<output_dir>/<run_name>/residual_scatter_3d_diff.png` — 3D **difference-from-center scatter**:
-  every layer shows loss(frequency) − loss(center frequency) (the middle of the sorted list, e.g.
-  150 GHz) on a symmetric `viridis_r` scale — yellow = better than the baseline, purple = worse,
-  teal = unchanged (the baseline layer is uniformly zero). Dot size grows with the deviation, so
-  candidates that behave like the baseline stay see-through.
+A candidate too close to the RX plane may fail the Rayleigh-Sommerfeld sampling check at
+the highest frequencies while passing at lower ones; such a candidate is solved jointly
+over its **valid frequency subset** (the joint loss is the mean over that subset), with
+`freq_valid` and the `null`-padded `per_freq_losses` in the manifest recording exactly
+which frequencies contributed. Only a candidate invalid at *every* frequency is skipped.
 
-`grid-search-mgs --replot <run_name>` detects the multi-frequency layout automatically: it regenerates
-every per-frequency plot, the frequency-averaged heatmap pair, and both 3D scatters. It re-solves
-nothing unless you pass `--true-mgs`. A single frequency keeps the original flat layout (no
-`freq_<GHz>/` subdirs, no 3D/averaged plots).
+Results land in **one flat run directory** whatever the frequency count — same layout and
+plot names as a single-frequency run (`residual_heatmap.png` is the joint residual), plus
+the multi-frequency extras:
+
+- `residual_scatter_3d.png` — the **3D residual scatter**: every candidate plotted with
+  `(x_center, z)` on the bottom plane and frequency rising vertically, colored by that
+  frequency's residual **component** of the joint solve on the same fixed `[0, 0.06]`
+  `viridis_r` scale as the 2D heatmap, with the true TX marked on each frequency layer.
+  Dot size shrinks cubically as the residual grows, so high-MSE dots are near-invisible
+  and the layers stay see-through. `residual_scatter_3d_hc.png` is its high-contrast
+  (log color scale) twin.
+- `residual_scatter_3d_diff.png` — 3D **difference-from-center scatter**: every layer
+  shows component(frequency) − component(center frequency) (the middle of the sorted
+  list, e.g. 150 GHz) on a symmetric `viridis_r` scale — yellow = better than the
+  baseline, purple = worse, teal = unchanged (the baseline layer is uniformly zero).
+  Dot size grows with the deviation, so candidates that behave like the baseline stay
+  see-through.
+- `residual_heatmap_vs_joint_<GHz>.png` — one per frequency: that frequency's component
+  heatmap and the joint heatmap side by side (shared linear scale), plus their difference
+  (frequency − joint) on a symmetric `viridis_r` scale — yellow where that frequency fits
+  better than the joint, dark purple where worse. `residual_heatmap_vs_joint_<GHz>_hc.png`
+  is its high-contrast twin (data-driven log scale on the heatmaps, symmetric log on the
+  difference).
+
+Scene renders (`--scenes`, `--anim`, `--true-mgs`) are inherently monochromatic; on a
+multi-frequency run they use the **centre frequency** by default, or `--scene-freq HZ`
+(one of the run's frequencies) to pick another view.
+
+`grid-search-mgs --replot <run_name>` regenerates every plot from the saved manifest; it
+re-solves nothing unless you pass `--true-mgs`. Pointed at a results directory from the
+retired per-frequency layout (`freq_<GHz>/` subdirs + `frequencies.json`, written before
+the joint solver), it regenerates each subdir's own plots and explains that the joint
+plots require a re-run — averaging independent per-frequency solves after the fact is not
+the same measurement as one joint solve.
 
 **When comparing results, re-run rather than `--replot`.** `--replot --true-mgs` regenerates
 `true_mgs_scene.png` from a fresh solve while reading residuals from the saved manifest, so
 replotting a run made by older code produces a figure pair that silently disagrees with itself.
-`schema_version` in `candidate_beams.json` / `run.json` distinguishes result sets.
+`schema_version` in `candidate_beams.json` / `run.json` distinguishes result sets (3 = joint
+multi-frequency; 2 = the retired per-frequency layout).
 
 ### `mgs-animate`
 
@@ -240,8 +263,15 @@ via ffmpeg):
 mgs-animate                              # latest run under results/ -> tx_estimate.mp4
 mgs-animate --mode scene                 # 2D scene re-illuminated by the TX estimate
 mgs-animate results/<run> -o out.mp4     # specific run / output path
+mgs-animate --freq-index 1               # multi-frequency run: which frequency's view
 mgs-animate --fps 20 --show
 ```
+
+On a joint multi-frequency run, `--freq-index` (an index into `run.json`'s
+`frequencies_hz`, default 0) picks the scene-mode wavelength and the phase-mode
+Real-TX overlay — the reconstructed mask is achromatic, but the real plate's phase
+scales with the wavenumber, so the overlay is one frequency's view and is labelled
+with it. The loss panel always shows the joint curve.
 
 How many frames each mode renders:
 
@@ -291,7 +321,8 @@ Entry points:
 
 There is no test suite; `scripts/characterize.sh` is the net. It runs a fixed command list
 into a scratch directory, extracts a numeric digest (final losses, iteration counts, stop
-reasons, npz key lists and content hashes, output file lists, the grid loss vectors and their
+reasons, npz key lists and content hashes, output file lists, the grid's joint and
+per-frequency loss vectors, the joint-equals-mean-of-components invariant, and the
 index → (z, x_center) map) and diffs it against `scripts/characterize_expected.json`:
 
 ```bash
