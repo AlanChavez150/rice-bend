@@ -59,10 +59,15 @@ run() {
 }
 
 # 1. mgs on the tiny config: solver stop state, captured-history indices, npz key set.
+#    Deliberately UNPINNED: tiny_check.yml lists two frequencies, so this exercises
+#    the joint multi-frequency solve through the single-run entry point.
 run $MGS --config "$C/tiny_check.yml" -o "$S/c1_mgs_tiny"
 
 # 2. mgs at full scene resolution — the only full-size check; covers the caustic branch.
-run $MGS --config "$C/scenario_caustic_hit.yml" -o "$S/c2_mgs_caustic_hit"
+#    PINNED to one frequency: the config lists ten, and an unpinned run would be a
+#    10x full-resolution joint solve — minutes added for no extra coverage (check 1
+#    already pins the joint path).
+run $MGS --config "$C/scenario_caustic_hit.yml" --freq 150e9 -o "$S/c2_mgs_caustic_hit"
 
 # 3. the sweep, serial.
 run $GRID --config "$C/scenario_caustic_hit_sparse.yml" --freq 150e9 \
