@@ -378,22 +378,6 @@ def save_grid_run(run: GridSearchRun, run_dir: Path, config: SimConfig,
 FREQ_INDEX_NAME = "frequencies.json"
 
 
-def _resolve_frequencies(config: SimConfig, cli_freqs: Optional[List[float]]) -> List[float]:
-    """Resolve the frequency list: CLI override -> config.frequencies -> [150e9].
-
-    Duplicates are dropped (order-preserving): repeated frequencies would map to the
-    same freq_<GHz> subdir, clobbering the earlier sweep and double-counting the layer
-    in the averaged/3D plots.
-    """
-    if cli_freqs:
-        freqs = [float(f) for f in cli_freqs]
-    elif config.frequencies:
-        freqs = [float(f) for f in config.frequencies]
-    else:
-        return [150e9]
-    return list(dict.fromkeys(freqs))
-
-
 def _freq_dir_name(freq: float) -> str:
     """Per-frequency subdirectory name, e.g. 140e9 -> 'freq_140GHz'."""
     return f"freq_{freq / 1e9:g}GHz"

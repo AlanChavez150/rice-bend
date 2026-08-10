@@ -17,9 +17,10 @@ from rice_bend.candidate_scenes import (ANIM_FPS, ANIM_TOP_DEFAULT, ANIM_WARN_FR
                                         make_candidate_scenes, make_true_mgs_plot,
                                         scenes_from_manifest, scenes_from_run)
 from rice_bend.cli import setup_logging
-from rice_bend.config import DEFAULT_CONFIG, SimConfig, load_config
+from rice_bend.config import (DEFAULT_CONFIG, SimConfig, load_config,
+                              resolve_frequencies)
 from rice_bend.data_store import check_run_dir, make_run_dir
-from rice_bend.grid_sweep import (GridSearchRun, _freq_dir_name, _resolve_frequencies,
+from rice_bend.grid_sweep import (GridSearchRun, _freq_dir_name,
                                   enumerate_grid, grid_summary, load_frequencies_index,
                                   run_grid_search, save_grid_run, write_frequencies_index)
 from rice_bend.residual_plots import (ResidualSummary, animate_residual_surface,
@@ -280,7 +281,7 @@ def main():
     if args.out is not None:
         config.output.output_dir = Path(args.out).parent
         run_name = Path(args.out).name
-    freqs = _resolve_frequencies(config, args.freq)
+    freqs = resolve_frequencies(config, args.freq)
 
     if args.dry_run:
         _dry_run(config, freqs, log)

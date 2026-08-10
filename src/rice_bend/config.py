@@ -230,6 +230,24 @@ class SimConfig(BaseModel):
         return self
 
 
+def resolve_frequencies(config: "SimConfig",
+                        cli_freqs: Optional[List[float]]) -> List[float]:
+    """Resolve the frequency list: CLI override -> config.frequencies -> [150e9].
+
+    Shared by both entry points (`mgs` and `grid-search-mgs`), so it lives here on
+    neutral ground rather than in either of them. Duplicates are dropped
+    (order-preserving): a repeated frequency adds no information and would be
+    double-counted wherever the frequencies are combined.
+    """
+    if cli_freqs:
+        freqs = [float(f) for f in cli_freqs]
+    elif config.frequencies:
+        freqs = [float(f) for f in config.frequencies]
+    else:
+        return [150e9]
+    return list(dict.fromkeys(freqs))
+
+
 # Default config shipped in the repo's configs/ folder, used by both entry points
 # when --config is omitted.
 DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "configs" / "caustic_config.yml"
