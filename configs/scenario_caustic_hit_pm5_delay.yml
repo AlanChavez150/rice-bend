@@ -1,7 +1,7 @@
-# Frequency-comparison case 1 of 3: SINGLE frequency (150 GHz, the design center).
-# Baseline for scenario_caustic_hit_pm5.yml (±5%) and scenario_caustic_hit_pm10.yml
-# (±10%): identical scene, grid, seed and GS settings — the frequency list is the
-# only variable across the three cases.
+# DELAY-model twin of the frequency-comparison case 2 of 3: three frequencies, center 150 GHz ±5%.
+# Compare against scenario_caustic_hit_1f.yml (single frequency) and
+# scenario_caustic_hit_pm10.yml (±10%): identical scene, grid, seed and GS settings —
+# the frequency list is the only variable across the three cases.
 #
 # Scenario: caustic beam HITS the RX aperture (big arc curves into the window).
 # RX window: centered x=0, width 0.04 m. RX at z=0; TX projects -Z. TX width 0.132 m,
@@ -30,13 +30,14 @@ rx_aperture:
   width: 0.04
   dx: null
 
-plot_path: scenario_caustic_hit_1f.png
+plot_path: scenario_caustic_hit_pm5_delay.png
 
-# Single frequency: the joint solve reduces to the plain single-frequency MGS.
-frequencies: [150.0e9]
+# 150 GHz ±5%: ONE JOINT solve — a single phase mask fitted against all three
+# frequencies at once (loss = mean of the per-frequency losses).
+frequencies: [142.5e9, 150.0e9, 157.5e9]
 
 gerchberg_saxton:
-  phase_model: achromatic  # pinned: this case's saved results predate the delay default
+  phase_model: delay       # the plate-matched model; compare against the achromatic twin
   max_iters: 800
   convergence_count: 10
   convergence_threshold: -1.0e-8
@@ -48,7 +49,7 @@ gerchberg_saxton:
 
 output:
   output_dir: results
-  run_name: scenario_caustic_hit_1f
+  run_name: scenario_caustic_hit_pm5_delay
   save_run: true
   save_scene_fields: false
   save_gs_history: false
