@@ -215,6 +215,7 @@ class GridSearchRun:
     seed: Optional[int]
     effective_max_iters: int
     phase_model: str                 # 'achromatic' | 'delay' (from gerchberg_saxton)
+    init: str                        # 'random' | 'warm_start' (from gerchberg_saxton)
     ref_freq: float                  # run-level reference frequency for psi units
     grid_cfg: GridSearchConfig
     grid_points: List[GridPoint]
@@ -330,6 +331,7 @@ def run_grid_search(config: SimConfig, freqs: List[float], *, limit: Optional[in
         seed=mgs.gs_cfg.seed,
         effective_max_iters=int(mgs.gs_cfg.max_iters),
         phase_model=str(mgs.gs_cfg.phase_model),
+        init=str(mgs.gs_cfg.init),
         ref_freq=float(ref_freq),
         grid_cfg=grid_cfg,
         grid_points=points,
@@ -459,7 +461,8 @@ def save_grid_run(run: GridSearchRun, run_dir: Path, config: SimConfig,
                          "z_min": run.scene_bounds[2], "z_max": run.scene_bounds[3]},
         "ground_truth": ground_truth,
         "gs": {"effective_max_iters": run.effective_max_iters, "loss_combine": "mean",
-               "phase_model": run.phase_model, "ref_freq_hz": run.ref_freq},
+               "phase_model": run.phase_model, "init": run.init,
+               "ref_freq_hz": run.ref_freq},
         "provenance": provenance(args_dict),
         "counts": {"total": len(run.grid_points), "usable": n_usable,
                    "ran": len(run.candidates), "skipped": len(skipped_entries),

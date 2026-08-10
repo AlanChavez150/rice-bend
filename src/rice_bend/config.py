@@ -92,6 +92,14 @@ class GerchbergSaxtonConfig(BaseModel):
                     "times one shared profile — phase scales with wavenumber, like both "
                     "simulated beams); 'achromatic' models a mask imposing the identical "
                     "phase at every frequency. Identical at a single frequency.")
+    init: Literal["random", "warm_start"] = Field(default="warm_start",
+        description="Initial phase for a multi-frequency solve: 'warm_start' (default) "
+                    "runs the multi-wavelength initialization — solve the reference "
+                    "frequency alone, unwrap, scan the absolute offset over one "
+                    "synthetic-wavelength period — before the joint descent (see "
+                    "docs/delay_model_warm_start.md); 'random' starts from the seeded "
+                    "random draw. A single-frequency solve always uses the random path "
+                    "(the two are the same problem there).")
     max_iters: int = Field(default=10000, gt=0, description="Max iterations before stopping")
     convergence_count: int = Field(default=10, gt=0,
         description="Window of recent losses checked for flatness")

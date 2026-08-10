@@ -143,6 +143,7 @@ def _grid_digest(d: Path) -> dict:
         "ground_truth": m["ground_truth"],
         "seed": m["seed"],
         "phase_model": m["gs"].get("phase_model"),
+        "init": m["gs"].get("init"),
         "frequencies": [f["freq_hz"] for f in m["frequencies"]],
         "residuals": joint,
         "per_freq_losses": per_freq,
