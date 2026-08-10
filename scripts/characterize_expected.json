@@ -79,9 +79,13 @@
     "stop_reason": "max_iters"
   },
   "check3_grid_serial": {
+    "argmin": 4,
     "cand_0003_sha256": "473efaef18f7edc125cd93d08308dba375c090e3822ddddd2719683dadb91ece",
     "counts": {
       "ran": 6,
+      "ran_per_freq": [
+        6
+      ],
       "skipped": 0,
       "total": 144,
       "usable": 144
@@ -97,6 +101,29 @@
       "residual_scatter_hc.png",
       "residual_surface.png",
       "residual_surface_hc.png"
+    ],
+    "freq_valid": [
+      [
+        true
+      ],
+      [
+        true
+      ],
+      [
+        true
+      ],
+      [
+        true
+      ],
+      [
+        true
+      ],
+      [
+        true
+      ]
+    ],
+    "frequencies": [
+      150000000000.0
     ],
     "grid_map": [
       [
@@ -135,7 +162,8 @@
       "real_tx_x_min": -0.167,
       "real_tx_z": 0.3
     },
-    "measurement_sha256": "32d4af4c2e0927a0cc91b0200b23abf02e44c895185be3bae5d1b508135e3178",
+    "joint_is_mean_of_valid": true,
+    "measurement_sha256": "606bd9854f609972df96956a136579f50abdbbf80272ff310f26747e9525c4cd",
     "n_candidate_files": 12,
     "n_iters_run": [
       800,
@@ -144,6 +172,26 @@
       800,
       800,
       800
+    ],
+    "per_freq_losses": [
+      [
+        0.051241418714964314
+      ],
+      [
+        0.04868786060844787
+      ],
+      [
+        0.009742018257250858
+      ],
+      [
+        0.004682178945790126
+      ],
+      [
+        0.004654707721793422
+      ],
+      [
+        0.008580875352943091
+      ]
     ],
     "residuals": [
       0.051241418714964314,
@@ -158,9 +206,13 @@
   "check4_grid_parallel": {
     "cand_0003_matches_serial": true,
     "digest": {
+      "argmin": 4,
       "cand_0003_sha256": "473efaef18f7edc125cd93d08308dba375c090e3822ddddd2719683dadb91ece",
       "counts": {
         "ran": 6,
+        "ran_per_freq": [
+          6
+        ],
         "skipped": 0,
         "total": 144,
         "usable": 144
@@ -176,6 +228,29 @@
         "residual_scatter_hc.png",
         "residual_surface.png",
         "residual_surface_hc.png"
+      ],
+      "freq_valid": [
+        [
+          true
+        ],
+        [
+          true
+        ],
+        [
+          true
+        ],
+        [
+          true
+        ],
+        [
+          true
+        ],
+        [
+          true
+        ]
+      ],
+      "frequencies": [
+        150000000000.0
       ],
       "grid_map": [
         [
@@ -214,7 +289,8 @@
         "real_tx_x_min": -0.167,
         "real_tx_z": 0.3
       },
-      "measurement_sha256": "32d4af4c2e0927a0cc91b0200b23abf02e44c895185be3bae5d1b508135e3178",
+      "joint_is_mean_of_valid": true,
+      "measurement_sha256": "606bd9854f609972df96956a136579f50abdbbf80272ff310f26747e9525c4cd",
       "n_candidate_files": 12,
       "n_iters_run": [
         800,
@@ -223,6 +299,26 @@
         800,
         800,
         800
+      ],
+      "per_freq_losses": [
+        [
+          0.051241418714964314
+        ],
+        [
+          0.04868786060844787
+        ],
+        [
+          0.009742018257250858
+        ],
+        [
+          0.004682178945790126
+        ],
+        [
+          0.004654707721793422
+        ],
+        [
+          0.008580875352943091
+        ]
       ],
       "residuals": [
         0.051241418714964314,
@@ -237,214 +333,187 @@
     "manifest_matches_serial": true
   },
   "check5_multifreq": {
-    "files": [
-      "freq_140GHz/candidate_beams.json",
-      "freq_140GHz/config_snapshot.json",
-      "freq_140GHz/config_source.yml",
-      "freq_140GHz/measurement.npz",
-      "freq_140GHz/residual_heatmap.png",
-      "freq_140GHz/residual_heatmap_hc.png",
-      "freq_140GHz/residual_heatmap_vs_avg.png",
-      "freq_140GHz/residual_heatmap_vs_avg_hc.png",
-      "freq_140GHz/residual_scatter.png",
-      "freq_140GHz/residual_scatter_hc.png",
-      "freq_140GHz/residual_surface.png",
-      "freq_140GHz/residual_surface_hc.png",
-      "freq_150GHz/candidate_beams.json",
-      "freq_150GHz/config_snapshot.json",
-      "freq_150GHz/config_source.yml",
-      "freq_150GHz/measurement.npz",
-      "freq_150GHz/residual_heatmap.png",
-      "freq_150GHz/residual_heatmap_hc.png",
-      "freq_150GHz/residual_heatmap_vs_avg.png",
-      "freq_150GHz/residual_heatmap_vs_avg_hc.png",
-      "freq_150GHz/residual_scatter.png",
-      "freq_150GHz/residual_scatter_hc.png",
-      "freq_150GHz/residual_surface.png",
-      "freq_150GHz/residual_surface_hc.png",
-      "frequencies.json",
-      "residual_heatmap_avg.png",
-      "residual_heatmap_avg_hc.png",
-      "residual_scatter_3d.png",
-      "residual_scatter_3d_diff.png",
-      "residual_scatter_3d_hc.png",
-      "residual_surface_avg.png",
-      "residual_surface_avg_hc.png"
-    ],
-    "index": {
-      "frequencies": [
-        {
-          "dir": "freq_140GHz",
-          "freq_hz": 140000000000.0,
-          "wavelength_m": 0.0021413747
-        },
-        {
-          "dir": "freq_150GHz",
-          "freq_hz": 150000000000.0,
-          "wavelength_m": 0.0019986163866666665
-        }
+    "argmin": 1,
+    "cand_0003_sha256": "1dd891f883a253b5413a08a4e2fa9751684d7d8bb9874be0ee2d46c575c3b488",
+    "counts": {
+      "ran": 9,
+      "ran_per_freq": [
+        9,
+        9
       ],
-      "ground_truth": {
-        "real_tx_x_center": -0.101,
-        "real_tx_z": 0.3
-      },
-      "schema_version": 2
+      "skipped": 0,
+      "total": 9,
+      "usable": 9
     },
-    "per_frequency": {
-      "freq_140GHz": {
-        "argmin": 3,
-        "files": [
-          "candidate_beams.json",
-          "config_snapshot.json",
-          "config_source.yml",
-          "measurement.npz",
-          "residual_heatmap.png",
-          "residual_heatmap_hc.png",
-          "residual_heatmap_vs_avg.png",
-          "residual_heatmap_vs_avg_hc.png",
-          "residual_scatter.png",
-          "residual_scatter_hc.png",
-          "residual_surface.png",
-          "residual_surface_hc.png"
-        ],
-        "freq_hz": 140000000000.0,
-        "grid_map": [
-          [
-            0,
-            0.15,
-            -0.15
-          ],
-          [
-            1,
-            0.15,
-            0.0
-          ],
-          [
-            2,
-            0.15,
-            0.15
-          ],
-          [
-            3,
-            0.475,
-            -0.15
-          ],
-          [
-            4,
-            0.475,
-            0.0
-          ],
-          [
-            5,
-            0.475,
-            0.15
-          ],
-          [
-            6,
-            0.8,
-            -0.15
-          ],
-          [
-            7,
-            0.8,
-            0.0
-          ],
-          [
-            8,
-            0.8,
-            0.15
-          ]
-        ],
-        "losses": [
-          0.0586349503704856,
-          0.04127901369614297,
-          0.056469073451001446,
-          0.01476728735882969,
-          0.052453257496064595,
-          0.060923773794119215,
-          0.04825248663512337,
-          0.05278097528224222,
-          0.052772701804436765
-        ],
-        "n_candidate_files": 18
-      },
-      "freq_150GHz": {
-        "argmin": 1,
-        "files": [
-          "candidate_beams.json",
-          "config_snapshot.json",
-          "config_source.yml",
-          "measurement.npz",
-          "residual_heatmap.png",
-          "residual_heatmap_hc.png",
-          "residual_heatmap_vs_avg.png",
-          "residual_heatmap_vs_avg_hc.png",
-          "residual_scatter.png",
-          "residual_scatter_hc.png",
-          "residual_surface.png",
-          "residual_surface_hc.png"
-        ],
-        "freq_hz": 150000000000.0,
-        "grid_map": [
-          [
-            0,
-            0.15,
-            -0.15
-          ],
-          [
-            1,
-            0.15,
-            0.0
-          ],
-          [
-            2,
-            0.15,
-            0.15
-          ],
-          [
-            3,
-            0.475,
-            -0.15
-          ],
-          [
-            4,
-            0.475,
-            0.0
-          ],
-          [
-            5,
-            0.475,
-            0.15
-          ],
-          [
-            6,
-            0.8,
-            -0.15
-          ],
-          [
-            7,
-            0.8,
-            0.0
-          ],
-          [
-            8,
-            0.8,
-            0.15
-          ]
-        ],
-        "losses": [
-          0.05170139483953017,
-          0.0399332969934385,
-          0.05373500362676539,
-          0.056906282684898224,
-          0.04926579447409459,
-          0.056798034083151344,
-          0.04855435080632512,
-          0.049525644255398946,
-          0.04956002673545767
-        ],
-        "n_candidate_files": 18
-      }
-    }
+    "files": [
+      "candidate_beams.json",
+      "config_snapshot.json",
+      "config_source.yml",
+      "measurement.npz",
+      "residual_heatmap.png",
+      "residual_heatmap_hc.png",
+      "residual_scatter.png",
+      "residual_scatter_hc.png",
+      "residual_surface.png",
+      "residual_surface_hc.png"
+    ],
+    "freq_valid": [
+      [
+        true,
+        true
+      ],
+      [
+        true,
+        true
+      ],
+      [
+        true,
+        true
+      ],
+      [
+        true,
+        true
+      ],
+      [
+        true,
+        true
+      ],
+      [
+        true,
+        true
+      ],
+      [
+        true,
+        true
+      ],
+      [
+        true,
+        true
+      ],
+      [
+        true,
+        true
+      ]
+    ],
+    "frequencies": [
+      140000000000.0,
+      150000000000.0
+    ],
+    "grid_map": [
+      [
+        0,
+        0.15,
+        -0.15
+      ],
+      [
+        1,
+        0.15,
+        0.0
+      ],
+      [
+        2,
+        0.15,
+        0.15
+      ],
+      [
+        3,
+        0.475,
+        -0.15
+      ],
+      [
+        4,
+        0.475,
+        0.0
+      ],
+      [
+        5,
+        0.475,
+        0.15
+      ],
+      [
+        6,
+        0.8,
+        -0.15
+      ],
+      [
+        7,
+        0.8,
+        0.0
+      ],
+      [
+        8,
+        0.8,
+        0.15
+      ]
+    ],
+    "ground_truth": {
+      "real_tx_x_max": -0.035,
+      "real_tx_x_min": -0.167,
+      "real_tx_z": 0.3
+    },
+    "joint_is_mean_of_valid": true,
+    "measurement_sha256": "1bb32710b6cd5500abeb3d5a1f584883a9074cad90b4c1b0507e90b62216f3f0",
+    "n_candidate_files": 18,
+    "n_iters_run": [
+      12,
+      40,
+      12,
+      40,
+      40,
+      18,
+      40,
+      40,
+      40
+    ],
+    "per_freq_losses": [
+      [
+        0.0586349503704856,
+        0.05170139483953017
+      ],
+      [
+        0.054479800478873186,
+        0.032593142984056175
+      ],
+      [
+        0.056469073451001446,
+        0.05373500362676539
+      ],
+      [
+        0.026662571559130502,
+        0.06328092569097313
+      ],
+      [
+        0.05244907152657538,
+        0.04928169514125271
+      ],
+      [
+        0.06110599363282345,
+        0.05698063145987958
+      ],
+      [
+        0.053631990153484674,
+        0.04935824699048239
+      ],
+      [
+        0.052810943714747684,
+        0.049566483986861275
+      ],
+      [
+        0.05283460344249411,
+        0.049548136955390856
+      ]
+    ],
+    "residuals": [
+      0.055168172605007886,
+      0.04353647173146468,
+      0.055102038538883416,
+      0.044971748625051815,
+      0.05086538333391405,
+      0.05904331254635152,
+      0.051495118571983536,
+      0.05118871385080448,
+      0.05119137019894249
+    ],
+    "seed": 0
   }
 }

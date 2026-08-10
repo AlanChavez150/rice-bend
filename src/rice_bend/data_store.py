@@ -101,6 +101,9 @@ class GSHistory:
 # Marker files identifying which entry point owns a run directory. `mgs` and
 # `grid-search-mgs` resolve output.run_name to the SAME path, so without this a
 # scenario config run through one tool silently deletes the other's saved results.
+# `frequencies.json` stays in the grid tuple even though new (joint) runs never
+# write it: it marks the RETIRED per-frequency layout, and keeping it lets a new
+# joint run clear an old results directory it legitimately owns.
 RUN_DIR_MARKERS = {
     "mgs": ("run.json",),
     "grid": ("candidate_beams.json", "frequencies.json"),
@@ -142,9 +145,7 @@ def make_run_dir(output_base: Path, run_name: Optional[str], kind: str) -> Path:
 
     Ordering matters and is the caller's responsibility: invoke this only once the
     expensive work has finished, so an interrupted run never destroys prior results
-    without producing new ones. A multi-frequency sweep additionally clears its base
-    directory once and only once (grid_search's `_get_base`) — clearing it per
-    frequency would delete the frequency subdirectory just written.
+    without producing new ones.
     """
     run_dir = check_run_dir(output_base, run_name, kind)
     if run_dir.exists():

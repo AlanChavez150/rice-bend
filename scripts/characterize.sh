@@ -77,8 +77,9 @@ run $GRID --config "$C/scenario_caustic_hit_sparse.yml" --freq 150e9 \
 run $GRID --config "$C/scenario_caustic_hit_sparse.yml" --freq 150e9 \
     --limit 6 --jobs 4 -o "$S/c4_grid_j4"
 
-# 5. multi-frequency layout: frequencies.json, the emitted plot set, and the per-frequency
-#    loss vector + index -> (z, x_center) map that pins the z-outer/x-inner ordering.
+# 5. multi-frequency JOINT run: one flat layout (no frequencies.json, no freq_<GHz>/
+#    subdirs), the joint + per-frequency loss decomposition, the mean-combination rule,
+#    and the index -> (z, x_center) map that pins the z-outer/x-inner ordering.
 run $GRID --config "$C/tiny_check.yml" --freq 140e9 150e9 -o "$S/c5_multifreq"
 
 echo "---"

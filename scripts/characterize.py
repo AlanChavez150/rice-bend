@@ -121,13 +121,33 @@ def check2_mgs_caustic_hit(d: Path) -> dict:
 
 
 def _grid_digest(d: Path) -> dict:
+    """Digest of one joint (schema-3) grid run — the SAME shape whatever the
+    frequency count, which is itself the invariant: a multi-frequency run is one
+    flat directory now, not freq_<GHz>/ subdirs.
+
+    `joint_is_mean_of_valid` pins the loss-combination rule: every candidate's
+    joint residual must equal the mean of its per-frequency components over the
+    frequencies that actually contributed (all of them, at F=1 — which is also
+    the N=1-reduces-through-the-same-path guarantee).
+    """
     m = read_json(d / "candidate_beams.json")
     files, n_cand_files = file_list(d)
+    joint = [c["final_loss"] for c in m["candidates"]]
+    per_freq = [c["per_freq_losses"] for c in m["candidates"]]
+    joint_is_mean = all(
+        j == float(np.mean([v for v in row if v is not None]))
+        for j, row in zip(joint, per_freq)
+    )
     return {
         "counts": m["counts"],
         "ground_truth": m["ground_truth"],
         "seed": m["seed"],
-        "residuals": [c["final_loss"] for c in m["candidates"]],
+        "frequencies": [f["freq_hz"] for f in m["frequencies"]],
+        "residuals": joint,
+        "per_freq_losses": per_freq,
+        "freq_valid": [c["freq_valid"] for c in m["candidates"]],
+        "argmin": int(np.argmin(joint)) if joint else None,
+        "joint_is_mean_of_valid": bool(joint_is_mean),
         "n_iters_run": [c["n_iters_run"] for c in m["candidates"]],
         "grid_map": [[c["index"], c["z"], c["x_center"]] for c in m["candidates"]],
         "cand_0003_sha256": npz_content_hash(d / "candidates" / "cand_0003.npz"),
@@ -157,30 +177,14 @@ def check4_grid_parallel(serial_dir: Path, parallel_dir: Path) -> dict:
 
 
 def check5_multifreq(d: Path) -> dict:
-    """The multi-frequency layout. `grid_map` pins enumerate_grid's z-outer/x-inner
-    index -> (z, x_center) mapping, which nothing else in the digest does and which a
-    module split could silently transpose."""
-    index = read_json(d / "frequencies.json")
-    files, _ = file_list(d)
-    per_freq = {}
-    for entry in index["frequencies"]:
-        sub = d / entry["dir"]
-        m = read_json(sub / "candidate_beams.json")
-        losses = [c["final_loss"] for c in m["candidates"]]
-        sub_files, n_cand = file_list(sub)
-        per_freq[entry["dir"]] = {
-            "freq_hz": entry["freq_hz"],
-            "losses": losses,
-            "argmin": int(np.argmin(losses)) if losses else None,
-            "grid_map": [[c["index"], c["z"], c["x_center"]] for c in m["candidates"]],
-            "files": sub_files,
-            "n_candidate_files": n_cand,
-        }
-    return {
-        "index": index,
-        "files": files,
-        "per_frequency": per_freq,
-    }
+    """The joint multi-frequency run. Its digest is deliberately IDENTICAL in shape
+    to the flat checks — no frequencies.json, no freq_<GHz>/ subdirs is precisely
+    what the joint solver changed — with the 2-frequency loss decomposition pinned
+    through per_freq_losses/freq_valid and the mean rule through
+    joint_is_mean_of_valid. `grid_map` still pins enumerate_grid's z-outer/x-inner
+    index -> (z, x_center) mapping, which nothing else in the digest does and which
+    a module split could silently transpose."""
+    return _grid_digest(d)
 
 
 def build_digest(scratch: Path) -> dict:

@@ -5,10 +5,11 @@ Deliberately free of matplotlib. Importing anything from the old grid_search
 dragged in mpl_toolkits.mplot3d and FuncAnimation, so a worker process that only
 ever solves MGS paid for the entire plotting stack.
 
-The real TX location/trajectory from the config is used only to synthesize the one
-shared RX measurement; the search itself treats the TX location as unknown. At each
-usable grid point a fixed-width aperture (uniform assumed amplitude) is placed and
-MGS reconstructs its phase against that measurement.
+The real TX location/trajectory from the config is used only to synthesize the
+shared RX measurement set (one per frequency); the search itself treats the TX
+location as unknown. At each usable grid point a fixed-width aperture (uniform
+assumed amplitude) is placed and MGS reconstructs ONE phase for it jointly against
+every frequency's measurement the point is valid for.
 """
 
 import json
@@ -120,17 +121,30 @@ SharedMeasurement = namedtuple(
 
 
 def _reconstruct_candidate(p: "GridPoint", shared: "SharedMeasurement") -> "CandidateResult":
-    """Reconstruct one candidate beam at grid point `p`. Pure given `shared` — runs
-    identically in the parent process or a worker."""
+    """Reconstruct one candidate beam at grid point `p`, jointly over the
+    frequencies where `p` passes the RS sampling check. Pure given `shared` — runs
+    identically in the parent process or a worker.
+
+    The solver sees only the valid subset of channels; its per-frequency losses
+    are scattered back into a full-length vector (NaN where invalid) so every
+    candidate's `per_freq_losses` aligns with the run's frequency list. The joint
+    `final_loss` is then the mean over the valid subset — which is exactly the
+    per-cell nanmean the old per-frequency layout computed after the fact.
+    """
     x_axis = shared.x_axis
     # uniform assumed amplitude over the hypothesized window (support = window)
     support = (x_axis >= p.x_min) & (x_axis <= p.x_max)
     assumed_amp = np.where(support, 1.0, 0.0)
+    n_freq = len(shared.channels)
+    freq_ok = p.freq_ok if p.freq_ok is not None else [True] * n_freq
+    channels = [ch for ch, ok in zip(shared.channels, freq_ok) if ok]
     result = gs_reconstruct(
         tx_z=p.z, orig_aper_amp=assumed_amp, x_axis=x_axis, rx_z=shared.rx_z,
-        channels=shared.channels, params=shared.params,
+        channels=channels, params=shared.params,
         capture=False, log=None,
     )
+    per_freq_losses = np.full(n_freq, np.nan)
+    per_freq_losses[[i for i, ok in enumerate(freq_ok) if ok]] = result.final_loss_per_freq
     # Stored on the SCENE grid, sliced to the window. curr_aper_f already lives on
     # x_axis and is already zero outside the support, so resampling it down to a
     # separate aperture axis -- only so a CandidateResult.aper_axis existed -- was
@@ -145,6 +159,8 @@ def _reconstruct_candidate(p: "GridPoint", shared: "SharedMeasurement") -> "Cand
         aper_axis=x_axis[support].copy(),
         aper_profile=result.curr_aper_f[support].copy(),
         final_loss=result.final_loss,
+        per_freq_losses=per_freq_losses,
+        freq_valid=[bool(ok) for ok in freq_ok],
         n_iters_run=int(result.n_iters_run),
         stop_reason=str(result.stop_reason),
         seed=int(result.seed),
@@ -163,50 +179,67 @@ def _worker_task(p: "GridPoint") -> "CandidateResult":
 
 @dataclass
 class CandidateResult:
-    """A single reconstructed candidate beam at a hypothesized TX location."""
+    """A single reconstructed candidate beam at a hypothesized TX location.
+
+    One aperture per candidate: the solved phase mask is shared across all
+    frequencies (achromatic) and the assumed amplitude is the same uniform box at
+    every frequency, so there is exactly one complex profile whatever F is.
+    `final_loss` is the joint (mean-over-valid-frequencies) residual;
+    `per_freq_losses` aligns with the run's frequency list, NaN where the
+    candidate failed that frequency's RS sampling check (`freq_valid`)."""
     point: GridPoint
     aper_axis: np.ndarray        # hypothesized aperture x axis
-    aper_profile: np.ndarray     # complex reconstructed aperture
-    final_loss: float
+    aper_profile: np.ndarray     # complex reconstructed aperture (shared across F)
+    final_loss: float            # joint: mean over the valid frequencies
+    per_freq_losses: np.ndarray  # (F,), NaN where the frequency was invalid
+    freq_valid: List[bool]       # which frequencies contributed
     n_iters_run: int
     stop_reason: str
     seed: int
-    loss_full: np.ndarray        # per-iteration loss curve
+    loss_full: np.ndarray        # per-iteration JOINT loss curve
 
 
 @dataclass
 class GridSearchRun:
-    """Everything needed to persist + later rank a grid search."""
-    freq: float
-    wavelength: float
+    """Everything needed to persist + later rank a grid search.
+
+    Per-frequency arrays are stacked (F, ...) where the lengths agree (they are
+    all on the scene x-axis or the shared TX axis) and kept as ragged lists only
+    for the RX element arrays, whose counts genuinely differ per frequency
+    (dx defaults to wavelength/20). `freqs` order is the alignment order."""
+    freqs: List[float]
+    wavelengths: List[float]
     seed: Optional[int]
     effective_max_iters: int
     grid_cfg: GridSearchConfig
     grid_points: List[GridPoint]
     candidates: List[CandidateResult]
-    # shared measurement (one per run)
+    # shared measurement set (one per run; one row per frequency)
     scene_x_axis: np.ndarray
-    rx_field: np.ndarray
-    error_weighting: np.ndarray
-    rx_aper_axis: np.ndarray
-    rx_aper_profile: np.ndarray
+    rx_fields: np.ndarray            # (F, nx) on the scene x-axis
+    error_weightings: np.ndarray     # (F, nx)
+    rx_aper_axes: List[np.ndarray]   # ragged: per-frequency element axes
+    rx_aper_profiles: List[np.ndarray]
     # ground truth, for later evaluation of how well candidates localize the TX
-    real_tx_aper_axis: np.ndarray
-    real_tx_aper_profile: np.ndarray
+    real_tx_aper_axis: np.ndarray    # geometry-only, shared across frequencies
+    real_tx_aper_profiles: np.ndarray  # (F, nt): beam phase ∝ k
     real_tx_z: float
     real_tx_x_min: float
     real_tx_x_max: float
     scene_bounds: Tuple[float, float, float, float]  # x_min, x_max, z_min, z_max
 
 
-def run_grid_search(config: SimConfig, freq: float, *, limit: Optional[int] = None,
+def run_grid_search(config: SimConfig, freqs: List[float], *, limit: Optional[int] = None,
                     jobs: int = 1, log: Optional[logging.Logger] = None) -> GridSearchRun:
-    """Run MGS phase retrieval at every usable speculative TX location.
+    """Run MGS phase retrieval at every usable speculative TX location — ONE joint
+    solve per candidate across all of `freqs` (a single frequency is the len-1
+    case of the same path).
 
-    Builds the real scene once (synthesizing the shared RX measurement), then
-    reconstructs a fixed-width aperture (uniform assumed amplitude) at each hypothesized
-    (z, x_center). Candidates are independent, so with `jobs > 1` they are distributed
-    across worker processes; results are identical to the serial path (each candidate
+    Builds the real scene once (synthesizing the per-frequency RX measurements),
+    then reconstructs a fixed-width aperture (uniform assumed amplitude) at each
+    hypothesized (z, x_center) against every frequency it is valid for.
+    Candidates are independent, so with `jobs > 1` they are distributed across
+    worker processes; results are identical to the serial path (each candidate
     uses the same fixed seed) regardless of `jobs` or completion order.
     """
     grid_cfg = config.grid_search
@@ -214,11 +247,11 @@ def run_grid_search(config: SimConfig, freq: float, *, limit: Optional[int] = No
         raise ValueError("config.grid_search is required for grid-search-mgs")
     log = log or logging.getLogger()
 
-    # 1. the single shared RX measurement. measure() synthesizes it by propagating
-    #    to the RX plane alone -- the sweep never reads mgs.scene.data, so illuminating
-    #    all 3400 planes here cost 1.71 s and +190 MB RSS per frequency, held in the
-    #    parent for the whole sweep, to keep one row.
-    mgs = MGS(freq, config)
+    # 1. the shared RX measurement set (one per frequency). measure() synthesizes
+    #    each by propagating to the RX plane alone -- the sweep never reads
+    #    mgs.scene.data, so illuminating all 3400 planes here cost 1.71 s and
+    #    +190 MB RSS, held in the parent for the whole sweep, to keep one row.
+    mgs = MGS(freqs, config)
     mgs.measure()
 
     # 2. Apply the grid-only GS overrides (cheaper sweep + one fixed seed so residuals
@@ -242,10 +275,13 @@ def run_grid_search(config: SimConfig, freq: float, *, limit: Optional[int] = No
         log.warning("grid_search.seed and gerchberg_saxton.seed are both null; candidates "
                     "will use independent random initial phases (residuals not comparable)")
 
-    # 3. enumerate + report
-    wavelength = mgs.wavelength
+    # 3. enumerate + report. Validity is per (z, frequency); a point is usable when
+    #    it passes at >= 1 frequency, so `usable` (and therefore --limit's slice) is
+    #    one joint set — the same candidates are attempted at every frequency by
+    #    construction, which the old per-frequency sweep did not guarantee.
+    wavelengths = [fs.wavelength for fs in mgs.freq_states]
     scene_cfg = config.sim_scene
-    points = enumerate_grid(grid_cfg, scene_cfg, [wavelength])
+    points = enumerate_grid(grid_cfg, scene_cfg, wavelengths)
     usable = [p for p in points if p.ok]
     log.info(f"Grid search: {grid_summary(points)}")
     for p in points:
@@ -269,8 +305,11 @@ def run_grid_search(config: SimConfig, freq: float, *, limit: Optional[int] = No
 
     def _log_done(done: int, total: int, cand: CandidateResult) -> None:
         p = cand.point
+        n_valid, n_f = sum(cand.freq_valid), len(cand.freq_valid)
+        subset = f", {n_valid}/{n_f} freqs" if n_valid < n_f else ""
         log.info(f"[{done}/{total}] #{p.index} z={p.z:.3f} x={p.x_center:+.3f} "
-                 f"-> loss {cand.final_loss:.6g} ({cand.n_iters_run} iters, {cand.stop_reason})")
+                 f"-> loss {cand.final_loss:.6g} ({cand.n_iters_run} iters, "
+                 f"{cand.stop_reason}{subset})")
 
     # map_workers returns input order, so the manifest is stable without a re-sort.
     candidates: List[CandidateResult] = map_workers(
@@ -279,20 +318,21 @@ def run_grid_search(config: SimConfig, freq: float, *, limit: Optional[int] = No
 
     real_tx = config.tx_aperture
     return GridSearchRun(
-        freq=float(freq),
-        wavelength=float(wavelength),
+        freqs=[float(f) for f in mgs.freqs],
+        wavelengths=[float(w) for w in wavelengths],
         seed=mgs.gs_cfg.seed,
         effective_max_iters=int(mgs.gs_cfg.max_iters),
         grid_cfg=grid_cfg,
         grid_points=points,
         candidates=candidates,
         scene_x_axis=np.asarray(x_axis).copy(),
-        rx_field=np.asarray(channels[0].rx_field).copy(),
-        error_weighting=np.asarray(channels[0].error_weighting).copy(),
-        rx_aper_axis=mgs.scene.rx_ap.aper_axis.copy(),
-        rx_aper_profile=mgs.scene.rx_ap.aper_profile.copy(),
+        rx_fields=np.stack([np.asarray(ch.rx_field) for ch in channels]),
+        error_weightings=np.stack([np.asarray(ch.error_weighting) for ch in channels]),
+        rx_aper_axes=[fs.rx_ap.aper_axis.copy() for fs in mgs.freq_states],
+        rx_aper_profiles=[fs.rx_ap.aper_profile.copy() for fs in mgs.freq_states],
         real_tx_aper_axis=mgs.scene.tx_ap.aper_axis.copy(),
-        real_tx_aper_profile=mgs.scene.tx_ap.aper_profile.copy(),
+        real_tx_aper_profiles=np.stack([fs.tx_ap.aper_profile.copy()
+                                        for fs in mgs.freq_states]),
         real_tx_z=float(real_tx.z),
         real_tx_x_min=float(real_tx.x_min),
         real_tx_x_max=float(real_tx.x_max),
@@ -300,36 +340,58 @@ def run_grid_search(config: SimConfig, freq: float, *, limit: Optional[int] = No
     )
 
 
+def _json_losses(per_freq_losses: np.ndarray) -> List[Optional[float]]:
+    """Per-frequency losses as a JSON-safe list: NaN (frequency invalid) -> None.
+
+    Bare NaN is not valid JSON; every reader maps None back to np.nan.
+    """
+    return [float(v) if np.isfinite(v) else None for v in per_freq_losses]
+
+
 def save_grid_run(run: GridSearchRun, run_dir: Path, config: SimConfig,
                   config_path: Path, args_dict: dict) -> None:
-    """Write the grid run to disk under run_dir.
+    """Write the grid run to disk under run_dir — one flat directory whatever the
+    frequency count (the old freq_<GHz>/ per-frequency layout is retired).
 
     Layout:
-        run_dir/candidate_beams.json      manifest (real TX location, grid spec, candidate index)
-        run_dir/measurement.npz           shared RX field + error weighting + apertures
-        run_dir/candidates/cand_####.npz  reconstructed aperture + loss curve
+        run_dir/candidate_beams.json      manifest (real TX location, grid spec, frequency
+                                          list, candidate index with joint + per-freq losses)
+        run_dir/measurement.npz           per-frequency RX fields/weightings + apertures
+        run_dir/candidates/cand_####.npz  reconstructed aperture + joint loss curve
         run_dir/candidates/cand_####.json per-candidate metadata
+
+    The manifest's `frequencies` list order is THE alignment order for every
+    per-frequency value in the run (per_freq_losses, freq_valid, the (F, ...) npz
+    stacks and the rx_aper_*_NN indexed keys).
     """
     cand_dir = run_dir / "candidates"
     cand_dir.mkdir(parents=True, exist_ok=True)
 
-    # shared measurement (saved once)
-    np.savez_compressed(
-        run_dir / "measurement.npz",
-        scene_x_axis=f64(run.scene_x_axis),
-        rx_field=c64(run.rx_field),
-        error_weighting=f64(run.error_weighting),
-        rx_aper_axis=f64(run.rx_aper_axis),
-        rx_aper_profile=c64(run.rx_aper_profile),
-        real_tx_aper_axis=f64(run.real_tx_aper_axis),
-        real_tx_aper_profile=c64(run.real_tx_aper_profile),
-    )
+    # shared measurement set (saved once; one row / indexed key per frequency)
+    meas = {
+        "scene_x_axis": f64(run.scene_x_axis),
+        "freq_hz": f64(run.freqs),
+        "wavelength_m": f64(run.wavelengths),
+        "rx_field": c64(run.rx_fields),                    # (F, nx) on the scene axis
+        "error_weighting": f64(run.error_weightings),      # (F, nx)
+        "real_tx_aper_axis": f64(run.real_tx_aper_axis),
+        "real_tx_aper_profile": c64(run.real_tx_aper_profiles),  # (F, nt)
+    }
+    # RX element arrays are the one genuinely ragged set (dx = wavelength/20), so
+    # they get indexed keys instead of a stack — object arrays would break the
+    # content hash and need allow_pickle.
+    for i, (ax, prof) in enumerate(zip(run.rx_aper_axes, run.rx_aper_profiles)):
+        meas[f"rx_aper_axis_{i:02d}"] = f64(ax)
+        meas[f"rx_aper_profile_{i:02d}"] = c64(prof)
+    np.savez_compressed(run_dir / "measurement.npz", **meas)
 
     ground_truth = {
         "real_tx_z": run.real_tx_z,
         "real_tx_x_min": run.real_tx_x_min,
         "real_tx_x_max": run.real_tx_x_max,
     }
+    freq_entries = [{"freq_hz": float(f), "wavelength_m": float(w)}
+                    for f, w in zip(run.freqs, run.wavelengths)]
 
     cand_entries = []
     for cand in run.candidates:
@@ -345,10 +407,12 @@ def save_grid_run(run: GridSearchRun, run_dir: Path, config: SimConfig,
             "location": {"z": cand.point.z, "x_center": cand.point.x_center,
                          "x_min": cand.point.x_min, "x_max": cand.point.x_max,
                          "dx": cand.point.dx},
-            "gs_result": {"final_loss": cand.final_loss, "n_iters_run": cand.n_iters_run,
+            "gs_result": {"final_loss": cand.final_loss,
+                          "per_freq_losses": _json_losses(cand.per_freq_losses),
+                          "freq_valid": cand.freq_valid,
+                          "n_iters_run": cand.n_iters_run,
                           "stop_reason": cand.stop_reason, "seed": cand.seed},
-            "freq_hz": run.freq,
-            "wavelength_m": run.wavelength,
+            "frequencies": freq_entries,
             "ground_truth": ground_truth,
             "npz": f"{name}.npz",
         }
@@ -356,7 +420,10 @@ def save_grid_run(run: GridSearchRun, run_dir: Path, config: SimConfig,
         cand_entries.append({
             "index": cand.point.index, "z": cand.point.z, "x_center": cand.point.x_center,
             "x_min": cand.point.x_min, "x_max": cand.point.x_max,
-            "final_loss": cand.final_loss, "n_iters_run": cand.n_iters_run,
+            "final_loss": cand.final_loss,
+            "per_freq_losses": _json_losses(cand.per_freq_losses),
+            "freq_valid": cand.freq_valid,
+            "n_iters_run": cand.n_iters_run,
             "stop_reason": cand.stop_reason,
             "npz": f"candidates/{name}.npz", "json": f"candidates/{name}.json",
         })
@@ -365,12 +432,13 @@ def save_grid_run(run: GridSearchRun, run_dir: Path, config: SimConfig,
                         "skip_reason": p.skip_reason}
                        for p in run.grid_points if not p.ok]
     n_usable = sum(1 for p in run.grid_points if p.ok)
+    ran_per_freq = [sum(1 for c in run.candidates if c.freq_valid[i])
+                    for i in range(len(run.freqs))]
 
     manifest = {
-        "schema_version": 2,
+        "schema_version": 3,
         "run_dir": str(run_dir),
-        "freq_hz": run.freq,
-        "wavelength_m": run.wavelength,
+        "frequencies": freq_entries,
         "seed": run.seed,
         "grid_spec": {
             "z": {"min": run.grid_cfg.z.min, "max": run.grid_cfg.z.max, "num": run.grid_cfg.z.num},
@@ -381,10 +449,11 @@ def save_grid_run(run: GridSearchRun, run_dir: Path, config: SimConfig,
         "scene_bounds": {"x_min": run.scene_bounds[0], "x_max": run.scene_bounds[1],
                          "z_min": run.scene_bounds[2], "z_max": run.scene_bounds[3]},
         "ground_truth": ground_truth,
-        "gs": {"effective_max_iters": run.effective_max_iters},
+        "gs": {"effective_max_iters": run.effective_max_iters, "loss_combine": "mean"},
         "provenance": provenance(args_dict),
         "counts": {"total": len(run.grid_points), "usable": n_usable,
-                   "ran": len(run.candidates), "skipped": len(skipped_entries)},
+                   "ran": len(run.candidates), "skipped": len(skipped_entries),
+                   "ran_per_freq": ran_per_freq},
         "candidates": cand_entries,
         "skipped": skipped_entries,
     }
@@ -394,31 +463,18 @@ def save_grid_run(run: GridSearchRun, run_dir: Path, config: SimConfig,
     logging.getLogger().info(f"Saved grid run to {run_dir}")
 
 
+# Retired layout's index file. New runs never write it; it survives only as the
+# marker by which --replot (and run-dir ownership checks) recognize a pre-joint
+# per-frequency results directory.
 FREQ_INDEX_NAME = "frequencies.json"
 
 
-def _freq_dir_name(freq: float) -> str:
-    """Per-frequency subdirectory name, e.g. 140e9 -> 'freq_140GHz'."""
-    return f"freq_{freq / 1e9:g}GHz"
-
-
-def write_frequencies_index(base_dir: Path, entries: List[dict],
-                            real_tx_z: float, real_tx_x_center: float) -> Path:
-    """Write the top-level index tying a multi-frequency run's per-frequency subdirs together.
-
-    `entries` is a list of {freq_hz, wavelength_m, dir} dicts (one per frequency).
-    """
-    payload = {
-        "schema_version": 2,
-        "frequencies": entries,
-        "ground_truth": {"real_tx_z": float(real_tx_z),
-                         "real_tx_x_center": float(real_tx_x_center)},
-    }
-    return write_json(Path(base_dir) / FREQ_INDEX_NAME, payload)
-
-
 def load_frequencies_index(base_dir: Path) -> Optional[dict]:
-    """Load a multi-frequency run's frequencies.json, or None if this is a flat single-freq run."""
+    """Load a LEGACY multi-frequency run's frequencies.json, or None if absent.
+
+    The per-frequency freq_<GHz>/ layout was retired when the solver went joint;
+    this reader remains so --replot can regenerate the per-frequency subdir plots
+    of old results directories."""
     idx = Path(base_dir) / FREQ_INDEX_NAME
     if not idx.exists():
         return None
