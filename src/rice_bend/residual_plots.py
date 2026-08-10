@@ -220,9 +220,9 @@ def _hc_title(title: str, hc: bool) -> str:
 
 def _overlay_analysis(ax, summary: ResidualSummary, analysis: dict) -> None:
     """Draw the numeric analysis on a heatmap: solid red outlines on the top-K
-    cells and a dashed red boundary around the ROI. Pure axes-space geometry
-    over the pcolormesh cells (cell_edges matches shading='nearest'), so it is
-    identical on the linear and hc twins. Legend entries via proxy handles."""
+    cells. Pure axes-space geometry over the pcolormesh cells (cell_edges
+    matches shading='nearest'), so it is identical on the linear and hc twins.
+    Legend entry via a proxy handle."""
     z_e = cell_edges(summary.z_values)
     x_e = cell_edges(summary.x_values)
 
@@ -236,28 +236,6 @@ def _overlay_analysis(ax, summary: ResidualSummary, analysis: dict) -> None:
         ax.plot([], [], color="red", linewidth=1.3,
                 label=f"top {len(top)} candidates")
 
-    roi = analysis.get("roi")
-    if roi:
-        cells = {(i, j) for i, j in roi["cells"]}
-
-        def seg(x0, x1, z0, z1):
-            ax.plot([x0, x1], [z0, z1], color="red", linestyle="--",
-                    linewidth=1.1, zorder=5)
-
-        # the ROI boundary = every cell edge whose neighbour is outside the set
-        for (i, j) in cells:
-            if (i - 1, j) not in cells:
-                seg(x_e[j], x_e[j + 1], z_e[i], z_e[i])
-            if (i + 1, j) not in cells:
-                seg(x_e[j], x_e[j + 1], z_e[i + 1], z_e[i + 1])
-            if (i, j - 1) not in cells:
-                seg(x_e[j], x_e[j], z_e[i], z_e[i + 1])
-            if (i, j + 1) not in cells:
-                seg(x_e[j + 1], x_e[j + 1], z_e[i], z_e[i + 1])
-        ax.plot([], [], color="red", linestyle="--", linewidth=1.1,
-                label=(f"ROI (≤{analysis['roi_loss_factor']:g}× min, "
-                       f"{roi['n_cells']} cells)"))
-
 
 def plot_residual_heatmap(summary: ResidualSummary, out_path: Path,
                           title: str = "Candidate residual over speculative TX locations",
@@ -266,7 +244,7 @@ def plot_residual_heatmap(summary: ResidualSummary, out_path: Path,
 
     Lower residual = better fit to the measurement = more likely TX location, so this
     is the figure the whole search exists to produce. With `analysis` (the
-    analysis.json dict) the top-K candidates and the ROI are outlined in red.
+    analysis.json dict) the top-K candidates are outlined in red.
     """
     fig, ax = plt.subplots(figsize=(9, 6), layout="constrained")
     norm = _residual_norm(summary.loss_grid, hc)

@@ -51,7 +51,7 @@ def _emit_pair(plot, out_path: Path, *args, **kwargs) -> Path:
 def _emit_heatmaps(summary: ResidualSummary, out_dir: Path, log,
                    analysis: Optional[dict] = None) -> None:
     """Write the residual heatmap plus its high-contrast (log-scale) twin, with
-    the top-candidate/ROI outlines when the analysis dict is given."""
+    the top-candidate outlines when the analysis dict is given."""
     out = _emit_pair(plot_residual_heatmap, out_dir / "residual_heatmap.png", summary,
                      analysis=analysis)
     log.info(f"Wrote residual heatmap (+hc) to {out}")

@@ -2,8 +2,9 @@
 
 **Status:** adopted (2026-08-09). **Implemented (noiseless variant, same date):**
 `src/rice_bend/analysis.py` computes `N_E(eps)` into every grid run's
-analysis.json, and `mgs-study` plots it against localization error / ROI mean
-residual (`study_metrics_vs_ndof.png`).
+analysis.json, and `mgs-study` plots it against the two localization errors —
+argmin distance and top-10 mean distance to the true TX
+(`study_metrics_vs_ndof.png`).
 
 ## Implemented variant: N_E(eps), no noise model
 

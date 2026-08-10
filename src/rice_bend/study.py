@@ -27,7 +27,7 @@ from typing import Callable, List, Optional, Tuple
 import numpy as np
 import yaml
 
-from rice_bend.analysis import analysis_from_manifest, write_analysis
+from rice_bend.analysis import TOP_K, analysis_from_manifest, write_analysis
 from rice_bend.cli import setup_logging
 from rice_bend.config import SimConfig, load_config, resolve_frequencies
 from rice_bend.data_store import check_run_dir, make_run_dir, write_json
@@ -35,7 +35,7 @@ from rice_bend.grid_search import persist_and_plot
 from rice_bend.grid_sweep import run_grid_search
 from rice_bend.residual_plots import summary_from_manifest
 
-STUDY_SCHEMA_VERSION = 1
+STUDY_SCHEMA_VERSION = 2
 STUDY_NAME_FILE = "study.json"
 STUDY_DEFAULT_CONFIG = (Path(__file__).resolve().parents[2] / "configs"
                         / "scenario_caustic_hit_pm5.yml")
@@ -110,7 +110,7 @@ def _record(study: StudyDef, value: float, point_name: str, analysis: dict,
     err_m = argmin["error_distance_m"] if argmin else None
     energy = analysis.get("energy") or {}
     mean_frac = energy.get("mean_fraction")
-    roi = analysis.get("roi") or {}
+    top_mean = analysis.get("top_mean_dist_to_truth_m")
     n_dof = analysis.get("n_dof") or {}
     rec = {
         "point": point_name,
@@ -121,10 +121,8 @@ def _record(study: StudyDef, value: float, point_name: str, analysis: dict,
         "error_mm": 1000.0 * err_m if err_m is not None else None,
         "argmin": ({"z": argmin["z"], "x_center": argmin["x_center"],
                     "final_loss": argmin["final_loss"]} if argmin else None),
-        "roi": ({"n_cells": roi.get("n_cells"), "area_m2": roi.get("area_m2"),
-                 "mean_loss": roi.get("mean_loss"),
-                 "centroid_dist_to_truth_m": roi.get("centroid_dist_to_truth_m")}
-                if roi else None),
+        "top10_mean_dist_m": top_mean,
+        "top10_mean_dist_mm": 1000.0 * top_mean if top_mean is not None else None,
         "energy_pct": 100.0 * mean_frac if mean_frac is not None else None,
         "n_dof_total": n_dof.get("total"),
         "n_dof_per_freq": ([p.get("n_dof") for p in n_dof.get("per_freq", [])]
@@ -260,30 +258,45 @@ def _write_study_json(root: Path, study: StudyDef, base_config, records: List[di
     })
 
 
+# the two plotted error series: record key, legend label, color, marker
+_ERROR_SERIES = (
+    ("error_mm", "argmin to true TX", "C0", "o"),
+    ("top10_mean_dist_mm", f"top-{TOP_K} mean to true TX", "C1", "s"),
+)
+
+
 def _plot_study(study: StudyDef, records: List[dict], out_path: Path, log) -> None:
-    """Error vs the study's x-axis. Points connect in SERIES order (= table
-    order), which matters for the energy axis: x there is a measured quantity."""
+    """Argmin error and top-K mean distance vs the study's x-axis. Points
+    connect in SERIES order (= table order), which matters for the energy axis:
+    x there is a measured quantity."""
     import matplotlib.pyplot as plt
 
-    plotted = [r for r in records
-               if r.get("x_value") is not None and r.get("error_mm") is not None]
+    plotted = [r for r in records if r.get("x_value") is not None]
     fig, ax = plt.subplots(figsize=(9, 6), layout="constrained")
-    if plotted:
-        xs = [r["x_value"] for r in plotted]
-        ys = [r["error_mm"] for r in plotted]
-        ax.plot(xs, ys, marker="o", color="C0")
+    drew = False
+    for key, label, color, marker in _ERROR_SERIES:
+        pts = [(r["x_value"], r[key]) for r in plotted if r.get(key) is not None]
+        if not pts:
+            continue
+        drew = True
+        ax.plot([p[0] for p in pts], [p[1] for p in pts], marker=marker,
+                color=color, label=label)
+    if drew:
         if study.x_axis == "energy_pct":
             # x is measured, not the swept parameter — label each point with it
             for r in plotted:
+                if r.get("error_mm") is None:
+                    continue
                 ax.annotate(f"{r['param_value'] * 1000:.0f} mm",
                             (r["x_value"], r["error_mm"]),
                             textcoords="offset points", xytext=(6, 6), fontsize=8,
                             alpha=0.8)
+        ax.legend(framealpha=0.9)
     else:
         ax.text(0.5, 0.5, "no measurable points", ha="center", va="center",
                 transform=ax.transAxes)
     ax.set_xlabel(study.x_label)
-    ax.set_ylabel("localization error, argmin to true TX (mm)")
+    ax.set_ylabel("distance to true TX (mm)")
     ax.set_title(f"{study.name} study")
     ax.grid(True, alpha=0.3)
     fig.savefig(out_path, dpi=120)
@@ -292,37 +305,36 @@ def _plot_study(study: StudyDef, records: List[dict], out_path: Path, log) -> No
 
 
 def _plot_ndof(study: StudyDef, records: List[dict], out_path: Path, log) -> None:
-    """N_E(eps) on the x-axis against two success metrics: the localization
-    error and the ROI mean residual. This is the information-metric view (see
+    """N_E(eps) on the x-axis against the two localization errors (argmin and
+    top-K mean distance). This is the information-metric view (see
     docs/information_metric.md): whatever knob the study turned, points with the
     same mode count should behave alike."""
     import matplotlib.pyplot as plt
 
     pts = [r for r in records if r.get("n_dof_total") is not None]
-    fig, (ax_err, ax_roi) = plt.subplots(1, 2, figsize=(13, 5.5), layout="constrained")
-    if pts:
-        xs = [r["n_dof_total"] for r in pts]
-        for ax, key, ylabel in (
-                (ax_err, "error_mm", "localization error, argmin to true TX (mm)"),
-                (ax_roi, ("roi", "mean_loss"), "ROI mean joint residual")):
-            if isinstance(key, tuple):
-                ys = [(r.get(key[0]) or {}).get(key[1]) for r in pts]
-            else:
-                ys = [r.get(key) for r in pts]
-            keep = [(x, y, r) for x, y, r in zip(xs, ys, pts) if y is not None]
-            if keep:
-                ax.scatter([k[0] for k in keep], [k[1] for k in keep],
-                           s=45, color="C0", zorder=3)
-                for x, y, r in keep:
-                    ax.annotate(f"{r['param_value']:g}", (x, y),
-                                textcoords="offset points", xytext=(6, 6),
-                                fontsize=8, alpha=0.8)
-            ax.set_xlabel(f"N_E(eps=0.1), summed over the comb")
-            ax.set_ylabel(ylabel)
-            ax.grid(True, alpha=0.3)
+    fig, ax = plt.subplots(figsize=(9, 6), layout="constrained")
+    drew = False
+    for key, label, color, marker in _ERROR_SERIES:
+        keep = [(r["n_dof_total"], r[key], r) for r in pts if r.get(key) is not None]
+        if not keep:
+            continue
+        drew = True
+        ax.scatter([k[0] for k in keep], [k[1] for k in keep],
+                   s=45, color=color, marker=marker, zorder=3, label=label)
+        if key == "error_mm":
+            # one annotation per point (the series share their x positions)
+            for x, y, r in keep:
+                ax.annotate(f"{r['param_value']:g}", (x, y),
+                            textcoords="offset points", xytext=(6, 6),
+                            fontsize=8, alpha=0.8)
+    if drew:
+        ax.legend(framealpha=0.9)
     else:
-        ax_err.text(0.5, 0.5, "no n_dof-measurable points", ha="center", va="center",
-                    transform=ax_err.transAxes)
+        ax.text(0.5, 0.5, "no n_dof-measurable points", ha="center", va="center",
+                transform=ax.transAxes)
+    ax.set_xlabel("N_E(eps=0.1), summed over the comb")
+    ax.set_ylabel("distance to true TX (mm)")
+    ax.grid(True, alpha=0.3)
     fig.suptitle(f"{study.name} study — information metric view "
                  f"(points labelled by {study.param_name})")
     fig.savefig(out_path, dpi=120)
