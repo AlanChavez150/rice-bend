@@ -20,11 +20,10 @@ from rice_bend.cli import setup_logging
 from rice_bend.config import (DEFAULT_CONFIG, SimConfig, load_config,
                               resolve_frequencies)
 from rice_bend.data_store import check_run_dir, make_run_dir
-from rice_bend.grid_sweep import (GridSearchRun, _freq_dir_name,
+from rice_bend.grid_sweep import (GridSearchRun,
                                   enumerate_grid, grid_summary, load_frequencies_index,
-                                  run_grid_search, save_grid_run, write_frequencies_index)
+                                  run_grid_search, save_grid_run)
 from rice_bend.residual_plots import (ResidualSummary, animate_residual_surface,
-                                      average_summary, plot_residual_freq_vs_avg,
                                       plot_residual_heatmap, plot_residual_scatter,
                                       plot_residual_scatter_3d,
                                       plot_residual_scatter_3d_diff,
@@ -79,39 +78,6 @@ def _emit_surfaces(summary: ResidualSummary, out_dir: Path, args, log) -> None:
         else:
             log.info(f"No residual-surface orbit for {out_dir}: grid is "
                      f"{summary.loss_grid.shape[0]}x{summary.loss_grid.shape[1]}")
-
-
-def _emit_multifreq_plots(summaries: List[Tuple[float, ResidualSummary]],
-                          base_dir: Path, args, log) -> None:
-    """Top-level plots for a multi-frequency run: the frequency-averaged residual
-    heatmap and surface and the 3D residual scatter, each with a high-contrast
-    (log-scale) twin."""
-    avg = average_summary(summaries)
-    avg_out = _emit_pair(plot_residual_heatmap, base_dir / "residual_heatmap_avg.png",
-                         avg, title="Average residual across frequencies")
-    log.info(f"Wrote frequency-averaged residual heatmap (+hc) to {avg_out}")
-    avg_surf = _emit_pair(plot_residual_surface, base_dir / "residual_surface_avg.png",
-                          avg, title="Average residual surface across frequencies")
-    log.info(f"Wrote frequency-averaged residual surface (+hc) to {avg_surf}")
-    if args.surface_anim:
-        avg_orbit = _emit_pair(animate_residual_surface,
-                               base_dir / "residual_surface_avg_orbit.mp4", avg, log,
-                               title="Average residual surface across frequencies")
-        log.info(f"Wrote frequency-averaged residual-surface orbit (+hc) to {avg_orbit}")
-    out3d = _emit_pair(plot_residual_scatter_3d,
-                       base_dir / "residual_scatter_3d.png", summaries)
-    log.info(f"Wrote 3D residual scatter (+hc) to {out3d}")
-    if len(summaries) > 1:
-        out3d_diff = base_dir / "residual_scatter_3d_diff.png"
-        plot_residual_scatter_3d_diff(summaries, out3d_diff)
-        log.info(f"Wrote 3D residual-difference scatter to {out3d_diff}")
-    # Per-frequency vs-average comparison (freq | average | difference) in each freq dir.
-    for freq_hz, s in summaries:
-        sub = base_dir / _freq_dir_name(freq_hz)
-        if sub.is_dir():
-            _emit_pair(plot_residual_freq_vs_avg,
-                       sub / "residual_heatmap_vs_avg.png", freq_hz, s, avg)
-    log.info(f"Wrote {len(summaries)} per-frequency vs-average comparison(s) (+hc) under {base_dir}")
 
 
 def _emit_scenes_and_anim(make_ctx, out_dir: Path, args, log) -> None:
@@ -273,12 +239,18 @@ def main():
         base = Path(args.replot)
         freq_index = load_frequencies_index(base)
         if freq_index is None:
-            _replot_one_dir(base, args, log)          # single-frequency (flat) run
+            _replot_one_dir(base, args, log)          # joint (flat) run
             return
-        # multi-frequency: every per-frequency subdir, then the top-level plots
-        summaries = [(float(e["freq_hz"]), _replot_one_dir(base / e["dir"], args, log))
-                     for e in freq_index["frequencies"]]
-        _emit_multifreq_plots(summaries, base, args, log)
+        # LEGACY per-frequency layout (pre-joint solver): each freq_<GHz>/ subdir
+        # is a self-contained flat run, so their plots regenerate fine. The retired
+        # top-level averaged/3D plots are NOT regenerated — they would present
+        # independent per-frequency solves as if they were one joint solve.
+        for e in freq_index["frequencies"]:
+            _replot_one_dir(base / e["dir"], args, log)
+        log.info(f"{base} uses the retired per-frequency layout; regenerated plots "
+                 f"in {len(freq_index['frequencies'])} freq_<GHz>/ subdir(s). For the "
+                 "joint residual plots, re-run grid-search-mgs: the solver now fits "
+                 "one phase mask across all frequencies in a single run.")
         return
 
     config = load_config(args.config)
@@ -300,47 +272,15 @@ def main():
     # sweep has finished, so without this the clash surfaces after hours of compute.
     check_run_dir(config.output.output_dir, run_name, kind="grid")
 
-    if len(freqs) == 1:
-        # single frequency keeps the flat layout: results/<run_name>/...
-        run = run_grid_search(config, freqs[0], limit=args.limit, jobs=args.jobs, log=log)
-        out_dir = make_run_dir(config.output.output_dir, run_name, kind="grid")
-        _persist_and_plot(run, out_dir, config, args, log)
-        return
-
-    base_path = Path(config.output.output_dir) / run_name
-    log.info(f"Multi-frequency run: {len(freqs)} frequencies "
-             f"({', '.join(f'{f / 1e9:g}' for f in freqs)} GHz) -> {base_path}")
-
-    base: Optional[Path] = None
-
-    def _get_base() -> Path:
-        """The multi-frequency base directory, created (and cleared) exactly once.
-
-        Both halves are load-bearing. Deferring the creation to the first COMPLETED
-        sweep means an interrupted run never destroys prior results without
-        producing new ones. Memoizing it means the second frequency does not rmtree
-        the freq_140GHz directory just written -- and clearing it at all is what
-        stops a re-run with a shorter frequency list from leaving a stale
-        freq_<GHz> dir beside an average computed from a different sweep.
-        """
-        nonlocal base
-        if base is None:
-            base = make_run_dir(config.output.output_dir, run_name, kind="grid")
-        return base
-
-    entries, summaries = [], []
-    real_x = real_z = 0.0
-    for freq in freqs:
-        log.info(f"=== frequency {freq / 1e9:g} GHz ===")
-        run = run_grid_search(config, freq, limit=args.limit, jobs=args.jobs, log=log)
-        out_dir = make_run_dir(_get_base(), _freq_dir_name(freq), kind="grid")
-        summary = _persist_and_plot(run, out_dir, config, args, log)
-        entries.append({"freq_hz": float(freq), "wavelength_m": float(run.wavelength),
-                        "dir": _freq_dir_name(freq)})
-        summaries.append((freq, summary))
-        real_x, real_z = summary.real_tx_x_center, summary.real_tx_z
-    write_frequencies_index(_get_base(), entries, real_z, real_x)
-    _emit_multifreq_plots(summaries, _get_base(), args, log)
+    if len(freqs) > 1:
+        log.info(f"Joint run across {len(freqs)} frequencies "
+                 f"({', '.join(f'{f / 1e9:g}' for f in freqs)} GHz): one solve per "
+                 "candidate, one shared phase mask")
+    run = run_grid_search(config, freqs, limit=args.limit, jobs=args.jobs, log=log)
+    # created only once the sweep has finished, so an interrupted run never
+    # destroys prior results without producing new ones
+    out_dir = make_run_dir(config.output.output_dir, run_name, kind="grid")
+    _persist_and_plot(run, out_dir, config, args, log)
 
 
 if __name__ == "__main__":

@@ -13,7 +13,6 @@ plots are the comparable view.
 """
 
 import json
-import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -96,30 +95,6 @@ def _hc_norm(losses: np.ndarray) -> LogNorm:
     vmin = 10.0 ** np.floor(np.log10(max(lo, 1e-12)))
     vmin = min(vmin, 6e-3)               # keep >= 1 decade of range below the ceiling
     return LogNorm(vmin=vmin, vmax=0.06)
-
-
-def average_summary(summaries: List[Tuple[float, ResidualSummary]]) -> ResidualSummary:
-    """Average a multi-frequency run's residual grids into one ResidualSummary.
-
-    Each grid cell becomes the mean residual over the frequencies where that
-    candidate actually ran (NaN layers are ignored per cell); `best` is recomputed
-    as the argmin of the averaged grid. The grid axes and ground truth are shared
-    across frequencies, so they are taken from the first summary.
-    """
-    first = summaries[0][1]
-    stack = np.stack([s.loss_grid for _, s in summaries])
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", category=RuntimeWarning)  # all-NaN cells
-        avg = np.nanmean(stack, axis=0)
-    best: Optional[dict] = None
-    if np.isfinite(avg).any():
-        flat = int(np.nanargmin(avg))
-        z_idx, x_idx = divmod(flat, avg.shape[1])
-        best = {"index": flat, "z": float(first.z_values[z_idx]),
-                "x_center": float(first.x_values[x_idx]),
-                "final_loss": float(avg[z_idx, x_idx])}
-    return ResidualSummary(first.z_values, first.x_values, avg,
-                           first.real_tx_z, first.real_tx_x_center, best)
 
 
 def _candidate_points(z_values: np.ndarray, x_values: np.ndarray, grid: np.ndarray,
