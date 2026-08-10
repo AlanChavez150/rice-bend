@@ -92,6 +92,22 @@ def _pick_freq(n_avail: int, freq_index: int) -> int:
     return freq_index
 
 
+def _phase_display_scale(meta: dict, freq_index: int) -> float:
+    """How to turn the captured psi into the phase AT the selected frequency.
+
+    Under the delay phase model the solver's unknown is the delay expressed as
+    phase at gs_result.ref_freq_hz, so the phase this plate presents at frequency
+    f is (f/ref)*psi. Under the achromatic model (including every run saved
+    before phase_model existed) psi IS the phase at all frequencies: scale 1.
+    """
+    model = meta.get("gerchberg_saxton", {}).get("phase_model", "achromatic")
+    freqs = meta.get("frequencies_hz")
+    ref = (meta.get("gs_result") or {}).get("ref_freq_hz")
+    if model != "delay" or not freqs or not ref:
+        return 1.0
+    return float(freqs[_pick_freq(len(freqs), freq_index)]) / float(ref)
+
+
 def animate_tx_estimate(run_dir: Path, out_path: Path, fps: int = 15,
                         show: bool = False, freq_index: int = 0) -> Path:
     log = logging.getLogger()
@@ -109,11 +125,16 @@ def animate_tx_estimate(run_dir: Path, out_path: Path, fps: int = 15,
     x = z["x_axis"]
     amp = z["gs_fixed_aper_amp"]
     support = z["gs_support"].astype(bool)
-    phases = z["gs_phase_captured"]          # (K, size)
+    phases = z["gs_phase_captured"]          # (K, size) — psi (see _phase_display_scale)
     iters = z["gs_iter_indices"]             # (K,)
     loss_full = z["gs_loss_full"]            # (n_iters,)
     loss_cap = z["gs_loss_captured"]         # (K,)
     n_frames = phases.shape[0]
+    # delay model: display the phase this plate presents at the selected frequency,
+    # so the estimate and the per-frequency Real-TX overlay are directly comparable
+    scale = _phase_display_scale(meta, freq_index)
+    if scale != 1.0:
+        phases = phases * scale
     log.info(f"Animating {n_frames} captured frames from {run_dir}")
 
     # estimate phase per frame, unwrapped over the aperture support
@@ -165,7 +186,10 @@ def animate_tx_estimate(run_dir: Path, out_path: Path, fps: int = 15,
     ax_ph.grid(True)
     if ref_phase is not None:
         ax_ph.plot(x, ref_phase, "--", color="0.6", linewidth=2, label=ref_label)
-    (est_line,) = ax_ph.plot([], [], color="C0", linewidth=2, label="MGS estimate")
+    est_label = "MGS estimate"
+    if scale != 1.0:
+        est_label += f" @ {meta['frequencies_hz'][freq_index] / 1e9:g} GHz"
+    (est_line,) = ax_ph.plot([], [], color="C0", linewidth=2, label=est_label)
     ax_ph.legend(loc="upper right")
 
     # panel 2: convergence loss with a moving marker
@@ -217,6 +241,11 @@ def animate_scene_reillumination(run_dir: Path, out_path: Path, fps: int = 15,
     x = z["x_axis"]
     amp = z["gs_fixed_aper_amp"]
     phases = z["gs_phase_captured"]
+    # delay model: re-illuminate with the phase the plate presents at the selected
+    # frequency, not raw psi (which is the phase at ref_freq only)
+    scale = _phase_display_scale(meta, freq_index)
+    if scale != 1.0:
+        phases = phases * scale
     iters = z["gs_iter_indices"]
     loss_cap = z["gs_loss_captured"]
     z_axis_full = z["scene_z_axis"]
