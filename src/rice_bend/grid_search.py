@@ -24,6 +24,9 @@ from rice_bend.grid_sweep import (GridSearchRun,
                                   enumerate_grid, grid_summary, load_frequencies_index,
                                   run_grid_search, save_grid_run)
 from rice_bend.residual_plots import (ResidualSummary, animate_residual_surface,
+                                      freq_summaries_from_manifest,
+                                      freq_summaries_from_run,
+                                      plot_residual_freq_vs_joint,
                                       plot_residual_heatmap, plot_residual_scatter,
                                       plot_residual_scatter_3d,
                                       plot_residual_scatter_3d_diff,
@@ -80,6 +83,34 @@ def _emit_surfaces(summary: ResidualSummary, out_dir: Path, args, log) -> None:
                      f"{summary.loss_grid.shape[0]}x{summary.loss_grid.shape[1]}")
 
 
+def _freq_tag(freq_hz: float) -> str:
+    """Filename tag for one frequency, e.g. 140e9 -> '140GHz'."""
+    return f"{freq_hz / 1e9:g}GHz"
+
+
+def _emit_multifreq_extras(summary: ResidualSummary,
+                           freq_summaries: List[Tuple[float, ResidualSummary]],
+                           out_dir: Path, log) -> None:
+    """The F>1 plot extras, all in the one run directory: the 3D per-frequency
+    scatters and a vs-joint comparison per frequency.
+
+    These draw the per-frequency COMPONENTS of the joint solve — the residual each
+    frequency contributes to the mean the solver minimized — not independent
+    per-frequency solves (those died with the freq_<GHz>/ layout)."""
+    out3d = _emit_pair(plot_residual_scatter_3d,
+                       out_dir / "residual_scatter_3d.png", freq_summaries)
+    log.info(f"Wrote 3D residual scatter (+hc) to {out3d}")
+    out3d_diff = out_dir / "residual_scatter_3d_diff.png"
+    plot_residual_scatter_3d_diff(freq_summaries, out3d_diff)
+    log.info(f"Wrote 3D residual-difference scatter to {out3d_diff}")
+    for freq_hz, s in freq_summaries:
+        _emit_pair(plot_residual_freq_vs_joint,
+                   out_dir / f"residual_heatmap_vs_joint_{_freq_tag(freq_hz)}.png",
+                   freq_hz, s, summary)
+    log.info(f"Wrote {len(freq_summaries)} per-frequency vs-joint comparison(s) "
+             f"(+hc) to {out_dir}")
+
+
 def _emit_scenes_and_anim(make_ctx, out_dir: Path, args, log) -> None:
     """Per-candidate scenes and/or the candidate animation, if asked for.
 
@@ -119,17 +150,26 @@ def _anim_top(args, log) -> Optional[int]:
     return args.scene_top
 
 
-def _emit_run_plots(summary: ResidualSummary, out_dir: Path, args, log, make_ctx) -> None:
+def _emit_run_plots(summary: ResidualSummary,
+                    freq_summaries: List[Tuple[float, ResidualSummary]],
+                    out_dir: Path, args, log, make_ctx) -> None:
     """Everything one run directory gets.
 
     One rule: the cheap manifest-only plots always run; anything that re-solves MGS
     or renders per-candidate PNGs is opt-in. A fresh run and a --replot of it now
     produce the same set of files, which was not true when --summary/--scatter
     gated the fresh path and --replot ignored them.
+
+    `summary` is the joint residual (what the solver minimized); `freq_summaries`
+    its per-frequency components, driving the F>1 extras. A single-frequency run
+    (or a legacy schema-2 replot, whose component list is empty) keeps exactly the
+    flat plot set.
     """
     _emit_heatmaps(summary, out_dir, log)
     _emit_scatters(summary, out_dir, log)
     _emit_surfaces(summary, out_dir, args, log)
+    if len(freq_summaries) > 1:
+        _emit_multifreq_extras(summary, freq_summaries, out_dir, log)
     if args.true_mgs:
         # baseline MGS run at the KNOWN TX location: one full solve per run dir
         make_true_mgs_plot(out_dir, log=log)
@@ -140,7 +180,9 @@ def _replot_one_dir(run_dir: Path, args, log) -> ResidualSummary:
     """Regenerate one saved run directory's plots from disk."""
     run_dir = Path(run_dir)
     summary = summary_from_manifest(run_dir)
-    _emit_run_plots(summary, run_dir, args, log, lambda: scenes_from_manifest(run_dir))
+    freq_summaries = freq_summaries_from_manifest(run_dir)
+    _emit_run_plots(summary, freq_summaries, run_dir, args, log,
+                    lambda: scenes_from_manifest(run_dir))
     return summary
 
 
@@ -150,7 +192,9 @@ def _persist_and_plot(run: GridSearchRun, out_dir: Path, config: SimConfig,
     save_grid_run(run, out_dir, config, args.config, vars(args))
     log.info(f"Saved {len(run.candidates)} candidate beam(s) to {out_dir}")
     summary = summary_from_run(run)
-    _emit_run_plots(summary, out_dir, args, log, lambda: scenes_from_run(run))
+    freq_summaries = freq_summaries_from_run(run)
+    _emit_run_plots(summary, freq_summaries, out_dir, args, log,
+                    lambda: scenes_from_run(run))
     return summary
 
 
