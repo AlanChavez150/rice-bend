@@ -172,7 +172,7 @@ def _emit_run_plots(summary: ResidualSummary,
         _emit_multifreq_extras(summary, freq_summaries, out_dir, log)
     if args.true_mgs:
         # baseline MGS run at the KNOWN TX location: one full solve per run dir
-        make_true_mgs_plot(out_dir, log=log)
+        make_true_mgs_plot(out_dir, log=log, scene_freq=args.scene_freq)
     _emit_scenes_and_anim(make_ctx, out_dir, args, log)
 
 
@@ -182,7 +182,7 @@ def _replot_one_dir(run_dir: Path, args, log) -> ResidualSummary:
     summary = summary_from_manifest(run_dir)
     freq_summaries = freq_summaries_from_manifest(run_dir)
     _emit_run_plots(summary, freq_summaries, run_dir, args, log,
-                    lambda: scenes_from_manifest(run_dir))
+                    lambda: scenes_from_manifest(run_dir, scene_freq=args.scene_freq))
     return summary
 
 
@@ -194,7 +194,7 @@ def _persist_and_plot(run: GridSearchRun, out_dir: Path, config: SimConfig,
     summary = summary_from_run(run)
     freq_summaries = freq_summaries_from_run(run)
     _emit_run_plots(summary, freq_summaries, out_dir, args, log,
-                    lambda: scenes_from_run(run))
+                    lambda: scenes_from_run(run, scene_freq=args.scene_freq))
     return summary
 
 
@@ -265,6 +265,11 @@ def _parse_args():
     parser.add_argument("--scene-top", type=int, default=None,
                         help="[scenes/anim] only render the N lowest-residual candidates "
                              f"(--anim defaults to {ANIM_TOP_DEFAULT})")
+    parser.add_argument("--scene-freq", type=float, default=None,
+                        help="[scenes/anim/true-mgs] which frequency's view to render, in "
+                             "Hz (must be one of the run's frequencies). Scene "
+                             "re-illumination is monochromatic, so a multi-frequency run "
+                             "needs one picked; default: the centre frequency.")
     parser.add_argument("--anim", action="store_true",
                         help="Animate the candidate beams to candidate_beams.mp4 (ffmpeg)")
     parser.add_argument("--surface-anim", action="store_true",

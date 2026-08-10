@@ -38,12 +38,25 @@ ANIM_WARN_FRAMES = 400
 
 
 def _center_freq_index(freqs: List[float]) -> int:
-    """Index of the display frequency: the centre of the sorted list (matching
-    plot_residual_scatter_3d_diff's baseline convention). A scene re-illumination
-    is inherently monochromatic, so multi-frequency runs need ONE frequency picked
-    for the scene views."""
+    """Index of the default display frequency: the centre of the sorted list
+    (matching plot_residual_scatter_3d_diff's baseline convention). A scene
+    re-illumination is inherently monochromatic, so multi-frequency runs need ONE
+    frequency picked for the scene views."""
     order = sorted(range(len(freqs)), key=lambda i: freqs[i])
     return order[len(order) // 2]
+
+
+def _display_freq_index(freqs: List[float], scene_freq: Optional[float]) -> int:
+    """Index of the frequency the scene views render at: --scene-freq when given
+    (it must be one of the run's frequencies), else the centre frequency."""
+    if scene_freq is None:
+        return _center_freq_index(freqs)
+    for i, f in enumerate(freqs):
+        if abs(f - scene_freq) <= 1e-6 * max(abs(f), 1.0):
+            return i
+    ghz = ", ".join(f"{f / 1e9:g}" for f in freqs)
+    raise SystemExit(f"--scene-freq {scene_freq / 1e9:g} GHz is not one of this "
+                     f"run's frequencies ({ghz} GHz)")
 
 
 def _manifest_freqs(manifest: dict) -> List[float]:
@@ -54,7 +67,8 @@ def _manifest_freqs(manifest: dict) -> List[float]:
     return [float(manifest["freq_hz"])]
 
 
-def make_true_mgs_plot(run_dir: Path, log: Optional[logging.Logger] = None) -> Optional[Path]:
+def make_true_mgs_plot(run_dir: Path, log: Optional[logging.Logger] = None,
+                       scene_freq: Optional[float] = None) -> Optional[Path]:
     """Reconstruct + plot the single "true" MGS run for a saved grid run.
 
     The grid search treats the TX as unknown; this is the baseline plain-`mgs` result at
@@ -72,6 +86,12 @@ def make_true_mgs_plot(run_dir: Path, log: Optional[logging.Logger] = None) -> O
     with open(run_dir / "candidate_beams.json") as f:
         manifest = json.load(f)
     freqs = _manifest_freqs(manifest)
+    if scene_freq is not None:
+        # MGS renders its scene panels at the PRIMARY (first) frequency, so honour
+        # --scene-freq by rotating it to the front. The solve stays joint over the
+        # same frequency set.
+        i = _display_freq_index(freqs, scene_freq)
+        freqs = [freqs[i]] + freqs[:i] + freqs[i + 1:]
     config = load_run_config(run_dir, log)
     if config is None:
         return None
@@ -145,25 +165,28 @@ class SceneContext:
     rx_aper_axis: np.ndarray             # RX aperture x-axis (for the RX dots, at z_min)
 
 
-def scenes_from_run(run: GridSearchRun) -> SceneContext:
+def scenes_from_run(run: GridSearchRun,
+                    scene_freq: Optional[float] = None) -> SceneContext:
     """Adapter: a SceneContext from an in-memory run. Multi-frequency runs are
-    rendered at the centre frequency (see _center_freq_index)."""
+    rendered at `scene_freq` (must be one of the run's frequencies) or, by
+    default, the centre frequency."""
     items = [CandidateScene(c.point.index, c.point.z, c.point.x_center, c.final_loss,
                             c.aper_axis, c.aper_profile, c.stop_reason)
              for c in run.candidates]
-    i = _center_freq_index(run.freqs)
+    i = _display_freq_index(run.freqs, scene_freq)
     return SceneContext(items, run.scene_bounds, run.wavelengths[i], run.scene_x_axis,
                         run.real_tx_z, 0.5 * (run.real_tx_x_min + run.real_tx_x_max),
                         run.real_tx_aper_axis, run.real_tx_aper_profiles[i],
                         run.rx_aper_axes[i])
 
 
-def scenes_from_manifest(run_dir: Path) -> SceneContext:
+def scenes_from_manifest(run_dir: Path,
+                         scene_freq: Optional[float] = None) -> SceneContext:
     """Adapter: a SceneContext from a saved run (reads each candidate npz).
 
     Handles both layouts: a schema-3 joint run (frequency list, stacked TX
-    profiles, indexed RX aperture keys — rendered at the centre frequency) and a
-    schema-2 per-frequency run (scalar keys)."""
+    profiles, indexed RX aperture keys — rendered at `scene_freq`, defaulting to
+    the centre frequency) and a schema-2 per-frequency run (scalar keys)."""
     run_dir = Path(run_dir)
     with open(run_dir / "candidate_beams.json") as f:
         m = json.load(f)
@@ -176,12 +199,12 @@ def scenes_from_manifest(run_dir: Path) -> SceneContext:
         items.append(CandidateScene(c["index"], c["z"], c["x_center"], c["final_loss"],
                                     d["aper_axis"], d["aper_profile"], c["stop_reason"]))
     gt = m["ground_truth"]
+    i = _display_freq_index(_manifest_freqs(m), scene_freq)
     if "frequencies" in m:   # schema 3: joint layout
-        i = _center_freq_index(_manifest_freqs(m))
         wavelength = float(m["frequencies"][i]["wavelength_m"])
         tx_profile = meas["real_tx_aper_profile"][i]
         rx_axis = meas[f"rx_aper_axis_{i:02d}"]
-    else:                    # schema 2: legacy per-frequency layout
+    else:                    # schema 2: legacy per-frequency layout (i is 0)
         wavelength = m["wavelength_m"]
         tx_profile = meas["real_tx_aper_profile"]
         rx_axis = meas["rx_aper_axis"]
