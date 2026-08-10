@@ -348,6 +348,7 @@ def _collect_metadata(mgs, run_dir: Path,
         "n_frequencies": len(mgs.freqs),
         "provenance": provenance(args_dict, plot_filename=Path(mgs.plot_path).name),
         "gerchberg_saxton": {
+            "phase_model": gs_cfg.phase_model,
             "max_iters": gs_cfg.max_iters,
             "convergence_count": gs_cfg.convergence_count,
             "convergence_threshold": gs_cfg.convergence_threshold,
@@ -374,12 +375,15 @@ def _collect_metadata(mgs, run_dir: Path,
         },
     }
     if hist is not None:
+        gs_result = getattr(mgs, "gs_result", None)
         meta["gs_result"] = {
             "stop_reason": hist.stop_reason,
             "n_iters_run": hist.n_iters_run,
             "n_iters_captured": int(len(hist.iter_indices)),
             "final_loss": hist.final_loss,
             "final_loss_per_freq": [float(v) for v in hist.final_loss_per_freq],
+            # psi's units: the delay profile is expressed as phase at this frequency
+            "ref_freq_hz": (float(gs_result.ref_freq) if gs_result is not None else None),
             "rx_z_m": hist.rx_z,
         }
     else:

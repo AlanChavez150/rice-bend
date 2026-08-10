@@ -22,7 +22,8 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 from rice_bend import rs
-from rice_bend.config import GridSearchConfig, SimConfig, SimSceneConfig
+from rice_bend.config import (GridSearchConfig, SimConfig, SimSceneConfig,
+                              center_freq_index)
 from rice_bend.data_store import (c64, f64, provenance, save_config_snapshot,
                                   write_json)
 from rice_bend.mgs import MGS, gs_reconstruct
@@ -115,9 +116,11 @@ def grid_summary(points: List[GridPoint]) -> str:
 # Read-only measurement + GS hyperparameters shared by every candidate. It is small
 # (the per-frequency measurement vectors, NOT the full 2D scene), so it is cheap to
 # hand to workers. `channels` is the list of FreqChannel payloads from
-# MGS.measurement_channels(), in config frequency order.
+# MGS.measurement_channels(), in config frequency order. `ref_freq` is the RUN-level
+# reference frequency for the delay phase model: candidates solving on per-candidate
+# valid SUBSETS must all share it so their psi profiles have the same units.
 SharedMeasurement = namedtuple(
-    "SharedMeasurement", "x_axis rx_z params channels")
+    "SharedMeasurement", "x_axis rx_z params channels ref_freq")
 
 
 def _reconstruct_candidate(p: "GridPoint", shared: "SharedMeasurement") -> "CandidateResult":
@@ -140,7 +143,7 @@ def _reconstruct_candidate(p: "GridPoint", shared: "SharedMeasurement") -> "Cand
     channels = [ch for ch, ok in zip(shared.channels, freq_ok) if ok]
     result = gs_reconstruct(
         tx_z=p.z, orig_aper_amp=assumed_amp, x_axis=x_axis, rx_z=shared.rx_z,
-        channels=channels, params=shared.params,
+        channels=channels, params=shared.params, ref_freq=shared.ref_freq,
         capture=False, log=None,
     )
     per_freq_losses = np.full(n_freq, np.nan)
@@ -211,6 +214,8 @@ class GridSearchRun:
     wavelengths: List[float]
     seed: Optional[int]
     effective_max_iters: int
+    phase_model: str                 # 'achromatic' | 'delay' (from gerchberg_saxton)
+    ref_freq: float                  # run-level reference frequency for psi units
     grid_cfg: GridSearchConfig
     grid_points: List[GridPoint]
     candidates: List[CandidateResult]
@@ -295,12 +300,14 @@ def run_grid_search(config: SimConfig, freqs: List[float], *, limit: Optional[in
     #    (vectors + GS params) once; it is shared by every candidate.
     x_axis = mgs.scene.x_axis
     channels = mgs.measurement_channels()
+    ref_freq = mgs.freqs[center_freq_index(mgs.freqs)]
     shared = SharedMeasurement(
         x_axis=np.asarray(x_axis).copy(),
         rx_z=float(mgs.scene.rx_ap.z),
         channels=channels,
         # snapshot, not an alias: the workers must not see a later mutation
         params=mgs.gs_cfg.model_copy(),
+        ref_freq=float(ref_freq),
     )
 
     def _log_done(done: int, total: int, cand: CandidateResult) -> None:
@@ -322,6 +329,8 @@ def run_grid_search(config: SimConfig, freqs: List[float], *, limit: Optional[in
         wavelengths=[float(w) for w in wavelengths],
         seed=mgs.gs_cfg.seed,
         effective_max_iters=int(mgs.gs_cfg.max_iters),
+        phase_model=str(mgs.gs_cfg.phase_model),
+        ref_freq=float(ref_freq),
         grid_cfg=grid_cfg,
         grid_points=points,
         candidates=candidates,
@@ -449,7 +458,8 @@ def save_grid_run(run: GridSearchRun, run_dir: Path, config: SimConfig,
         "scene_bounds": {"x_min": run.scene_bounds[0], "x_max": run.scene_bounds[1],
                          "z_min": run.scene_bounds[2], "z_max": run.scene_bounds[3]},
         "ground_truth": ground_truth,
-        "gs": {"effective_max_iters": run.effective_max_iters, "loss_combine": "mean"},
+        "gs": {"effective_max_iters": run.effective_max_iters, "loss_combine": "mean",
+               "phase_model": run.phase_model, "ref_freq_hz": run.ref_freq},
         "provenance": provenance(args_dict),
         "counts": {"total": len(run.grid_points), "usable": n_usable,
                    "ran": len(run.candidates), "skipped": len(skipped_entries),
