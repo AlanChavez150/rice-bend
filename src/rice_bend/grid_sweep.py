@@ -224,6 +224,10 @@ class GridSearchRun:
     scene_x_axis: np.ndarray
     rx_fields: np.ndarray            # (F, nx) on the scene x-axis
     error_weightings: np.ndarray     # (F, nx)
+    rx_plane_rows: Optional[np.ndarray]  # (F, nx) c64 PRE-interp RX-plane fields
+    #   (None when not synthesized) — the energy metric's numerator+denominator
+    rx_x_min: float                  # the RX window (frequency-independent)
+    rx_x_max: float
     rx_aper_axes: List[np.ndarray]   # ragged: per-frequency element axes
     rx_aper_profiles: List[np.ndarray]
     # ground truth, for later evaluation of how well candidates localize the TX
@@ -338,6 +342,11 @@ def run_grid_search(config: SimConfig, freqs: List[float], *, limit: Optional[in
         scene_x_axis=np.asarray(x_axis).copy(),
         rx_fields=np.stack([np.asarray(ch.rx_field) for ch in channels]),
         error_weightings=np.stack([np.asarray(ch.error_weighting) for ch in channels]),
+        rx_plane_rows=(np.stack([fs.rx_plane_row for fs in mgs.freq_states])
+                       if all(fs.rx_plane_row is not None for fs in mgs.freq_states)
+                       else None),
+        rx_x_min=float(mgs.scene.rx_ap.x_min),
+        rx_x_max=float(mgs.scene.rx_ap.x_max),
         rx_aper_axes=[fs.rx_ap.aper_axis.copy() for fs in mgs.freq_states],
         rx_aper_profiles=[fs.rx_ap.aper_profile.copy() for fs in mgs.freq_states],
         real_tx_aper_axis=mgs.scene.tx_ap.aper_axis.copy(),
@@ -393,6 +402,10 @@ def save_grid_run(run: GridSearchRun, run_dir: Path, config: SimConfig,
     for i, (ax, prof) in enumerate(zip(run.rx_aper_axes, run.rx_aper_profiles)):
         meas[f"rx_aper_axis_{i:02d}"] = f64(ax)
         meas[f"rx_aper_profile_{i:02d}"] = c64(prof)
+    if run.rx_plane_rows is not None:
+        # pre-interp RX-plane fields: lets --replot recompute the energy metric
+        # without re-propagating (rs already produced complex64 — lossless)
+        meas["rx_plane_row"] = c64(run.rx_plane_rows)
     np.savez_compressed(run_dir / "measurement.npz", **meas)
 
     ground_truth = {
@@ -459,6 +472,7 @@ def save_grid_run(run: GridSearchRun, run_dir: Path, config: SimConfig,
         "scene_bounds": {"x_min": run.scene_bounds[0], "x_max": run.scene_bounds[1],
                          "z_min": run.scene_bounds[2], "z_max": run.scene_bounds[3]},
         "ground_truth": ground_truth,
+        "rx_aperture": {"x_min": run.rx_x_min, "x_max": run.rx_x_max},
         "gs": {"effective_max_iters": run.effective_max_iters, "loss_combine": "mean",
                "init": run.init, "ref_freq_hz": run.ref_freq},
         "provenance": provenance(args_dict),

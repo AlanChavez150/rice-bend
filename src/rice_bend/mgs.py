@@ -350,6 +350,10 @@ class FreqState:
     tx_ap: SimAperature            # per-freq beam profile (caustic/steer phase ∝ k)
     rx_field: Optional[np.ndarray] = None        # set by measure(), on scene x_axis
     error_weighting: Optional[np.ndarray] = None  # set by measure(), on scene x_axis
+    rx_plane_row: Optional[np.ndarray] = None    # full scene-axis field at the RX
+    #   plane, BEFORE the RX-element interpolation (set by _synthesize_rx; None on
+    #   the experimental path). analysis.py's energy metric needs the un-windowed
+    #   field — rx_field is zero-filled outside the window.
 
 
 class MGS():
@@ -586,6 +590,7 @@ class MGS():
         u0 = interp_real_imag(tx_ap.aper_axis, tx_ap.aper_profile, scene.x_axis)
         row = rs.rs(scene.x_axis, np.array([fs.rx_ap.z]), u0, fs.wavelength,
                     z_src=tx_ap.z, forward_dir=-1.0)[0]
+        fs.rx_plane_row = row   # kept for the energy metric (analysis.py)
         return interp_real_imag(scene.x_axis, row, fs.rx_ap.aper_axis)
 
     def measure(self) -> None:

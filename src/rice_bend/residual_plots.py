@@ -21,8 +21,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import LogNorm, Normalize, SymLogNorm
+from matplotlib.patches import Rectangle
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers the 3d projection)
 
+from rice_bend.analysis import cell_edges
 from rice_bend.config import AxisSweep
 from rice_bend.grid_sweep import GridSearchRun
 
@@ -216,13 +218,55 @@ def _hc_title(title: str, hc: bool) -> str:
     return title + HC_SUFFIX if hc else title
 
 
+def _overlay_analysis(ax, summary: ResidualSummary, analysis: dict) -> None:
+    """Draw the numeric analysis on a heatmap: solid red outlines on the top-K
+    cells and a dashed red boundary around the ROI. Pure axes-space geometry
+    over the pcolormesh cells (cell_edges matches shading='nearest'), so it is
+    identical on the linear and hc twins. Legend entries via proxy handles."""
+    z_e = cell_edges(summary.z_values)
+    x_e = cell_edges(summary.x_values)
+
+    top = analysis.get("top_candidates") or []
+    for c in top:
+        i, j = c["z_idx"], c["x_idx"]
+        ax.add_patch(Rectangle((x_e[j], z_e[i]), x_e[j + 1] - x_e[j],
+                               z_e[i + 1] - z_e[i], fill=False, edgecolor="red",
+                               linewidth=1.3, zorder=4))
+    if top:
+        ax.plot([], [], color="red", linewidth=1.3,
+                label=f"top {len(top)} candidates")
+
+    roi = analysis.get("roi")
+    if roi:
+        cells = {(i, j) for i, j in roi["cells"]}
+
+        def seg(x0, x1, z0, z1):
+            ax.plot([x0, x1], [z0, z1], color="red", linestyle="--",
+                    linewidth=1.1, zorder=5)
+
+        # the ROI boundary = every cell edge whose neighbour is outside the set
+        for (i, j) in cells:
+            if (i - 1, j) not in cells:
+                seg(x_e[j], x_e[j + 1], z_e[i], z_e[i])
+            if (i + 1, j) not in cells:
+                seg(x_e[j], x_e[j + 1], z_e[i + 1], z_e[i + 1])
+            if (i, j - 1) not in cells:
+                seg(x_e[j], x_e[j], z_e[i], z_e[i + 1])
+            if (i, j + 1) not in cells:
+                seg(x_e[j + 1], x_e[j + 1], z_e[i], z_e[i + 1])
+        ax.plot([], [], color="red", linestyle="--", linewidth=1.1,
+                label=(f"ROI (≤{analysis['roi_loss_factor']:g}× min, "
+                       f"{roi['n_cells']} cells)"))
+
+
 def plot_residual_heatmap(summary: ResidualSummary, out_path: Path,
                           title: str = "Candidate residual over speculative TX locations",
-                          hc: bool = False) -> None:
+                          hc: bool = False, analysis: Optional[dict] = None) -> None:
     """The residual over (z, x_center), with the true TX and the best candidate marked.
 
     Lower residual = better fit to the measurement = more likely TX location, so this
-    is the figure the whole search exists to produce.
+    is the figure the whole search exists to produce. With `analysis` (the
+    analysis.json dict) the top-K candidates and the ROI are outlined in red.
     """
     fig, ax = plt.subplots(figsize=(9, 6), layout="constrained")
     norm = _residual_norm(summary.loss_grid, hc)
@@ -234,6 +278,8 @@ def plot_residual_heatmap(summary: ResidualSummary, out_path: Path,
         ax.scatter([summary.best["x_center"]], [summary.best["z"]], marker="*", s=260,
                    c="lime", edgecolor="black", linewidth=1.0, zorder=6,
                    label=f"Best candidate (loss {summary.best['final_loss']:.4g})")
+    if analysis is not None:
+        _overlay_analysis(ax, summary, analysis)
     ax.set_xlabel("x_center (m)")
     ax.set_ylabel("z (m)")
     ax.set_title(_hc_title(title, hc))
