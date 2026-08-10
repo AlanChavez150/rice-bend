@@ -243,6 +243,19 @@ reference-frequency field, so under the delay model they are exact at the defaul
 centre-frequency view and the usual monochromatic approximation at other `--scene-freq`
 choices.
 
+**Initialization** (`gerchberg_saxton.init`): the delay model must recover the profile in
+an *absolute* sense — the 2π degeneracy that makes single-frequency retrieval easy is
+exactly what it breaks — and plain gradient descent from a random start gets stuck in a
+wrong basin (measured: ~100× above the reachable floor). The default, `warm_start`, runs
+the multi-wavelength initialization inside every solve: the channel nearest the reference
+frequency is solved alone (its degenerate landscape is easy — that recovers the SHAPE),
+the result is unwrapped over the support (collapsing the ambiguity to one scalar), and
+that absolute offset is scanned over one synthetic-wavelength period of the comb
+(`2π·f_ref/Δf_min`) against the joint loss before the joint descent starts. Propagation
+linearity makes the scan essentially free; the reference solve adds ~1/F to the runtime.
+`init: random` restores the plain seeded start. Both are no-ops at a single frequency.
+Full derivation and the measurements behind it: `docs/delay_model_warm_start.md`.
+
 A candidate too close to the RX plane may fail the Rayleigh-Sommerfeld sampling check at
 the highest frequencies while passing at lower ones; such a candidate is solved jointly
 over its **valid frequency subset** (the joint loss is the mean over that subset), with
