@@ -22,6 +22,7 @@ dependencies = [
 [project.scripts]
 mgs = "rice_bend.mgs:main"
 mgs-animate = "rice_bend.animate:main"
+mgs-study = "rice_bend.study:main"
 grid-search-mgs = "rice_bend.grid_search:main"
 
 [tool.setuptools.packages.find]
