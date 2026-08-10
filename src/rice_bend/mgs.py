@@ -1,7 +1,9 @@
 import logging
 import argparse
 from collections import namedtuple
+from dataclasses import dataclass
 from pathlib import Path
+from typing import List, Optional, Sequence
 
 import numpy as np
 
@@ -15,51 +17,77 @@ from rice_bend.exp_data import parse_oscope_heatmap_data, parse_oscope_rx_data
 from rice_bend.sim_scene import SimAperature, SimScene
 
 
+# One frequency's contribution to a joint solve: its measurement (on the scene
+# x-axis, so every channel has the same length) and the weighting derived from it.
+# Picklable, so a worker payload can carry a list of these.
+FreqChannel = namedtuple("FreqChannel", "freq wavelength rx_field error_weighting")
+
+
 # Result of one solver run. `curr_aper_f` is the reconstructed complex aperture on the
 # math (scene) x-axis; `history` is a GSHistory when capture=True, else None.
+# `final_loss`/`loss_full` are the joint (mean-over-frequency) numbers; the
+# `*_per_freq` twins carry each frequency's component, aligned with `frequencies`
+# (the input channel order).
 GSResult = namedtuple(
     "GSResult",
-    "curr_aper_f final_loss n_iters_run stop_reason seed loss_full history",
+    "curr_aper_f final_loss final_loss_per_freq n_iters_run stop_reason seed "
+    "loss_full loss_full_per_freq frequencies history",
 )
 
 
 def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
-                   rx_z: float, rx_field: np.ndarray, error_weighting: np.ndarray,
-                   wavelength: float, params: GerchbergSaxtonConfig,
+                   rx_z: float, channels: Sequence[FreqChannel],
+                   params: GerchbergSaxtonConfig,
                    capture: bool = False, log=None) -> "GSResult":
     """Modified Gerchberg-Saxton solver core (no MGS/SimScene instance required).
 
-    Solves for the aperture phase at plane `tx_z` that best reproduces the measured RX
-    field `rx_field`, holding the amplitude fixed at `orig_aper_amp` (defined on
-    `x_axis`; its nonzero region is the support). Pure given its arguments — arrays,
-    scalars and a picklable config model — so this runs unchanged in a worker process.
+    Solves for ONE aperture phase at plane `tx_z` that best reproduces every
+    channel's measured RX field at once, holding the amplitude fixed at
+    `orig_aper_amp` (defined on `x_axis`; its nonzero region is the support). The
+    phase mask is achromatic — each frequency's forward operator acts on the same
+    aperture field — and the loss is the UNWEIGHTED MEAN of the per-frequency
+    losses. Each channel's error_weighting is normalized to its own measurement's
+    peak (see MGS.measure), so the mean weights frequencies equally regardless of
+    absolute RX power; do not "fix" it into a power-weighted sum. A single
+    frequency is simply the len(channels) == 1 case of the same code path.
+
+    Pure given its arguments — arrays, scalars and a picklable config model — so
+    this runs unchanged in a worker process.
 
     With `capture=True` a GSHistory is built and per-iteration state recorded (the
     single-shot `mgs` path, used by animation); with `capture=False` only the dense loss
-    curve + final aperture are produced (the grid-search path). The math is identical
+    curves + final aperture are produced (the grid-search path). The math is identical
     either way, so results do not depend on `capture`. `log` (optional) receives the
     per-iteration progress lines; workers pass None to stay quiet.
     """
     size = len(x_axis)
     dx = x_axis[1] - x_axis[0]
+    n_freq = len(channels)
+    assert n_freq >= 1, "gs_reconstruct needs at least one FreqChannel"
 
     # The geometry is fixed for the whole solve, so there are exactly TWO kernels
-    # here -- the forward TX->RX one and its adjoint -- and rs() would rebuild both
-    # from scipy.special.hankel1 over the full x axis on all three of its calls per
-    # iteration, for up to 10,000 iterations. Building them once is 71% of the
-    # numerical core: measured 1.225 s -> 0.351 s (3.49x) on a real candidate, with
-    # final_loss, the aperture and the whole 800-point loss curve bit-identical.
+    # PER FREQUENCY here -- the forward TX->RX one and its adjoint -- and rs() would
+    # rebuild both from scipy.special.hankel1 over the full x axis on all three of
+    # its calls per iteration, for up to 10,000 iterations. Building them once is
+    # 71% of the numerical core: measured 1.225 s -> 0.351 s (3.49x) on a real
+    # candidate, with final_loss, the aperture and the whole 800-point loss curve
+    # bit-identical. (One build is ~0.375 ms, so the per-solve cost of F builds is
+    # noise; it is the per-iteration rebuild that must never come back.)
     #
     # The adjoint is bit-exactly conj(forward): rs()'s two calls here differ only in
     # the sign of the propagation distance, and kernel_rs_inverse is defined as the
     # conjugate of kernel_rs. Verified for both propagation directions.
     #
     # sampling_quality depends on the propagation distance only through |prop|, which
-    # is the same either way, so rs()'s per-call guard collapses to one check here.
+    # is the same either way, so rs()'s per-call guard collapses to one check per
+    # frequency here. The check raises on ANY undersampled channel (the highest
+    # frequency binds); solving over a valid subset is the caller's decision, made
+    # before building the channel list.
     rx_plane = np.array([rx_z])   # measurement (RX) plane target
-    rs.check_sampling(x_axis, rx_plane, wavelength, z_src=tx_z, forward_dir=-1.0)
-    h_fwd = rs.rs_kernel(x_axis, wavelength, -1.0 * (rx_z - tx_z))
-    h_adj = np.conjugate(h_fwd)
+    for ch in channels:
+        rs.check_sampling(x_axis, rx_plane, ch.wavelength, z_src=tx_z, forward_dir=-1.0)
+    h_fwd = [rs.rs_kernel(x_axis, ch.wavelength, -1.0 * (rx_z - tx_z)) for ch in channels]
+    h_adj = [np.conjugate(h) for h in h_fwd]
 
     max_iters = params.max_iters
     cvrg_count = params.convergence_count
@@ -85,9 +113,10 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
     if capture:
         history = GSHistory(
             x_axis=x_axis,
-            orig_prop_f=rx_field,
+            frequencies=np.array([ch.freq for ch in channels], dtype=np.float64),
+            orig_prop_f=np.stack([np.asarray(ch.rx_field) for ch in channels]),
             orig_aper_amp=orig_aper_amp,
-            error_weighting=error_weighting,
+            error_weighting=np.stack([np.asarray(ch.error_weighting) for ch in channels]),
             support=support,
             initial_phase=initial_phase,
             rx_z=float(rx_z),
@@ -98,35 +127,54 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
     stop_reason = "max_iters"
     n_iters_run = max_iters
     hist_error = np.zeros(max_iters, np.float32)
+    hist_error_pf = np.zeros((max_iters, n_freq), np.float32)
     for iter_idx in range(max_iters):
-        # propogate aperature guess to measurement plane
+        # propogate aperature guess to measurement plane, once per frequency. A
+        # python loop over channels, NOT a batched 2D fftconvolve: rs() benchmarked
+        # the batched form slower at every size tried, and going through the same
+        # rs_apply path per frequency keeps the load-bearing complex64 downcast --
+        # which is what makes n_freq == 1 bit-identical to the single-frequency
+        # solver this generalizes.
         u0 = curr_aper_amp * np.exp(1j * curr_aper_phase)
-        curr_prop_f = rs.rs_apply(u0, h_fwd, dx)
-        r_cx = error_weighting * (curr_prop_f - rx_field)
-
-        loss = 0.5 * np.mean(np.abs(r_cx)**2)
-        hist_error[iter_idx] = loss
-        if history is not None:
-            history.record_iter(iter_idx, loss, curr_aper_phase, curr_prop_f)
-        g_meas = r_cx
-
-        # back propogate the residual from the RX plane to the TX (aperture) plane
-        g_u0 = rs.rs_apply(g_meas, h_adj, dx)
-
-        grad_theta = 2.0 * np.imag(g_u0 * np.conj(u0))
+        loss_pf = np.empty(n_freq, dtype=np.float64)
+        grad_theta = np.zeros(size, dtype=np.float64)
+        prop_fields = [] if history is not None else None
+        for f, ch in enumerate(channels):
+            curr_prop_f = rs.rs_apply(u0, h_fwd[f], dx)
+            r_cx = ch.error_weighting * (curr_prop_f - ch.rx_field)
+            loss_pf[f] = 0.5 * np.mean(np.abs(r_cx)**2)
+            if prop_fields is not None:
+                prop_fields.append(curr_prop_f)
+            # back propogate the residual from the RX plane to the TX (aperture) plane
+            g_u0 = rs.rs_apply(r_cx, h_adj[f], dx)
+            grad_theta += 2.0 * np.imag(g_u0 * np.conj(u0))
+        # gradient of the MEAN loss: the divisor is n_freq, not 1. Summing instead
+        # would silently rescale the effective lr0 by n_freq and change backtracking
+        # accept rates, breaking step-size comparability with single-frequency runs.
+        grad_theta /= float(n_freq)
         grad_theta[~support] = 0.0
+
+        loss = loss_pf.mean()
+        hist_error[iter_idx] = loss
+        hist_error_pf[iter_idx] = loss_pf
+        if history is not None:
+            history.record_iter(iter_idx, loss, loss_pf, curr_aper_phase, prop_fields)
 
         step = lr0
         for _ in range(bt_tries):
             theta_trial = curr_aper_phase - step * grad_theta
             u0_trial = curr_aper_amp * np.exp(1j * theta_trial)
-            um_trial = rs.rs_apply(u0_trial, h_fwd, dx)
-            r_trial = error_weighting * (um_trial - rx_field)
-            loss_trial = 0.5 * np.mean(np.abs(r_trial)**2)
-            if loss_trial < loss:  # sufficient decrease
+            trial_pf = np.empty(n_freq, dtype=np.float64)
+            for f, ch in enumerate(channels):
+                um_trial = rs.rs_apply(u0_trial, h_fwd[f], dx)
+                r_trial = ch.error_weighting * (um_trial - ch.rx_field)
+                trial_pf[f] = 0.5 * np.mean(np.abs(r_trial)**2)
+            loss_trial = trial_pf.mean()
+            if loss_trial < loss:  # sufficient decrease of the JOINT loss
                 curr_aper_phase = theta_trial.copy()
                 curr_aper_phase[~support] = 0.0
                 loss = loss_trial
+                loss_pf = trial_pf
                 break
             step *= bt_shrink
         curr_aper_f = curr_aper_amp * np.exp(1j * curr_aper_phase)
@@ -149,44 +197,87 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
         log.error(f"MGS did not converge after {max_iters} iterations")
 
     if history is not None:
-        history.capture_final(iter_idx, loss, curr_aper_phase, curr_prop_f)
-        history.finalize(stop_reason, n_iters_run, loss)
+        # the final captured prop fields are the PRE-step fields of the last
+        # iteration (as they always were); loss/phase are post-accept.
+        history.capture_final(iter_idx, loss, curr_aper_phase, prop_fields)
+        history.finalize(stop_reason, n_iters_run, loss, loss_pf)
 
     loss_full = hist_error[:n_iters_run].copy()
-    return GSResult(curr_aper_f=curr_aper_f, final_loss=float(loss), n_iters_run=n_iters_run,
-                    stop_reason=stop_reason, seed=seed, loss_full=loss_full, history=history)
+    loss_full_per_freq = hist_error_pf[:n_iters_run].copy()
+    return GSResult(curr_aper_f=curr_aper_f, final_loss=float(loss),
+                    final_loss_per_freq=np.asarray(loss_pf, dtype=np.float64).copy(),
+                    n_iters_run=n_iters_run, stop_reason=stop_reason, seed=seed,
+                    loss_full=loss_full, loss_full_per_freq=loss_full_per_freq,
+                    frequencies=tuple(float(ch.freq) for ch in channels),
+                    history=history)
+
+
+@dataclass
+class FreqState:
+    """Everything MGS holds per frequency for a joint solve.
+
+    The geometry of the apertures is frequency-independent (their axes come from
+    config bounds + dx alone), but the RX element spacing is wavelength/20 when
+    the config leaves dx null, and both beam constructors bake the wavenumber
+    into the emitted phase — so each frequency gets its own aperture objects.
+    """
+    freq: float
+    wavelength: float
+    rx_ap: SimAperature            # per-freq: dx = wavelength/20 when cfg dx is null
+    tx_ap: SimAperature            # per-freq beam profile (caustic/steer phase ∝ k)
+    rx_field: Optional[np.ndarray] = None        # set by measure(), on scene x_axis
+    error_weighting: Optional[np.ndarray] = None  # set by measure(), on scene x_axis
 
 
 class MGS():
-    def __init__(self, freq: float, config: SimConfig):
-        self._init_common(freq, config)
+    def __init__(self, freqs, config: SimConfig):
+        self._init_common(freqs, config)
 
         # Convention: the RX aperture sits at the origin (z=0), the bottom of the
         # image. The TX aperture sits above it and projects toward -Z, so its beam
         # travels *down* to the RX. Move the TX by changing tx.z (height) and its
         # x_min/x_max (lateral).
         scene_cfg = config.sim_scene
-        rx = self._build_rx(config.rx_aperture)
-        tx = self._build_tx(config.tx_aperture, scene_cfg.z_min)
+        for freq in self.freqs:
+            wl = rs.wavelength(freq)
+            self.freq_states.append(FreqState(
+                freq=freq, wavelength=wl,
+                rx_ap=self._build_rx(config.rx_aperture, wl),
+                tx_ap=self._build_tx(config.tx_aperture, scene_cfg.z_min, freq),
+            ))
+        # the scene holds the PRIMARY frequency's apertures as its views; geometry
+        # is identical across frequencies, only profiles/dx differ
+        primary = self.freq_states[0]
+        tx = primary.tx_ap
         self.gs_tx = SimAperature(x_min=tx.x_min, x_max=tx.x_max, z=tx.z, dx=tx.dx)
         self.scene = SimScene(
             x_min=scene_cfg.x_min, x_max=scene_cfg.x_max,
             z_min=scene_cfg.z_min, z_max=scene_cfg.z_max,
-            spacing=scene_cfg.spacing, rx_ap=rx, tx_ap=tx,
+            spacing=scene_cfg.spacing, rx_ap=primary.rx_ap, tx_ap=tx,
         )
         self._log_geometry()
 
-    def _init_common(self, freq: float, config: SimConfig) -> None:
-        """State every MGS has, whatever built its scene."""
+    def _init_common(self, freqs, config: SimConfig) -> None:
+        """State every MGS has, whatever built its scene.
+
+        `freqs` is a float or a sequence of floats (a joint solve holds one
+        FreqState per frequency). `self.freq`/`self.wavelength` alias the primary
+        (first) frequency for the inherently single-frequency consumers: geometry
+        logging, scene (re-)illumination, plot_scene.
+        """
         self.log = logging.getLogger()
-        self.freq = freq
-        self.wavelength = rs.wavelength(freq)
+        if np.isscalar(freqs):
+            freqs = [freqs]
+        self.freqs = [float(f) for f in freqs]
+        assert len(self.freqs) >= 1, "MGS needs at least one frequency"
+        self.freq = self.freqs[0]
+        self.wavelength = rs.wavelength(self.freq)
         self.plot_path = config.plot_path
         self.gs_cfg = config.gerchberg_saxton
         self.output_cfg = config.output
         self.gs_history = None
-        self._rx_field = None          # measured RX field on scene.x_axis (set by measure())
-        self._error_weighting = None   # phase-retrieval error weighting (set by measure())
+        self.gs_result = None
+        self.freq_states: List[FreqState] = []   # filled by the constructor path
         self.gs_rec_data = None        # scene re-illuminated by the reconstruction
 
     @classmethod
@@ -235,6 +326,9 @@ class MGS():
                           z=0, dx=dx)
         tx.make_steer(freq, theta_deg=0)   # broadside plane wave: the solver's seed
         self.gs_tx = SimAperature(x_min=tx.x_min, x_max=tx.x_max, z=tx.z, dx=dx)
+        # a single capture is inherently one frequency: the length-1 joint path
+        self.freq_states = [FreqState(freq=self.freq, wavelength=self.wavelength,
+                                      rx_ap=rx, tx_ap=tx)]
 
         spacing_ratio = round(dx / self.wavelength, 3)
         self.log.info(f"RX measurements are spread {spacing_ratio:0.3f} wavelengths apart")
@@ -253,15 +347,16 @@ class MGS():
         self._log_geometry()
         return self
 
-    def _build_rx(self, rx_cfg) -> SimAperature:
-        """The receive aperture: a window of `width` centred at `x_center`, at the
-        scene origin (z=0). `dx` defaults to wavelength/20 when left null, and is what
-        sets the receiver element count -- the independent variable in the
+    def _build_rx(self, rx_cfg, wavelength: float) -> SimAperature:
+        """The receive aperture at `wavelength`: a window of `width` centred at
+        `x_center`, at the scene origin (z=0). `dx` defaults to wavelength/20 when
+        left null -- so the element count is per-frequency -- and is what sets the
+        receiver element count, the independent variable in the
         scenario_caustic_hit_lambda2/lambda4 experiments."""
         # written as a multiply by 1/20, not a divide by 20: 0.05 is not exactly 1/20
         # in binary, so the two disagree by an ulp (measured on 28 config x frequency
         # combinations, though none of them moved num_points)
-        rx_dx = rx_cfg.dx if rx_cfg.dx is not None else self.wavelength * (1 / 20)
+        rx_dx = rx_cfg.dx if rx_cfg.dx is not None else wavelength * (1 / 20)
         return SimAperature(
             x_min=rx_cfg.x_center - rx_cfg.width / 2.0,
             x_max=rx_cfg.x_center + rx_cfg.width / 2.0,
@@ -269,9 +364,13 @@ class MGS():
             dx=rx_dx,
         )
 
-    def _build_tx(self, tx_cfg, z_min: float) -> SimAperature:
-        """The transmit aperture and the beam it emits, defined independently of the
-        scene grid. Sets self.beam_type and self.has_real_aper."""
+    def _build_tx(self, tx_cfg, z_min: float, freq: float) -> SimAperature:
+        """The transmit aperture and the beam it emits at `freq`, defined
+        independently of the scene grid. Sets self.beam_type and self.has_real_aper.
+
+        Both beam constructors bake the wavenumber into the PHASE only; the profile
+        amplitude is 1 by construction either way, so the aperture amplitude (the
+        solver's fixed constraint) is frequency-independent."""
         tx = SimAperature(x_min=tx_cfg.x_min, x_max=tx_cfg.x_max, z=tx_cfg.z, dx=tx_cfg.dx)
         assert tx.z > z_min, f"tx_aperture.z ({tx.z}) must be above the scene floor z_min ({z_min})"
 
@@ -284,10 +383,10 @@ class MGS():
             # caustic beam x(d) = a*d^2 + b*d + c, d = distance travelled from the TX,
             # so it is parameterised by the downstream propagation length
             a, b, c = beam.trajectory
-            tx.make_caustic(self.freq, tx.z - z_min, a, b, c)
+            tx.make_caustic(freq, tx.z - z_min, a, b, c)
         elif beam.type == "directional":
             # steered plane wave at the configured angle
-            tx.make_steer(self.freq, theta_deg=beam.steer_angle_deg)
+            tx.make_steer(freq, theta_deg=beam.steer_angle_deg)
         else:
             raise ValueError(f"unknown beam type: {beam.type}")
         return tx
@@ -326,14 +425,19 @@ class MGS():
         self.scene.data = self._propagate(self.scene.tx_ap)
 
     def illuminate_reconstructed(self) -> None:
-        """Fill gs_rec_data with the field radiated by the MGS-reconstructed aperture."""
+        """Fill gs_rec_data with the field radiated by the MGS-reconstructed aperture.
+
+        A re-illumination is inherently monochromatic; this (like _propagate and
+        plot_scene) runs at the PRIMARY frequency. The reconstructed mask itself is
+        achromatic — one phase fitted jointly across all configured frequencies."""
         self.log.info("Running scene simulation with MGS reconstructed aperature")
         self.gs_rec_data = self._propagate(self.gs_tx)
 
     # ----------------------------------------------------------- measurement ---
-    def _synthesize_rx(self) -> np.ndarray:
-        """Propagate the real TX aperture to the RX measurement plane and sample it
-        onto the RX element axis. Returns the complex RX aperture profile.
+    def _synthesize_rx(self, fs: FreqState) -> np.ndarray:
+        """Propagate the real TX aperture to the RX measurement plane at this
+        frequency and sample it onto the RX element axis. Returns the complex RX
+        aperture profile.
 
         Propagates directly to rx_ap.z -- the plane gs_reconstruct actually models.
         It used to snap to the nearest scene z-plane, with the comparison inverted so
@@ -354,71 +458,92 @@ class MGS():
         scenario_caustic_hit_lambda2.yml.
         """
         scene = self.scene
-        tx_ap = scene.tx_ap
+        tx_ap = fs.tx_ap
         u0 = interp_real_imag(tx_ap.aper_axis, tx_ap.aper_profile, scene.x_axis)
-        row = rs.rs(scene.x_axis, np.array([scene.rx_ap.z]), u0, self.wavelength,
+        row = rs.rs(scene.x_axis, np.array([fs.rx_ap.z]), u0, fs.wavelength,
                     z_src=tx_ap.z, forward_dir=-1.0)[0]
-        return interp_real_imag(scene.x_axis, row, scene.rx_ap.aper_axis)
+        return interp_real_imag(scene.x_axis, row, fs.rx_ap.aper_axis)
 
     def measure(self) -> None:
         """Sample the measured RX field onto the scene grid and build the error
-        weighting used by phase retrieval. Idempotent.
+        weighting used by phase retrieval, once per frequency. Idempotent.
 
-        On the simulated path the measurement is synthesized here, by propagating
-        the known TX aperture to the RX plane. On the experimental path there is no
-        known TX aperture (has_real_aper is False) and rx_ap.aper_profile already
-        holds the measured data. The result (self._rx_field / self._error_weighting)
-        is the single measurement shared across every hypothesized TX location.
+        On the simulated path each frequency's measurement is synthesized here, by
+        propagating that frequency's known TX aperture to the RX plane. On the
+        experimental path there is no known TX aperture (has_real_aper is False)
+        and rx_ap.aper_profile already holds the measured data. The results
+        (FreqState.rx_field / .error_weighting) are the single measurement set
+        shared across every hypothesized TX location.
+
+        Each frequency's weighting is normalized to its OWN measurement's peak, so
+        a joint solve's mean loss weights frequencies equally regardless of their
+        absolute RX power.
         """
-        if self.has_real_aper:
-            self.scene.rx_ap.aper_profile = self._synthesize_rx()
         x_axis = self.scene.x_axis
-        rx_ap = self.scene.rx_ap
-        # A FIELD, so cartesian: interpolating its phase through the ±π branch cut
-        # corrupted the measurement by 20.8% rel L2 on scenario_caustic_hit and 55%
-        # on the lambda/2-spaced variant, and the solver then fitted the corruption
-        # at full weight.
-        orig_prop_f = interp_real_imag(rx_ap.aper_axis, rx_ap.aper_profile, x_axis)
-        # error computations are weighted to favor higher amplitude data, and ignore things outside the recieve aperature
-        error_weighting = (np.abs(orig_prop_f) / np.abs(orig_prop_f).max()) + 0.25
-        error_weighting[(x_axis < rx_ap.x_min) | (x_axis > rx_ap.x_max)] = 0.0
-        self._rx_field = orig_prop_f
-        self._error_weighting = error_weighting
+        for fs in self.freq_states:
+            if self.has_real_aper:
+                fs.rx_ap.aper_profile = self._synthesize_rx(fs)
+            rx_ap = fs.rx_ap
+            # A FIELD, so cartesian: interpolating its phase through the ±π branch cut
+            # corrupted the measurement by 20.8% rel L2 on scenario_caustic_hit and 55%
+            # on the lambda/2-spaced variant, and the solver then fitted the corruption
+            # at full weight.
+            orig_prop_f = interp_real_imag(rx_ap.aper_axis, rx_ap.aper_profile, x_axis)
+            # error computations are weighted to favor higher amplitude data, and ignore things outside the recieve aperature
+            error_weighting = (np.abs(orig_prop_f) / np.abs(orig_prop_f).max()) + 0.25
+            error_weighting[(x_axis < rx_ap.x_min) | (x_axis > rx_ap.x_max)] = 0.0
+            fs.rx_field = orig_prop_f
+            fs.error_weighting = error_weighting
+
+    def measurement_channels(self) -> List[FreqChannel]:
+        """FreqChannel payloads for gs_reconstruct, one per frequency in self.freqs
+        order. measure() must have been called."""
+        assert all(fs.rx_field is not None for fs in self.freq_states), \
+            "measure() must be called before measurement_channels()"
+        return [FreqChannel(freq=fs.freq, wavelength=fs.wavelength,
+                            rx_field=fs.rx_field, error_weighting=fs.error_weighting)
+                for fs in self.freq_states]
 
     def run_gerch_sax(self):
         """Reconstruct the aperture phase at the *real* TX plane (single-shot path).
 
         Thin wrapper over measure() + reconstruct_at() that preserves the original
         behaviour: solve at scene.tx_ap.z using the real aperture's amplitude as the
-        fixed support, writing the result into self.gs_tx.
+        fixed support, writing the result into self.gs_tx. One solve, jointly over
+        every configured frequency.
         """
         self.log.info(f"Running modified Gerchberg-saxton algorithm")
         self.measure()
         # amplitude-only ON PURPOSE: this is the solver's fixed amplitude constraint
         # and its support mask, not a field. Forcing it cartesian changes the
         # constraint by 3.0-5.3% rel L2 with no error raised and no visibly broken plot.
+        #
+        # The PRIMARY frequency's profile serves as THE constraint for a joint
+        # solve: both beam constructors emit unit amplitude (only the phase depends
+        # on the wavenumber), so the amplitude is frequency-independent by
+        # construction and any freq_state's profile gives the same array.
         tx_ap = self.scene.tx_ap
         orig_aper_amp = interp_amplitude(tx_ap.aper_axis, tx_ap.aper_profile,
                                          self.scene.x_axis)
-        self.gs_history = self.reconstruct_at(
+        result = self.reconstruct_at(
             tx_z=self.scene.tx_ap.z,
             orig_aper_amp=orig_aper_amp,
             out_aper=self.gs_tx,
         )
+        self.gs_result = result
+        self.gs_history = result.history
 
     def reconstruct_at(self, tx_z: float, orig_aper_amp: np.ndarray,
-                       out_aper: SimAperature) -> GSHistory:
+                       out_aper: SimAperature) -> GSResult:
         """Run modified Gerchberg-Saxton for a hypothesized TX plane.
 
-        Solves for the aperture phase at plane `tx_z` that best reproduces the
-        measured RX field (self._rx_field), holding the amplitude fixed at
-        `orig_aper_amp` (defined on scene.x_axis; its nonzero region is the
-        support). Writes the reconstructed complex aperture into
-        out_aper.aper_profile and returns the run's GSHistory. measure() must
+        Solves for the one aperture phase at plane `tx_z` that best reproduces
+        every frequency's measured RX field (FreqState.rx_field), holding the
+        amplitude fixed at `orig_aper_amp` (defined on scene.x_axis; its nonzero
+        region is the support). Writes the reconstructed complex aperture into
+        out_aper.aper_profile and returns the run's full GSResult. measure() must
         have been called first.
         """
-        assert self._rx_field is not None and self._error_weighting is not None, \
-            "measure() must be called before reconstruct_at()"
         # Run the solver core (capture=True so the single-shot path keeps its full
         # GSHistory for animation/persistence), then interp the result onto out_aper.
         result = gs_reconstruct(
@@ -426,9 +551,7 @@ class MGS():
             orig_aper_amp=orig_aper_amp,
             x_axis=self.scene.x_axis.copy(),
             rx_z=self.scene.rx_ap.z,
-            rx_field=self._rx_field,
-            error_weighting=self._error_weighting,
-            wavelength=self.wavelength,
+            channels=self.measurement_channels(),
             params=self.gs_cfg,
             capture=True,
             log=self.log,
@@ -436,7 +559,7 @@ class MGS():
         # the converged aperture is a FIELD, and it is heavily wrapped -- cartesian
         out_aper.aper_profile = interp_real_imag(
             self.scene.x_axis, result.curr_aper_f, out_aper.aper_axis)
-        return result.history
+        return result
 
     def plot_scene(self, save_path=None, show=True):
         """Save the 4-panel scene plot (real vs MGS-reconstructed scene + TX aperture
@@ -590,7 +713,7 @@ def main():
     # plt.show()-blocked) solve must not have destroyed the previous run already.
     if config.output.save_run:
         run_dir = make_run_dir(config.output.output_dir, config.output.run_name, kind="mgs")
-        save_run(mgs, run_dir, config, args.config, args.freq, vars(args), is_exp=is_exp)
+        save_run(mgs, run_dir, config, args.config, vars(args), is_exp=is_exp)
 
 if __name__ == "__main__":
     main()
