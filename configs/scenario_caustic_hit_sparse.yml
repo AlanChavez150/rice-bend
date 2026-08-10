@@ -2,7 +2,7 @@
 # RX window: centered x=0, width 0.04 m. RX at z=0; TX projects -Z. Shared symmetric
 # scene across all scenarios. TX width 0.132 m, height z=0.3. Verified (150 GHz):
 # big-arc caustic (a=0.8): launches ~-0.10, curves into the RX. beam_peak_x=+0.000, FWHM=0.030 -> HIT (centred in the ±0.02 m RX window)
-# Sparse 12x12 grid_search (144 candidate spots); see scenario_caustic_hit.yml for the dense 96x96 grid.
+# Sparse 12x12 grid_search (144 candidate spots); see scenario_caustic_hit.yml for the dense 64x48 grid.
 
 sim_scene:
   x_min: -0.3
