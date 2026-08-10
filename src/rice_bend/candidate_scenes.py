@@ -17,6 +17,7 @@ import numpy as np
 from matplotlib.animation import FuncAnimation
 
 from rice_bend import rs
+from rice_bend.config import center_freq_index
 from rice_bend.data_store import load_run_config, write_mp4
 from rice_bend.grid_sweep import GridSearchRun
 from rice_bend.mgs import MGS
@@ -39,11 +40,11 @@ ANIM_WARN_FRAMES = 400
 
 def _center_freq_index(freqs: List[float]) -> int:
     """Index of the default display frequency: the centre of the sorted list
-    (matching plot_residual_scatter_3d_diff's baseline convention). A scene
-    re-illumination is inherently monochromatic, so multi-frequency runs need ONE
-    frequency picked for the scene views."""
-    order = sorted(range(len(freqs)), key=lambda i: freqs[i])
-    return order[len(order) // 2]
+    (matching plot_residual_scatter_3d_diff's baseline convention and the delay
+    solver's reference frequency). A scene re-illumination is inherently
+    monochromatic, so multi-frequency runs need ONE frequency picked for the
+    scene views."""
+    return center_freq_index(freqs)
 
 
 def _display_freq_index(freqs: List[float], scene_freq: Optional[float]) -> int:
