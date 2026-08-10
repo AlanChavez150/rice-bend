@@ -1,5 +1,5 @@
 """The candidate-residual view of a sweep: the (z, x_center) grid of GS residuals,
-and the five plots drawn from it.
+and the six plots drawn from it.
 
 A lower residual means a better fit to the measurement, which is the whole premise
 of the search -- so these are the figures that say whether it worked.
@@ -151,6 +151,14 @@ RESIDUAL_LABEL = "GS residual (lower = better fit)"
 HC_SUFFIX = " (high contrast, log scale)"
 DOT_MIN, DOT_MAX = 1.5, 60.0       # 3D dot-size range
 
+# --- residual surface ---------------------------------------------------------
+SURFACE_VIEW = (28, -55)           # elev, azim for the still; the orbit mp4 escapes occlusion
+SURFACE_FLOOR_FRAC = 0.18          # flat-map plane sits this far below the surface's base
+SURFACE_HEAD_FRAC = 0.28           # headroom above the tallest peak for the marker poles
+SURFACE_LEVELS = 32                # contour bands in the floor projection
+SURFACE_ORBIT_FRAMES = 72          # 5 degrees per frame
+SURFACE_ORBIT_FPS = 15
+
 
 def _residual_norm(values: np.ndarray, hc: bool) -> Normalize:
     """The colour/axis norm for a residual plot: fixed [0, 0.06] normally, or the
@@ -213,6 +221,219 @@ def plot_residual_heatmap(summary: ResidualSummary, out_path: Path,
     ax.legend(loc="upper right", framealpha=0.9)
     fig.savefig(out_path, dpi=120)
     plt.close(fig)
+
+
+def _surface_height(values: np.ndarray, norm: Normalize) -> np.ndarray:
+    """Turn residuals into surface heights: low residual -> physically high.
+
+    The floor clip mirrors _residual_mesh's `np.maximum(grid, norm.vmin)` -- a LogNorm
+    cannot take a zero -- and the ceiling clip keeps height >= 0, matching the way the
+    2D heatmap saturates above RESIDUAL_VMAX. NaN survives np.clip, so cells that never
+    ran stay NaN and plot_surface leaves them as holes.
+
+    The two branches are the same inversion the 2D pair already draws: linear under
+    Normalize, decades under LogNorm. That is what makes residual_surface.png the
+    relief of residual_heatmap.png rather than a third, unrelated scaling.
+    """
+    lo = norm.vmin if isinstance(norm, LogNorm) else 0.0
+    clipped = np.clip(values, lo, RESIDUAL_VMAX)
+    if isinstance(norm, LogNorm):
+        return np.log10(RESIDUAL_VMAX / clipped)   # decades below the 0.06 ceiling
+    return RESIDUAL_VMAX - clipped                 # residual units, inverted
+
+
+def _surface_zticks(norm: Normalize) -> Tuple[np.ndarray, List[str]]:
+    """(positions, labels) for the height axis, labelled in REAL residual values.
+
+    The axis is a transform of the residual, so labelling it with the transform's own
+    output would make the reader do the inversion in their head. Instead the ticks sit
+    at the height each round residual maps to, and read as that residual.
+
+    Decade ticks are built from integer exponents rather than from vmin directly:
+    _hc_norm's floor can be 6e-3 (its cap), whose log is not an integer, and rounding
+    that for a 10^n label would print 10^-2 next to a tick that is not at 0.01.
+    """
+    if isinstance(norm, LogNorm):
+        exps = np.arange(int(np.ceil(np.log10(norm.vmin))),
+                         int(np.floor(np.log10(RESIDUAL_VMAX))) + 1)
+        decades = 10.0 ** exps.astype(float)
+        return (np.log10(RESIDUAL_VMAX / decades),
+                [f"$10^{{{int(e)}}}$" for e in exps])
+    ticks = np.arange(0.0, RESIDUAL_VMAX + 1e-9, 0.01)
+    return RESIDUAL_VMAX - ticks, [f"{t:g}" for t in ticks]
+
+
+def _surface_pole(ax, x: float, z: float, floor: float, ceiling: float, *, marker: str,
+                  color: str, edgecolor: str, size: float, label: str) -> None:
+    """A full-height marker pole at (x, z), capped above the tallest peak.
+
+    The cap sits at the ceiling and NOT at the surface height on purpose: mplot3d
+    depth-sorts whole collections, so a marker drawn on the surface gets painted under
+    it -- placing it at the surface hid the true-TX X behind the peak, and moving it
+    down to the floor plane hid it under the surface instead. Nothing can occlude a
+    marker above every point of the surface, at any azimuth, which is also what keeps
+    both markers readable through every frame of the orbit animation.
+    """
+    ax.plot([x, x], [z, z], [floor, ceiling], color=color, linewidth=1.3, alpha=0.85)
+    ax.scatter([x], [z], [ceiling], marker=marker, s=size, c=color, edgecolor=edgecolor,
+               linewidth=1.0, depthshade=False, label=label)
+
+
+def _draw_surface(ax, summary: ResidualSummary, hc: bool) -> Normalize:
+    """Draw the residual surface, its floor projection and the marker poles onto `ax`.
+
+    Returns the norm so the caller can hang a colorbar on it. Split out from
+    plot_residual_surface because the orbit animation needs the identical scene.
+    """
+    grid = summary.loss_grid
+    norm = _residual_norm(grid, hc)
+    lo = norm.vmin if isinstance(norm, LogNorm) else 0.0
+    clipped = np.clip(grid, lo, RESIDUAL_VMAX)
+    height = _surface_height(grid, norm)
+
+    mesh_x, mesh_z = np.meshgrid(summary.x_values, summary.z_values)
+    # facecolors, not cmap=: plot_surface's cmap colours by HEIGHT, which would put
+    # this figure's colorbar on a different scale from the 2D heatmap's. Routing the
+    # colour through _residual_norm instead makes the two colorbars identical, so the
+    # flat and relief views of one run are directly comparable. shade=False for the
+    # same reason -- lighting would alter the mapped colours.
+    # edgecolor traces the real candidate sampling, so the surface reads as sampled
+    # data rather than as a smooth analytic function.
+    ax.plot_surface(mesh_x, mesh_z, height,
+                    facecolors=plt.get_cmap(CMAP)(norm(clipped)), shade=False,
+                    rcount=grid.shape[0], ccount=grid.shape[1],
+                    edgecolor=(0, 0, 0, 0.22), linewidth=0.15)
+
+    h_max = float(np.nanmax(height))
+    if not np.isfinite(h_max) or h_max <= 0.0:
+        h_max = 1.0            # every candidate at or above the ceiling: keep zlim sane
+    floor = -SURFACE_FLOOR_FRAC * h_max
+    ceiling = h_max * (1.0 + SURFACE_HEAD_FRAC)
+
+    levels = (np.logspace(np.log10(norm.vmin), np.log10(RESIDUAL_VMAX), SURFACE_LEVELS)
+              if isinstance(norm, LogNorm)
+              else np.linspace(0.0, RESIDUAL_VMAX, SURFACE_LEVELS))
+    ax.contourf(mesh_x, mesh_z, np.ma.masked_invalid(clipped), levels=levels,
+                zdir="z", offset=floor, cmap=CMAP, norm=norm)
+
+    _surface_pole(ax, summary.real_tx_x_center, summary.real_tx_z, floor, ceiling,
+                  marker="X", color="red", edgecolor="white", size=130,
+                  label="True TX location")
+    if summary.best is not None:
+        _surface_pole(ax, summary.best["x_center"], summary.best["z"], floor, ceiling,
+                      marker="*", color="lime", edgecolor="black", size=260,
+                      label=f"Best candidate (loss {summary.best['final_loss']:.4g})")
+
+    ax.set_zlim(floor, ceiling)
+    positions, labels = _surface_zticks(norm)
+    ax.set_zticks(positions)
+    ax.set_zticklabels(labels)
+    ax.set_xlabel("x_center (m)")
+    ax.set_ylabel("z (m)")
+    ax.set_zlabel("GS residual (inverted)")
+    return norm
+
+
+def _finish_surface(fig, ax, norm: Normalize, title: str) -> None:
+    """Title, colorbar, legend, footnote and viewpoint — shared by the still and the orbit.
+
+    layout="constrained" is deliberately NOT used on these figures: with a 3D axes plus
+    this colorbar it collapses the axes to zero size and warns.
+    """
+    ax.set_title(title)
+    fig.colorbar(ScalarMappable(norm=norm, cmap=CMAP), ax=ax, shrink=0.6, pad=0.10,
+                 label=RESIDUAL_LABEL)
+    ax.legend(loc="upper left")
+    fig.text(0.02, 0.015, "height = residual, inverted (higher = better fit); "
+                          "flat heatmap projected on the floor", fontsize=8, alpha=0.7)
+    ax.view_init(elev=SURFACE_VIEW[0], azim=SURFACE_VIEW[1])
+
+
+def _surface_placeholder(out_path: Path, title: str, message: str) -> None:
+    """Stand-in figure for a grid that cannot be a surface, so the file always exists.
+
+    Matches plot_residual_scatter's no-candidates behaviour: a run directory's plot set
+    should not depend on whether the sweep happened to be degenerate.
+    """
+    fig, ax = plt.subplots(figsize=(9, 6), layout="constrained")
+    ax.text(0.5, 0.5, message, ha="center", va="center", transform=ax.transAxes)
+    ax.set_axis_off()
+    ax.set_title(title)
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
+
+
+def _surface_unplottable(grid: np.ndarray) -> Optional[str]:
+    """Why this grid cannot be drawn as a surface, or None if it can."""
+    if not np.isfinite(grid).any():
+        return "no candidates"
+    if min(grid.shape) < 2:
+        return (f"grid is {grid.shape[0]}x{grid.shape[1]} — "
+                "a surface needs at least 2 points on each axis")
+    return None
+
+
+def plot_residual_surface(summary: ResidualSummary, out_path: Path,
+                          title: str = "Candidate residual surface over speculative TX locations",
+                          hc: bool = False) -> None:
+    """The residual heatmap as relief: the lower the residual, the higher the surface.
+
+    The flat heatmap saturates -- on a dense caustic sweep over half the cells sit
+    within 1% of the maximum -- so the depth of the basin, which is the thing the
+    search is actually measuring, is invisible there. Inverting it into height makes
+    the best fit a peak standing over the TX.
+
+    Same norms as plot_residual_heatmap, so the pair reads as one figure in two views:
+    the linear variant shows the shape of the whole basin, the hc variant resolves the
+    decades near the bottom of it into a single sharp summit.
+    """
+    reason = _surface_unplottable(summary.loss_grid)
+    if reason is not None:
+        _surface_placeholder(out_path, _hc_title(title, hc), reason)
+        return
+    fig = plt.figure(figsize=(11, 8))
+    ax = fig.add_subplot(projection="3d")
+    norm = _draw_surface(ax, summary, hc)
+    _finish_surface(fig, ax, norm, _hc_title(title, hc))
+    fig.savefig(out_path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+
+
+def animate_residual_surface(summary: ResidualSummary, log, out_path: Path, *,
+                             title: str = "Candidate residual surface over speculative TX locations",
+                             hc: bool = False) -> Optional[Path]:
+    """Orbit the residual surface through a full turn and write it as .mp4.
+
+    A still is fixed to one azimuth, and which azimuth reads best depends on where the
+    basin lands -- so this is the escape hatch when SURFACE_VIEW happens to hide the
+    peak behind a ridge for a given scenario. Returns None for a degenerate grid, which
+    has no surface to orbit.
+
+    `log` precedes `out_path` because _emit_pair supplies out_path and hc as KEYWORDS
+    and everything else positionally; putting out_path second would collide with it.
+    """
+    from matplotlib.animation import FuncAnimation
+
+    from rice_bend.data_store import write_mp4
+
+    if _surface_unplottable(summary.loss_grid) is not None:
+        return None
+    fig = plt.figure(figsize=(11, 8))
+    ax = fig.add_subplot(projection="3d")
+    norm = _draw_surface(ax, summary, hc)
+    _finish_surface(fig, ax, norm, _hc_title(title, hc))
+    # No bbox_inches="tight" on this path -- FFMpegWriter needs every frame the same
+    # size, and a tight box is recomputed per frame. Set the margins once instead.
+    fig.subplots_adjust(left=0.02, right=0.90, top=0.94, bottom=0.04)
+
+    elev, azim0 = SURFACE_VIEW
+
+    def _frame(i: int):
+        ax.view_init(elev=elev, azim=azim0 + i * 360.0 / SURFACE_ORBIT_FRAMES)
+        return ()
+
+    anim = FuncAnimation(fig, _frame, frames=SURFACE_ORBIT_FRAMES, blit=False)
+    return write_mp4(anim, fig, out_path, SURFACE_ORBIT_FPS, 120, False, log)
 
 
 def plot_residual_scatter(summary: ResidualSummary, out_path: Path, *,

@@ -86,7 +86,9 @@
       "residual_heatmap.png",
       "residual_heatmap_hc.png",
       "residual_scatter.png",
-      "residual_scatter_hc.png"
+      "residual_scatter_hc.png",
+      "residual_surface.png",
+      "residual_surface_hc.png"
     ],
     "grid_map": [
       [
@@ -163,7 +165,9 @@
         "residual_heatmap.png",
         "residual_heatmap_hc.png",
         "residual_scatter.png",
-        "residual_scatter_hc.png"
+        "residual_scatter_hc.png",
+        "residual_surface.png",
+        "residual_surface_hc.png"
       ],
       "grid_map": [
         [
@@ -236,6 +240,8 @@
       "freq_140GHz/residual_heatmap_vs_avg_hc.png",
       "freq_140GHz/residual_scatter.png",
       "freq_140GHz/residual_scatter_hc.png",
+      "freq_140GHz/residual_surface.png",
+      "freq_140GHz/residual_surface_hc.png",
       "freq_150GHz/candidate_beams.json",
       "freq_150GHz/config_snapshot.json",
       "freq_150GHz/config_source.yml",
@@ -246,12 +252,16 @@
       "freq_150GHz/residual_heatmap_vs_avg_hc.png",
       "freq_150GHz/residual_scatter.png",
       "freq_150GHz/residual_scatter_hc.png",
+      "freq_150GHz/residual_surface.png",
+      "freq_150GHz/residual_surface_hc.png",
       "frequencies.json",
       "residual_heatmap_avg.png",
       "residual_heatmap_avg_hc.png",
       "residual_scatter_3d.png",
       "residual_scatter_3d_diff.png",
-      "residual_scatter_3d_hc.png"
+      "residual_scatter_3d_hc.png",
+      "residual_surface_avg.png",
+      "residual_surface_avg_hc.png"
     ],
     "index": {
       "frequencies": [
@@ -285,7 +295,9 @@
           "residual_heatmap_vs_avg.png",
           "residual_heatmap_vs_avg_hc.png",
           "residual_scatter.png",
-          "residual_scatter_hc.png"
+          "residual_scatter_hc.png",
+          "residual_surface.png",
+          "residual_surface_hc.png"
         ],
         "freq_hz": 140000000000.0,
         "grid_map": [
@@ -360,7 +372,9 @@
           "residual_heatmap_vs_avg.png",
           "residual_heatmap_vs_avg_hc.png",
           "residual_scatter.png",
-          "residual_scatter_hc.png"
+          "residual_scatter_hc.png",
+          "residual_surface.png",
+          "residual_surface_hc.png"
         ],
         "freq_hz": 150000000000.0,
         "grid_map": [

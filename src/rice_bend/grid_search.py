@@ -2,7 +2,7 @@
 
 The work lives in three modules this one drives, and which never import each other:
   grid_sweep       -- enumerate the grid, solve, persist   (no matplotlib)
-  residual_plots   -- the residual grid and its five plots
+  residual_plots   -- the residual grid and its six plots
   candidate_scenes -- re-illuminated candidate beams, and the true-MGS baseline
 """
 
@@ -22,10 +22,12 @@ from rice_bend.data_store import check_run_dir, make_run_dir
 from rice_bend.grid_sweep import (GridSearchRun, _freq_dir_name, _resolve_frequencies,
                                   enumerate_grid, grid_summary, load_frequencies_index,
                                   run_grid_search, save_grid_run, write_frequencies_index)
-from rice_bend.residual_plots import (ResidualSummary, average_summary,
-                                      plot_residual_freq_vs_avg, plot_residual_heatmap,
-                                      plot_residual_scatter, plot_residual_scatter_3d,
-                                      plot_residual_scatter_3d_diff, summary_from_manifest,
+from rice_bend.residual_plots import (ResidualSummary, animate_residual_surface,
+                                      average_summary, plot_residual_freq_vs_avg,
+                                      plot_residual_heatmap, plot_residual_scatter,
+                                      plot_residual_scatter_3d,
+                                      plot_residual_scatter_3d_diff,
+                                      plot_residual_surface, summary_from_manifest,
                                       summary_from_run)
 
 def _emit_pair(plot, out_path: Path, *args, **kwargs) -> Path:
@@ -54,14 +56,47 @@ def _emit_scatters(summary: ResidualSummary, out_dir: Path, log) -> None:
     log.info(f"Wrote residual scatter (+hc) to {out}")
 
 
+def _emit_surfaces(summary: ResidualSummary, out_dir: Path, args, log) -> None:
+    """Write the residual surface plus its high-contrast twin, and optionally the orbit.
+
+    The stills are manifest-only and as cheap as the heatmaps, so they always run. The
+    orbit mp4 is opt-in for two reasons: write_mp4 raises when ffmpeg is missing, so an
+    unconditional video would make the whole command unrunnable on a box without it;
+    and at ~12 s each (measured, 48x48 grid), one per variant per frequency directory
+    is ~4 min added to a 10-frequency run -- and to every --replot of it, which
+    otherwise finishes in seconds.
+    """
+    out = _emit_pair(plot_residual_surface, out_dir / "residual_surface.png", summary)
+    log.info(f"Wrote residual surface (+hc) to {out}")
+    if args.surface_anim:
+        orbit = _emit_pair(animate_residual_surface,
+                           out_dir / "residual_surface_orbit.mp4", summary, log)
+        # a degenerate grid has no surface to rotate, so animate_ returns without
+        # writing; say that rather than claiming a file that is not there.
+        if orbit.exists():
+            log.info(f"Wrote residual-surface orbit (+hc) to {orbit}")
+        else:
+            log.info(f"No residual-surface orbit for {out_dir}: grid is "
+                     f"{summary.loss_grid.shape[0]}x{summary.loss_grid.shape[1]}")
+
+
 def _emit_multifreq_plots(summaries: List[Tuple[float, ResidualSummary]],
-                          base_dir: Path, log) -> None:
+                          base_dir: Path, args, log) -> None:
     """Top-level plots for a multi-frequency run: the frequency-averaged residual
-    heatmap and the 3D residual scatter, each with a high-contrast (log-scale) twin."""
+    heatmap and surface and the 3D residual scatter, each with a high-contrast
+    (log-scale) twin."""
     avg = average_summary(summaries)
     avg_out = _emit_pair(plot_residual_heatmap, base_dir / "residual_heatmap_avg.png",
                          avg, title="Average residual across frequencies")
     log.info(f"Wrote frequency-averaged residual heatmap (+hc) to {avg_out}")
+    avg_surf = _emit_pair(plot_residual_surface, base_dir / "residual_surface_avg.png",
+                          avg, title="Average residual surface across frequencies")
+    log.info(f"Wrote frequency-averaged residual surface (+hc) to {avg_surf}")
+    if args.surface_anim:
+        avg_orbit = _emit_pair(animate_residual_surface,
+                               base_dir / "residual_surface_avg_orbit.mp4", avg, log,
+                               title="Average residual surface across frequencies")
+        log.info(f"Wrote frequency-averaged residual-surface orbit (+hc) to {avg_orbit}")
     out3d = _emit_pair(plot_residual_scatter_3d,
                        base_dir / "residual_scatter_3d.png", summaries)
     log.info(f"Wrote 3D residual scatter (+hc) to {out3d}")
@@ -127,6 +162,7 @@ def _emit_run_plots(summary: ResidualSummary, out_dir: Path, args, log, make_ctx
     """
     _emit_heatmaps(summary, out_dir, log)
     _emit_scatters(summary, out_dir, log)
+    _emit_surfaces(summary, out_dir, args, log)
     if args.true_mgs:
         # baseline MGS run at the KNOWN TX location: one full solve per run dir
         make_true_mgs_plot(out_dir, log=log)
@@ -211,6 +247,10 @@ def _parse_args():
                              f"(--anim defaults to {ANIM_TOP_DEFAULT})")
     parser.add_argument("--anim", action="store_true",
                         help="Animate the candidate beams to candidate_beams.mp4 (ffmpeg)")
+    parser.add_argument("--surface-anim", action="store_true",
+                        help="Also orbit each residual surface into "
+                             "residual_surface_orbit.mp4 (+hc) -- the way past a "
+                             "viewing angle that hides the peak (ffmpeg)")
     parser.add_argument("--debug", action="store_true", help="Enable debug logs")
     return parser.parse_args()
 
@@ -228,7 +268,7 @@ def main():
         # multi-frequency: every per-frequency subdir, then the top-level plots
         summaries = [(float(e["freq_hz"]), _replot_one_dir(base / e["dir"], args, log))
                      for e in freq_index["frequencies"]]
-        _emit_multifreq_plots(summaries, base, log)
+        _emit_multifreq_plots(summaries, base, args, log)
         return
 
     config = load_config(args.config)
@@ -290,7 +330,7 @@ def main():
         summaries.append((freq, summary))
         real_x, real_z = summary.real_tx_x_center, summary.real_tx_z
     write_frequencies_index(_get_base(), entries, real_z, real_x)
-    _emit_multifreq_plots(summaries, _get_base(), log)
+    _emit_multifreq_plots(summaries, _get_base(), args, log)
 
 
 if __name__ == "__main__":
