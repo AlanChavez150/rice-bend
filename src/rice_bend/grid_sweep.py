@@ -35,7 +35,10 @@ _BOUNDS_TOL = 1e-9
 
 @dataclass
 class GridPoint:
-    """One speculative TX location. `skip_reason` is None when the point is usable."""
+    """One speculative TX location. `skip_reason` is None when the point is usable
+    — meaning valid at AT LEAST ONE of the requested frequencies. `freq_ok` (set
+    for every geometrically-valid point) says which: freq_ok[i] is whether the RS
+    sampling check passes at wavelengths[i], in enumerate_grid's wavelength order."""
     index: int
     z: float
     x_center: float
@@ -43,6 +46,7 @@ class GridPoint:
     x_max: float
     dx: float
     skip_reason: Optional[str] = None
+    freq_ok: Optional[List[bool]] = None
 
     @property
     def ok(self) -> bool:
@@ -50,12 +54,16 @@ class GridPoint:
 
 
 def enumerate_grid(grid_cfg: GridSearchConfig, scene_cfg: SimSceneConfig,
-                   wavelength: float) -> List[GridPoint]:
+                   wavelengths: List[float]) -> List[GridPoint]:
     """Enumerate the (z, x_center) grid, flagging out-of-bounds / undersampled points.
 
     A point is skipped (skip_reason set) when its assumed aperture window leaves
     the scene laterally, when z falls outside (z_min, z_max], or when the TX plane
-    is so close to the RX plane (z_min) that rs() would reject the sampling.
+    is so close to the RX plane (z_min) that rs() would reject the sampling at
+    EVERY requested frequency. The RS check is per-frequency (shorter wavelengths
+    are stricter, so high frequencies drop out first as z approaches the RX
+    plane); a point valid at only a subset stays usable, with the subset recorded
+    in `freq_ok` so the joint solve runs over exactly those frequencies.
     """
     half = grid_cfg.aperture.width / 2.0
     dx = grid_cfg.aperture.dx
@@ -65,23 +73,34 @@ def enumerate_grid(grid_cfg: GridSearchConfig, scene_cfg: SimSceneConfig,
     points: List[GridPoint] = []
     index = 0
     for z in grid_cfg.z.values():
+        # sampling quality depends only on (z, wavelength) given the shared scene
+        # x-axis, so it is one row per z plane, not one call per grid point
+        qualities = [rs.sampling_quality(x_axis, rx_plane, wl, z_src=z, forward_dir=-1.0)
+                     for wl in wavelengths]
+        freq_ok_row = [q >= 1.0 for q in qualities]
         for x_center in grid_cfg.x_center.values():
             x_min = x_center - half
             x_max = x_center + half
             reason: Optional[str] = None
+            freq_ok: Optional[List[bool]] = None
             if x_min < scene_cfg.x_min - _BOUNDS_TOL or x_max > scene_cfg.x_max + _BOUNDS_TOL:
                 reason = (f"aperture window [{x_min:.3f}, {x_max:.3f}] leaves scene x "
                           f"[{scene_cfg.x_min}, {scene_cfg.x_max}]")
             elif z <= scene_cfg.z_min or z > scene_cfg.z_max + _BOUNDS_TOL:
                 reason = f"z {z:.3f} outside scene z ({scene_cfg.z_min}, {scene_cfg.z_max}]"
             else:
-                quality = rs.sampling_quality(x_axis, rx_plane, wavelength,
-                                              z_src=z, forward_dir=-1.0)
-                if quality < 1.0:
-                    reason = (f"z {z:.3f} too close to RX: RS undersampled "
-                              f"(quality {quality:.3f} < 1)")
+                freq_ok = list(freq_ok_row)
+                if not any(freq_ok):
+                    if len(wavelengths) == 1:
+                        reason = (f"z {z:.3f} too close to RX: RS undersampled "
+                                  f"(quality {qualities[0]:.3f} < 1)")
+                    else:
+                        reason = (f"z {z:.3f} too close to RX: RS undersampled at all "
+                                  f"{len(wavelengths)} frequencies "
+                                  f"(best quality {max(qualities):.3f} < 1)")
             points.append(GridPoint(index, float(z), float(x_center),
-                                    float(x_min), float(x_max), float(dx), reason))
+                                    float(x_min), float(x_max), float(dx), reason,
+                                    freq_ok))
             index += 1
     return points
 
@@ -226,7 +245,7 @@ def run_grid_search(config: SimConfig, freq: float, *, limit: Optional[int] = No
     # 3. enumerate + report
     wavelength = mgs.wavelength
     scene_cfg = config.sim_scene
-    points = enumerate_grid(grid_cfg, scene_cfg, wavelength)
+    points = enumerate_grid(grid_cfg, scene_cfg, [wavelength])
     usable = [p for p in points if p.ok]
     log.info(f"Grid search: {grid_summary(points)}")
     for p in points:

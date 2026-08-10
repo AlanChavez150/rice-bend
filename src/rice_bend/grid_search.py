@@ -189,20 +189,29 @@ def _persist_and_plot(run: GridSearchRun, out_dir: Path, config: SimConfig,
 
 
 def _dry_run(config: SimConfig, freqs: List[float], log) -> None:
-    """Enumerate the grid and print it, without running any MGS."""
-    # the enumeration depends on frequency only through the RS-undersampling check
-    if len(freqs) > 1:
-        log.info(f"Dry run: enumerating grid at {freqs[0] / 1e9:g} GHz "
-                 f"(of {len(freqs)} frequencies)")
-    points = enumerate_grid(config.grid_search, config.sim_scene, rs.wavelength(freqs[0]))
+    """Enumerate the grid and print it, without running any MGS.
+
+    The enumeration depends on frequency only through the per-frequency
+    RS-undersampling check, so a multi-frequency dry run reports which points
+    are only partially valid and how many points each frequency keeps.
+    """
+    n_f = len(freqs)
+    points = enumerate_grid(config.grid_search, config.sim_scene,
+                            [rs.wavelength(f) for f in freqs])
     log.info(grid_summary(points))
     for p in points:
         if p.ok:
+            partial = ("" if p.freq_ok is None or all(p.freq_ok)
+                       else f"  [valid at {sum(p.freq_ok)}/{n_f} frequencies]")
             log.info(f"  #{p.index:4d} z={p.z:.3f} x_center={p.x_center:+.3f} "
-                     f"window [{p.x_min:.3f}, {p.x_max:.3f}]")
+                     f"window [{p.x_min:.3f}, {p.x_max:.3f}]{partial}")
         else:
             log.warning(f"  #{p.index:4d} z={p.z:.3f} x_center={p.x_center:+.3f} "
                         f"SKIP: {p.skip_reason}")
+    if n_f > 1:
+        for i, f in enumerate(freqs):
+            n_ok = sum(1 for p in points if p.freq_ok is not None and p.freq_ok[i])
+            log.info(f"  {f / 1e9:g} GHz: usable at {n_ok}/{len(points)} grid point(s)")
 
 
 def _parse_args():
