@@ -1,6 +1,32 @@
 # Decision: N(eps) as the information metric for RX aperture capture
 
-**Status:** adopted (2026-08-09).
+**Status:** adopted (2026-08-09). **Implemented (noiseless variant, same date):**
+`src/rice_bend/analysis.py` computes `N_E(eps)` into every grid run's
+analysis.json, and `mgs-study` plots it against localization error / ROI mean
+residual (`study_metrics_vs_ndof.png`).
+
+## Implemented variant: N_E(eps), no noise model
+
+The definition below thresholds against a receiver noise floor `sigma_n`. The
+project direction is to model NO receiver noise and drive the count purely by
+how much energy the RX window captures, so the implemented threshold replaces
+the noise floor with the channel's own capacity:
+
+```
+a_k = sigma_k * |c_k|                       received mode amplitudes
+N_E(eps) = #{ k : a_k >= eps * sigma_1 * ||u0[support]|| },   eps = 0.1
+```
+
+i.e. count the modes received within eps of the largest amplitude THIS geometry
+could deliver from THIS beam power (sigma_1 * ||u0||). A beam walking off the
+window collapses every a_k against that fixed per-run reference, so the count
+falls exactly as captured energy falls — with no noise parameter anywhere. As
+with N(eps), the accuracy convention is fixed project-wide at eps = 0.1 and
+recorded beside every value. Multi-frequency runs compute N_E per frequency and
+report the SUM (the multi-arc template of [4]: sufficiently separated
+observation arcs multiply the data-space dimension). The noise-referenced
+N(eps) of the original decision remains future work and would need the AWGN
+prerequisite in the Measurement protocol below.
 **Decision:** quantify the information the RX aperture captures with a single number,
 `N(eps)` — the number of modes of the TX->RX radiation operator that the transmitted
 beam excites above the receiver noise floor, at a stated retrieval accuracy
