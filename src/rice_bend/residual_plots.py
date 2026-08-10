@@ -68,7 +68,11 @@ def summary_from_run(run: GridSearchRun) -> ResidualSummary:
 
 
 def summary_from_manifest(run_dir: Path) -> ResidualSummary:
-    """Rebuild a ResidualSummary from a saved run's candidate_beams.json (no npz needed)."""
+    """Rebuild a ResidualSummary from a saved run's candidate_beams.json (no npz needed).
+
+    Works on both schemas: `final_loss` is the joint (mean-over-frequency)
+    residual in a schema-3 run and the single frequency's residual in a legacy
+    schema-2 run — either way it is THE residual that ranks candidates."""
     with open(Path(run_dir) / "candidate_beams.json") as f:
         manifest = json.load(f)
     spec = manifest["grid_spec"]
@@ -78,6 +82,46 @@ def summary_from_manifest(run_dir: Path) -> ResidualSummary:
     gt = manifest["ground_truth"]
     real_x_center = 0.5 * (gt["real_tx_x_min"] + gt["real_tx_x_max"])
     return _assemble_summary(zs, xs, cand, gt["real_tx_z"], real_x_center)
+
+
+def freq_summaries_from_manifest(run_dir: Path) -> List[Tuple[float, ResidualSummary]]:
+    """Per-frequency component summaries of a schema-3 joint run.
+
+    One ResidualSummary per frequency, built from each candidate's
+    per_freq_losses (a null component means the candidate failed that
+    frequency's RS sampling check, so its cell stays NaN and the plots mask it).
+    Returns [] for a schema-2 manifest, which carries no components.
+    """
+    with open(Path(run_dir) / "candidate_beams.json") as f:
+        manifest = json.load(f)
+    if "frequencies" not in manifest:
+        return []
+    spec = manifest["grid_spec"]
+    zs = AxisSweep(**spec["z"]).values()
+    xs = AxisSweep(**spec["x_center"]).values()
+    gt = manifest["ground_truth"]
+    real_x_center = 0.5 * (gt["real_tx_x_min"] + gt["real_tx_x_max"])
+    out: List[Tuple[float, ResidualSummary]] = []
+    for i, entry in enumerate(manifest["frequencies"]):
+        cand = [(c["index"], c["per_freq_losses"][i]) for c in manifest["candidates"]
+                if c["per_freq_losses"][i] is not None]
+        out.append((float(entry["freq_hz"]),
+                    _assemble_summary(zs, xs, cand, gt["real_tx_z"], real_x_center)))
+    return out
+
+
+def freq_summaries_from_run(run: GridSearchRun) -> List[Tuple[float, ResidualSummary]]:
+    """freq_summaries_from_manifest's in-memory twin (NaN components skipped)."""
+    zs = run.grid_cfg.z.values()
+    xs = run.grid_cfg.x_center.values()
+    real_x_center = 0.5 * (run.real_tx_x_min + run.real_tx_x_max)
+    out: List[Tuple[float, ResidualSummary]] = []
+    for i, freq in enumerate(run.freqs):
+        cand = [(c.point.index, float(c.per_freq_losses[i])) for c in run.candidates
+                if np.isfinite(c.per_freq_losses[i])]
+        out.append((float(freq),
+                    _assemble_summary(zs, xs, cand, run.real_tx_z, real_x_center)))
+    return out
 
 
 def _hc_norm(losses: np.ndarray) -> LogNorm:
@@ -557,45 +601,47 @@ def plot_residual_scatter_3d_diff(summaries: List[Tuple[float, ResidualSummary]]
                 footnote="dot size grows with deviation from the baseline")
 
 
-def plot_residual_freq_vs_avg(freq_hz: float, summary: ResidualSummary,
-                              avg: ResidualSummary, out_path: Path, *,
-                              hc: bool = False) -> None:
-    """One frequency's residual heatmap against the all-frequency average.
+def plot_residual_freq_vs_joint(freq_hz: float, summary: ResidualSummary,
+                                joint: ResidualSummary, out_path: Path, *,
+                                hc: bool = False) -> None:
+    """One frequency's residual component against the joint (mean) residual.
 
-    Three panels: this frequency, the average (shared scale), and their difference on
-    a symmetric scale — bright yellow where this frequency fits BETTER than the
-    average, dark purple where worse.
+    Three panels: this frequency's component, the joint residual the solver
+    actually minimized (shared scale), and their difference on a symmetric scale
+    — bright yellow where this frequency fits BETTER than the joint, dark purple
+    where worse. Cells where the frequency was invalid stay masked and
+    NaN-propagate through the difference.
     """
     f_ghz = freq_hz / 1e9
     fig, axes = plt.subplots(1, 3, figsize=(18, 5.5), layout="constrained")
     # one norm shared by both heatmap panels so they stay inter-comparable
-    norm = _residual_norm(np.stack([summary.loss_grid, avg.loss_grid]), hc)
+    norm = _residual_norm(np.stack([summary.loss_grid, joint.loss_grid]), hc)
 
     mesh = None
     for ax, s, sub_title in ((axes[0], summary, f"{f_ghz:g} GHz"),
-                             (axes[1], avg, "average across frequencies")):
-        mesh = _residual_mesh(ax, avg.x_values, avg.z_values, s.loss_grid, norm)
+                             (axes[1], joint, "joint (mean across frequencies)")):
+        mesh = _residual_mesh(ax, joint.x_values, joint.z_values, s.loss_grid, norm)
         ax.set_title(sub_title)
     fig.colorbar(mesh, ax=list(axes[:2]), label=RESIDUAL_LABEL, shrink=0.9)
 
-    diff = summary.loss_grid - avg.loss_grid
+    diff = summary.loss_grid - joint.loss_grid
     vlim = max(float(np.nanmax(np.abs(diff))) if np.isfinite(diff).any() else 1e-6, 1e-12)
     if hc:
         # symmetric log: two decades either side of a linear core, so small
-        # deviations from the average spread instead of washing out at teal
+        # deviations from the joint spread instead of washing out at teal
         dnorm = SymLogNorm(linthresh=vlim / 100.0, vmin=-vlim, vmax=vlim, base=10)
     else:
         dnorm = Normalize(vmin=-vlim, vmax=vlim)
-    dmesh = _residual_mesh(axes[2], avg.x_values, avg.z_values, diff, dnorm)
-    axes[2].set_title(f"difference ({f_ghz:g} GHz − average)")
+    dmesh = _residual_mesh(axes[2], joint.x_values, joint.z_values, diff, dnorm)
+    axes[2].set_title(f"difference ({f_ghz:g} GHz − joint)")
     fig.colorbar(dmesh, ax=axes[2],
-                 label="residual difference (yellow = better than average)", shrink=0.9)
+                 label="residual difference (yellow = better than joint)", shrink=0.9)
 
     for ax in axes:
-        _mark_true_tx(ax, avg, size=120)
+        _mark_true_tx(ax, joint, size=120)
         ax.set_xlabel("x_center (m)")
     axes[0].set_ylabel("z (m)")
     axes[0].legend(loc="upper right", framealpha=0.9)
-    fig.suptitle(_hc_title(f"Residual: {f_ghz:g} GHz vs. frequency average", hc))
+    fig.suptitle(_hc_title(f"Residual: {f_ghz:g} GHz vs. joint", hc))
     fig.savefig(out_path, dpi=120)
     plt.close(fig)
