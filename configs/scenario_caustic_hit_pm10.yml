@@ -1,0 +1,62 @@
+# Frequency-comparison case 3 of 3: three frequencies, center 150 GHz ±10%.
+# Compare against scenario_caustic_hit_1f.yml (single frequency) and
+# scenario_caustic_hit_pm5.yml (±5%): identical scene, grid, seed and GS settings —
+# the frequency list is the only variable across the three cases.
+#
+# Scenario: caustic beam HITS the RX aperture (big arc curves into the window).
+# RX window: centered x=0, width 0.04 m. RX at z=0; TX projects -Z. TX width 0.132 m,
+# height z=0.3. Verified (150 GHz): big-arc caustic (a=0.8): launches ~-0.10, curves
+# into the RX. beam_peak_x=+0.000, FWHM=0.030 -> HIT (centred in the ±0.02 m RX window)
+# Dense 48x48 grid_search (2304 candidate spots).
+
+sim_scene:
+  x_min: -0.3
+  x_max: 0.3
+  z_min: 0.0
+  z_max: 0.85
+  spacing: 0.00025
+
+tx_aperture:
+  x_min: -0.167
+  x_max: -0.035
+  z: 0.3
+  dx: 0.00025
+  beam:
+    type: caustic
+    trajectory: [0.8, 0.0, -0.065]   # x(d)=a*d^2+b*d+c; c offsets the beam laterally
+
+rx_aperture:
+  x_center: 0.0
+  width: 0.04
+  dx: null
+
+plot_path: scenario_caustic_hit_pm10.png
+
+# 150 GHz ±10%: ONE JOINT solve — a single phase mask fitted against all three
+# frequencies at once (loss = mean of the per-frequency losses).
+frequencies: [135.0e9, 150.0e9, 165.0e9]
+
+gerchberg_saxton:
+  max_iters: 800
+  convergence_count: 10
+  convergence_threshold: -1.0e-8
+  lr0: 0.05
+  bt_shrink: 0.5
+  bt_tries: 8
+  seed: 0
+  history_stride: 50
+
+output:
+  output_dir: results
+  run_name: scenario_caustic_hit_pm10
+  save_run: true
+  save_scene_fields: false
+  save_gs_history: false
+
+# Speculative TX-location sweep for grid-search-mgs (ignored by plain mgs).
+grid_search:
+  z:        {min: 0.15, max: 0.80, num: 48}
+  x_center: {min: -0.15, max: 0.15, num: 48}
+  aperture: {width: 0.10, dx: 0.00025}
+  seed: 0
+  gs_overrides: {max_iters: 800}
