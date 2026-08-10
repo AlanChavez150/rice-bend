@@ -107,6 +107,7 @@ class GSHistory:
 RUN_DIR_MARKERS = {
     "mgs": ("run.json",),
     "grid": ("candidate_beams.json", "frequencies.json"),
+    "study": ("study.json",),
 }
 
 
