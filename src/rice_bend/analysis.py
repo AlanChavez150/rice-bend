@@ -26,16 +26,19 @@ from typing import List, Optional, Sequence, TYPE_CHECKING
 import numpy as np
 from scipy import ndimage
 
+from rice_bend import rs
 from rice_bend.data_store import write_json
+from rice_bend.interp import interp_amplitude, interp_real_imag
 
 if TYPE_CHECKING:
     from rice_bend.grid_sweep import GridSearchRun
     from rice_bend.residual_plots import ResidualSummary
 
 ANALYSIS_NAME = "analysis.json"
-ANALYSIS_SCHEMA_VERSION = 1
+ANALYSIS_SCHEMA_VERSION = 2
 TOP_K = 10                 # candidates outlined solid red on the heatmaps
 ROI_LOSS_FACTOR = 10.0     # ROI = connected cells with loss <= factor * min
+N_DOF_EPS = 0.1            # the project-wide accuracy convention (see the docs)
 
 
 def _f(v) -> Optional[float]:
@@ -83,9 +86,87 @@ def _energy_dict(x_axis, rows, freqs, x_min, x_max) -> Optional[dict]:
             "mean_fraction": float(np.mean(fracs)) if fracs else None}
 
 
+def _n_dof_dict(scene_x_axis, tx_axis, tx_profiles, freqs, wavelengths,
+                tx_z, rx_z, rx_x_min, rx_x_max) -> Optional[dict]:
+    """N_E(eps): the NOISELESS mode count of docs/information_metric.md.
+
+    Per frequency, build the discrete radiation operator exactly as
+    gs_reconstruct applies it — column j = rs_apply(e_j, h_fwd, dx) for a unit
+    source at TX-support sample j, rows restricted to scene samples inside the
+    RX window — then SVD and couple the actual beam:
+
+        M = U S Vh;  c = Vh @ u0[support];  a_k = sigma_k * |c_k|
+        N_E(eps) = #{ k : a_k >= eps * sigma_1 * ||u0[support]|| }
+
+    The doc's threshold is sigma_n/eps — a receiver-noise floor. This variant is
+    deliberately noise-free (per project direction: no SNR modeling): the
+    absolute reference is the channel's own capacity, sigma_1*||u0|| — the
+    largest received amplitude THIS geometry could deliver from THIS beam power.
+    A beam walking off the window collapses every received mode amplitude a_k
+    against that fixed reference, so the count falls exactly as captured energy
+    falls, with no noise parameter anywhere.
+
+    Multi-frequency: computed per frequency and SUMMED — the multi-arc template
+    the doc cites (sufficiently separated observation arcs multiply the
+    data-space dimension).
+
+    TX profiles are cast to complex64 first so the save-time and replot-time
+    computations see bit-identical inputs (measurement.npz stores complex64).
+    None when any ingredient is unavailable (experimental captures, legacy runs).
+    """
+    if (tx_profiles is None or tx_axis is None or scene_x_axis is None
+            or not freqs or tx_z is None or rx_z is None
+            or rx_x_min is None or rx_x_max is None):
+        return None
+    x = np.asarray(scene_x_axis, dtype=float)
+    dx = x[1] - x[0]
+    window = np.where((x >= rx_x_min) & (x <= rx_x_max))[0]
+    if not len(window):
+        return None
+    per: List[dict] = []
+    total = 0
+    for f, wl, profile in zip(freqs, wavelengths, tx_profiles):
+        profile = np.asarray(profile, dtype=np.complex64)
+        amp = interp_amplitude(tx_axis, profile, x)
+        support = np.where(amp > 0)[0]
+        if not len(support):
+            per.append({"freq_hz": float(f), "n_dof": None})
+            continue
+        h_fwd = rs.rs_kernel(x, float(wl), -1.0 * (rx_z - tx_z))
+        cols = np.empty((len(window), len(support)), dtype=np.complex64)
+        e = np.zeros(len(x))
+        for k, j in enumerate(support):
+            e[j] = 1.0
+            cols[:, k] = rs.rs_apply(e, h_fwd, dx)[window]
+            e[j] = 0.0
+        sigma, vh = np.linalg.svd(cols, full_matrices=False)[1:]
+        u0 = interp_real_imag(tx_axis, profile, x)[support]
+        c = vh @ u0
+        a = sigma * np.abs(c)
+        threshold = N_DOF_EPS * float(sigma[0]) * float(np.linalg.norm(u0))
+        n = int((a >= threshold).sum())
+        total += n
+        per.append({
+            "freq_hz": float(f), "n_dof": n,
+            "n_support": int(len(support)), "n_window": int(len(window)),
+            "sigma_max": _f(sigma[0]),
+            "excitation_max": _f(a.max()) if len(a) else None,
+            "threshold": _f(threshold),
+        })
+    return {
+        "eps": N_DOF_EPS,
+        "definition": ("noiseless N_E(eps): modes with sigma_k*|c_k| >= "
+                       "eps*sigma_1*||u0[support]||, per frequency; total = sum "
+                       "(see docs/information_metric.md)"),
+        "tx_z_m": float(tx_z), "rx_z_m": float(rx_z),
+        "per_freq": per,
+        "total": total,
+    }
+
+
 def analyze_grid(z_values: Sequence[float], x_values: Sequence[float],
                  loss_grid: np.ndarray, real_tx_z: float, real_tx_x_center: float,
-                 energy: Optional[dict]) -> dict:
+                 energy: Optional[dict], n_dof: Optional[dict] = None) -> dict:
     """The analysis dict for one (nz, nx) joint-residual grid.
 
     Cells are addressed as (z_idx, x_idx) with candidate index = z_idx*nx + x_idx
@@ -112,6 +193,7 @@ def analyze_grid(z_values: Sequence[float], x_values: Sequence[float],
         "top_candidates": [],
         "roi": None,
         "energy": energy,
+        "n_dof": n_dof,
     }
     if n_finite == 0:
         return out
@@ -159,6 +241,7 @@ def analyze_grid(z_values: Sequence[float], x_values: Sequence[float],
     centroid_x = float(xs[cells[:, 1]].mean())
     out["roi"] = {
         "loss_min": _f(loss_min), "loss_cutoff": _f(cutoff),
+        "mean_loss": _f(grid[roi_mask].mean()),
         "n_cells": int(roi_mask.sum()),
         "cells": [[int(i), int(j)] for i, j in cells],
         "cell_size_z_m": csz, "cell_size_x_m": csx,
@@ -179,8 +262,12 @@ def analysis_from_run(run: "GridSearchRun", summary: "ResidualSummary") -> dict:
     """The analysis for an in-memory run (save-time path)."""
     energy = _energy_dict(run.scene_x_axis, run.rx_plane_rows, run.freqs,
                           run.rx_x_min, run.rx_x_max)
+    n_dof = _n_dof_dict(run.scene_x_axis, run.real_tx_aper_axis,
+                        run.real_tx_aper_profiles, run.freqs, run.wavelengths,
+                        run.real_tx_z, run.rx_z, run.rx_x_min, run.rx_x_max)
     return analyze_grid(summary.z_values, summary.x_values, summary.loss_grid,
-                        summary.real_tx_z, summary.real_tx_x_center, energy)
+                        summary.real_tx_z, summary.real_tx_x_center, energy,
+                        n_dof=n_dof)
 
 
 def analysis_from_manifest(run_dir: Path, summary: "ResidualSummary") -> dict:
@@ -194,17 +281,27 @@ def analysis_from_manifest(run_dir: Path, summary: "ResidualSummary") -> dict:
     with open(run_dir / "candidate_beams.json") as f:
         m = json.load(f)
     energy = None
+    n_dof = None
     freqs = m.get("frequencies")
     rx_win = m.get("rx_aperture")
     meas_path = run_dir / "measurement.npz"
     if freqs and rx_win and meas_path.exists():
+        freq_hz = [e["freq_hz"] for e in freqs]
         with np.load(meas_path) as z:
             if "rx_plane_row" in z.files:
                 energy = _energy_dict(z["scene_x_axis"], z["rx_plane_row"],
-                                      [e["freq_hz"] for e in freqs],
-                                      rx_win["x_min"], rx_win["x_max"])
+                                      freq_hz, rx_win["x_min"], rx_win["x_max"])
+            if ("real_tx_aper_profile" in z.files and rx_win.get("z") is not None
+                    and np.asarray(z["real_tx_aper_profile"]).ndim == 2):
+                n_dof = _n_dof_dict(
+                    z["scene_x_axis"], z["real_tx_aper_axis"],
+                    z["real_tx_aper_profile"], freq_hz,
+                    [e["wavelength_m"] for e in freqs],
+                    m["ground_truth"]["real_tx_z"], rx_win["z"],
+                    rx_win["x_min"], rx_win["x_max"])
     return analyze_grid(summary.z_values, summary.x_values, summary.loss_grid,
-                        summary.real_tx_z, summary.real_tx_x_center, energy)
+                        summary.real_tx_z, summary.real_tx_x_center, energy,
+                        n_dof=n_dof)
 
 
 def write_analysis(run_dir: Path, analysis: dict) -> Path:

@@ -228,6 +228,7 @@ class GridSearchRun:
     #   (None when not synthesized) — the energy metric's numerator+denominator
     rx_x_min: float                  # the RX window (frequency-independent)
     rx_x_max: float
+    rx_z: float                      # the RX/measurement plane
     rx_aper_axes: List[np.ndarray]   # ragged: per-frequency element axes
     rx_aper_profiles: List[np.ndarray]
     # ground truth, for later evaluation of how well candidates localize the TX
@@ -347,6 +348,7 @@ def run_grid_search(config: SimConfig, freqs: List[float], *, limit: Optional[in
                        else None),
         rx_x_min=float(mgs.scene.rx_ap.x_min),
         rx_x_max=float(mgs.scene.rx_ap.x_max),
+        rx_z=float(mgs.scene.rx_ap.z),
         rx_aper_axes=[fs.rx_ap.aper_axis.copy() for fs in mgs.freq_states],
         rx_aper_profiles=[fs.rx_ap.aper_profile.copy() for fs in mgs.freq_states],
         real_tx_aper_axis=mgs.scene.tx_ap.aper_axis.copy(),
@@ -472,7 +474,7 @@ def save_grid_run(run: GridSearchRun, run_dir: Path, config: SimConfig,
         "scene_bounds": {"x_min": run.scene_bounds[0], "x_max": run.scene_bounds[1],
                          "z_min": run.scene_bounds[2], "z_max": run.scene_bounds[3]},
         "ground_truth": ground_truth,
-        "rx_aperture": {"x_min": run.rx_x_min, "x_max": run.rx_x_max},
+        "rx_aperture": {"x_min": run.rx_x_min, "x_max": run.rx_x_max, "z": run.rx_z},
         "gs": {"effective_max_iters": run.effective_max_iters, "loss_combine": "mean",
                "init": run.init, "ref_freq_hz": run.ref_freq},
         "provenance": provenance(args_dict),

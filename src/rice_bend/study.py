@@ -111,6 +111,7 @@ def _record(study: StudyDef, value: float, point_name: str, analysis: dict,
     energy = analysis.get("energy") or {}
     mean_frac = energy.get("mean_fraction")
     roi = analysis.get("roi") or {}
+    n_dof = analysis.get("n_dof") or {}
     rec = {
         "point": point_name,
         "param_value": float(value),
@@ -121,9 +122,13 @@ def _record(study: StudyDef, value: float, point_name: str, analysis: dict,
         "argmin": ({"z": argmin["z"], "x_center": argmin["x_center"],
                     "final_loss": argmin["final_loss"]} if argmin else None),
         "roi": ({"n_cells": roi.get("n_cells"), "area_m2": roi.get("area_m2"),
+                 "mean_loss": roi.get("mean_loss"),
                  "centroid_dist_to_truth_m": roi.get("centroid_dist_to_truth_m")}
                 if roi else None),
         "energy_pct": 100.0 * mean_frac if mean_frac is not None else None,
+        "n_dof_total": n_dof.get("total"),
+        "n_dof_per_freq": ([p.get("n_dof") for p in n_dof.get("per_freq", [])]
+                           if n_dof else None),
     }
     rec["x_value"] = rec["energy_pct"] if study.x_axis == "energy_pct" else rec["param_value"]
     return rec
@@ -286,6 +291,45 @@ def _plot_study(study: StudyDef, records: List[dict], out_path: Path, log) -> No
     log.info(f"Wrote study plot to {out_path}")
 
 
+def _plot_ndof(study: StudyDef, records: List[dict], out_path: Path, log) -> None:
+    """N_E(eps) on the x-axis against two success metrics: the localization
+    error and the ROI mean residual. This is the information-metric view (see
+    docs/information_metric.md): whatever knob the study turned, points with the
+    same mode count should behave alike."""
+    import matplotlib.pyplot as plt
+
+    pts = [r for r in records if r.get("n_dof_total") is not None]
+    fig, (ax_err, ax_roi) = plt.subplots(1, 2, figsize=(13, 5.5), layout="constrained")
+    if pts:
+        xs = [r["n_dof_total"] for r in pts]
+        for ax, key, ylabel in (
+                (ax_err, "error_mm", "localization error, argmin to true TX (mm)"),
+                (ax_roi, ("roi", "mean_loss"), "ROI mean joint residual")):
+            if isinstance(key, tuple):
+                ys = [(r.get(key[0]) or {}).get(key[1]) for r in pts]
+            else:
+                ys = [r.get(key) for r in pts]
+            keep = [(x, y, r) for x, y, r in zip(xs, ys, pts) if y is not None]
+            if keep:
+                ax.scatter([k[0] for k in keep], [k[1] for k in keep],
+                           s=45, color="C0", zorder=3)
+                for x, y, r in keep:
+                    ax.annotate(f"{r['param_value']:g}", (x, y),
+                                textcoords="offset points", xytext=(6, 6),
+                                fontsize=8, alpha=0.8)
+            ax.set_xlabel(f"N_E(eps=0.1), summed over the comb")
+            ax.set_ylabel(ylabel)
+            ax.grid(True, alpha=0.3)
+    else:
+        ax_err.text(0.5, 0.5, "no n_dof-measurable points", ha="center", va="center",
+                    transform=ax_err.transAxes)
+    fig.suptitle(f"{study.name} study — information metric view "
+                 f"(points labelled by {study.param_name})")
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
+    log.info(f"Wrote n_dof plot to {out_path}")
+
+
 def _replot_study(root: Path, args, log) -> None:
     """Rebuild study.json + the study plot from the per-point run dirs (each
     point's analysis is recomputed; nothing is re-solved)."""
@@ -306,6 +350,7 @@ def _replot_study(root: Path, args, log) -> None:
     _write_study_json(root, study, data.get("base_config", "?"), records,
                       status="complete" if complete else "partial")
     _plot_study(study, records, root / study.plot_name, log)
+    _plot_ndof(study, records, root / "study_metrics_vs_ndof.png", log)
 
 
 def _parse_args():
@@ -364,6 +409,7 @@ def main():
 
     _write_study_json(root, study, args.config, records, status="complete")
     _plot_study(study, records, root / study.plot_name, log)
+    _plot_ndof(study, records, root / "study_metrics_vs_ndof.png", log)
     n_ok = sum(1 for r in records if r.get("error_mm") is not None)
     log.info(f"Study '{study.name}' complete: {n_ok}/{len(records)} measurable "
              f"point(s) -> {root}")
