@@ -31,13 +31,12 @@ mgs --debug                                      # verbose logging
 
 With more than one frequency (several `--freq` values, or a `frequencies:` list in
 the config — the CLI overrides it) `mgs` runs **one joint solve**: a single shared
-aperture profile fitted against every frequency's measurement at once, the loss
-being the mean of the per-frequency losses. What "shared" means is set by
-`gerchberg_saxton.phase_model` (see the phase-model section below); the default,
-`delay`, models a physical plate. A single frequency is just the length-1 case of
-the same path, identical under either model. The scene panels render at the
-primary (first) frequency; `run.json` records the joint `final_loss` plus
-`final_loss_per_freq` and, for the delay model, `gs_result.ref_freq_hz`.
+aperture profile — a delay plate whose phase scales with frequency (see the
+physical-model section below) — fitted against every frequency's measurement at
+once, the loss being the mean of the per-frequency losses. A single frequency is
+just the length-1 case of the same path. The scene panels render at the primary
+(first) frequency; `run.json` records the joint `final_loss` plus
+`final_loss_per_freq` and `gs_result.ref_freq_hz`.
 
 Two general configs ship in `configs/`: `caustic_config.yml` (an accelerating
 "caustic" beam — the `mgs` default) and `directional_config.yml` (a steered
@@ -208,53 +207,39 @@ losses**. The measurement set is still per-frequency: each frequency synthesizes
 RX field with its own TX beam phase (∝ wavenumber) and its own RX element count when
 `rx_aperture.dx` is null (λ/20 spacing).
 
-##### Phase model: plate or mask
+##### The physical model
 
-`gerchberg_saxton.phase_model` sets what "one shared profile" means physically:
+The solver reconstructs a *plate with one shape*: the unknown ψ(x) is the aperture's
+delay/optical-path profile, expressed as phase at a reference frequency, and each
+frequency's phase is `(f / f_ref) · ψ(x)` — the way a real plate's phase scales with
+wavenumber. Both simulated beam types are exactly this kind of source (the caustic plate
+and the steered ramp both bake the wavenumber into their phase), so the true TX can fit
+every frequency simultaneously and extra bandwidth adds constraint. It also resolves the
+single-frequency 2π ambiguity: only the true delay is consistent with every frequency at
+once (the multi-wavelength interferometry effect). The reference frequency is the
+centre-by-value of the run's frequency list — the same convention as the scene views and
+the 3D-diff baseline — and is recorded as `ref_freq_hz` (manifest `gs` block /
+`run.json` `gs_result`). Every candidate in a sweep shares the run-level reference,
+including candidates solved on a valid-subset of frequencies, so their profiles stay in
+the same units. The stored reconstruction (`aper_profile`, `gs_tx_aper_profile`) is the
+aperture *field at the reference frequency*; `mgs-animate --freq-index` rescales it to
+show the phase the plate presents at any selected frequency, and candidate scene renders
+are exact at the default centre-frequency view (the usual monochromatic approximation at
+other `--scene-freq` choices).
 
-- **`delay`** (the default) reconstructs a *plate with one shape*: the unknown ψ(x) is the
-  aperture's delay/optical-path profile, expressed as phase at a reference frequency, and
-  each frequency's phase is `(f / f_ref) · ψ(x)` — the way a real plate's phase scales
-  with wavenumber. Both simulated beam types are exactly this kind of source (the caustic
-  plate and the steered ramp both bake the wavenumber into their phase), so under this
-  model the true TX can fit every frequency simultaneously, and extra bandwidth adds
-  constraint instead of model error. It also resolves the single-frequency 2π ambiguity:
-  only the true delay is consistent with every frequency at once (the multi-wavelength
-  interferometry effect). The reference frequency is the centre-by-value of the run's
-  frequency list — the same convention as the scene views and the 3D-diff baseline — and
-  is recorded as `ref_freq_hz` (manifest `gs` block / `run.json` `gs_result`). Every
-  candidate in a sweep shares the run-level reference, including candidates solved on a
-  valid-subset of frequencies, so their profiles stay in the same units. The stored
-  reconstruction (`aper_profile`, `gs_tx_aper_profile`) is the aperture *field at the
-  reference frequency*; `mgs-animate --freq-index` rescales it to show the phase the
-  plate presents at any selected frequency.
-- **`achromatic`** reconstructs a *mask with one phase*: the identical phase profile is
-  imposed at every frequency (all forward operators act on the same aperture field). Use
-  it when the source really is achromatic, or when designing one broadband mask. Note the
-  model-mismatch consequence for plate-like sources: at F>1 the loss floor rises with
-  bandwidth even at the true TX, and the residual minimum can drift off it.
-
-At a single frequency the two models are the same solve (the frequency ratio is exactly
-1), so `phase_model` only matters for multi-frequency runs. `--replot --true-mgs` pins
-the baseline's model to what the sweep actually ran (recorded in the manifest; absent in
-older manifests means achromatic, which is what they were), so regenerated baselines stay
-consistent with their residuals. Candidate scene renders re-illuminate the stored
-reference-frequency field, so under the delay model they are exact at the default
-centre-frequency view and the usual monochromatic approximation at other `--scene-freq`
-choices.
-
-**Initialization** (`gerchberg_saxton.init`): the delay model must recover the profile in
-an *absolute* sense — the 2π degeneracy that makes single-frequency retrieval easy is
-exactly what it breaks — and plain gradient descent from a random start gets stuck in a
-wrong basin (measured: ~100× above the reachable floor). The default, `warm_start`, runs
-the multi-wavelength initialization inside every solve: the channel nearest the reference
-frequency is solved alone (its degenerate landscape is easy — that recovers the SHAPE),
-the result is unwrapped over the support (collapsing the ambiguity to one scalar), and
-that absolute offset is scanned over one synthetic-wavelength period of the comb
-(`2π·f_ref/Δf_min`) against the joint loss before the joint descent starts. Propagation
-linearity makes the scan essentially free; the reference solve adds ~1/F to the runtime.
-`init: random` restores the plain seeded start. Both are no-ops at a single frequency.
-Full derivation and the measurements behind it: `docs/delay_model_warm_start.md`.
+**Initialization** (`gerchberg_saxton.init`): the solve must recover the profile in an
+*absolute* sense — the 2π degeneracy that makes single-frequency retrieval easy is
+exactly what the multi-frequency constraint breaks — and plain gradient descent from a
+random start gets stuck in a wrong basin (measured: ~100× above the reachable floor).
+The default, `warm_start`, runs the multi-wavelength initialization inside every solve:
+the channel nearest the reference frequency is solved alone (its degenerate landscape is
+easy — that recovers the SHAPE), the result is unwrapped over the support (collapsing
+the ambiguity to one scalar), and that absolute offset is scanned over one
+synthetic-wavelength period of the comb (`2π·f_ref/Δf_min`) against the joint loss
+before the joint descent starts. Propagation linearity makes the scan essentially free;
+the reference solve adds ~1/F to the runtime. `init: random` restores the plain seeded
+start. Both are no-ops at a single frequency. Full derivation and the measurements
+behind it: `docs/delay_model_warm_start.md`.
 
 A candidate too close to the RX plane may fail the Rayleigh-Sommerfeld sampling check at
 the highest frequencies while passing at lower ones; such a candidate is solved jointly
@@ -319,9 +304,9 @@ mgs-animate --fps 20 --show
 
 On a joint multi-frequency run, `--freq-index` (an index into `run.json`'s
 `frequencies_hz`, default 0) picks the scene-mode wavelength and the phase-mode
-Real-TX overlay — the reconstructed mask is achromatic, but the real plate's phase
-scales with the wavenumber, so the overlay is one frequency's view and is labelled
-with it. The loss panel always shows the joint curve.
+Real-TX overlay, and rescales the captured plate profile to the phase it presents
+at that frequency — so the estimate and the overlay are compared at the same
+frequency, labelled with it. The loss panel always shows the joint curve.
 
 How many frames each mode renders:
 
