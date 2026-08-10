@@ -95,15 +95,14 @@ def _pick_freq(n_avail: int, freq_index: int) -> int:
 def _phase_display_scale(meta: dict, freq_index: int) -> float:
     """How to turn the captured psi into the phase AT the selected frequency.
 
-    Under the delay phase model the solver's unknown is the delay expressed as
-    phase at gs_result.ref_freq_hz, so the phase this plate presents at frequency
-    f is (f/ref)*psi. Under the achromatic model (including every run saved
-    before phase_model existed) psi IS the phase at all frequencies: scale 1.
+    The solver's unknown is the plate's delay profile expressed as phase at
+    gs_result.ref_freq_hz, so the phase the plate presents at frequency f is
+    (f/ref)*psi. Runs saved before ref_freq_hz existed (schema 2) carry a plain
+    per-frequency phase: scale 1.
     """
-    model = meta.get("gerchberg_saxton", {}).get("phase_model", "achromatic")
     freqs = meta.get("frequencies_hz")
     ref = (meta.get("gs_result") or {}).get("ref_freq_hz")
-    if model != "delay" or not freqs or not ref:
+    if not freqs or not ref:
         return 1.0
     return float(freqs[_pick_freq(len(freqs), freq_index)]) / float(ref)
 
@@ -145,9 +144,9 @@ def animate_tx_estimate(run_dir: Path, out_path: Path, fps: int = 15,
     # precompute all frames so the phase axis can be scaled once (stable across frames)
     all_phase = np.array([frame_phase(k) for k in range(n_frames)])
 
-    # optional real TX reference (sim runs only). The reconstructed mask is
-    # achromatic, but the real TX phase plate is per-frequency (phase ∝ k), so at
-    # F > 1 the overlay is one frequency's view — labelled as such.
+    # optional real TX reference (sim runs only). The real TX phase plate presents
+    # a different phase at each frequency (phase ∝ k), so at F > 1 the overlay is
+    # one frequency's view — labelled as such.
     ref_phase = None
     ref_label = "Real TX (global-phase aligned)"
     if not meta.get("is_experimental", False) and "tx_real_aper_axis" in z.files:

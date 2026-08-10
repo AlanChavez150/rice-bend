@@ -77,8 +77,8 @@ def _warm_start_phase(tx_z, orig_aper_amp, x_axis, rx_z, channels, params, seed,
 
     # 3. the absolute-offset scan. Adding delta multiplies channel f's field by
     # exp(1j*rho_f*delta); the joint loss is periodic in delta with the comb's
-    # synthetic wavelength 2π·f_ref/Δf_min (2π when all rho are 1 — the achromatic
-    # case, where this reduces to a global-phase search).
+    # synthetic wavelength 2π·f_ref/Δf_min (the 2π fallback is defensive only —
+    # the warm start requires F > 1 and frequencies are validated unique).
     freqs = np.sort(np.array([ch.freq for ch in channels]))
     gaps = np.diff(freqs)
     gaps = gaps[gaps > 0]
@@ -117,14 +117,14 @@ def _warm_start_phase(tx_z, orig_aper_amp, x_axis, rx_z, channels, params, seed,
 
 
 # Result of one solver run. `curr_aper_f` is the reconstructed complex aperture on the
-# math (scene) x-axis (the field at `ref_freq` under the delay model); `history` is a
-# GSHistory when capture=True, else None. `final_loss`/`loss_full` are the joint
+# math (scene) x-axis — the field at `ref_freq`; `history` is a GSHistory when
+# capture=True, else None. `final_loss`/`loss_full` are the joint
 # (mean-over-frequency) numbers; the `*_per_freq` twins carry each frequency's
 # component, aligned with `frequencies` (the input channel order).
 GSResult = namedtuple(
     "GSResult",
     "curr_aper_f final_loss final_loss_per_freq n_iters_run stop_reason seed "
-    "loss_full loss_full_per_freq frequencies phase_model ref_freq history",
+    "loss_full loss_full_per_freq frequencies ref_freq history",
 )
 
 
@@ -137,21 +137,17 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
     Solves for ONE aperture profile psi(x) at plane `tx_z` that best reproduces
     every channel's measured RX field at once, holding the amplitude fixed at
     `orig_aper_amp` (defined on `x_axis`; its nonzero region is the support).
-    What "one profile" means is set by params.phase_model:
+    psi is a PLATE's shape — the optical-path/delay profile expressed as phase at
+    `ref_freq` — and each channel's phase is (f/ref_freq)·psi, the way a physical
+    plate's phase scales with wavenumber. This matches both simulated beam types
+    (caustic and steer bake the wavenumber into the phase).
 
-    - "delay": psi is a PLATE's shape — the optical-path/delay profile expressed
-      as phase at `ref_freq` — and each channel's phase is (f/ref_freq)·psi, the
-      way a physical plate's phase scales with wavenumber. This matches both
-      simulated beam types (caustic and steer bake the wavenumber into the phase).
-    - "achromatic": psi is a MASK's phase, applied identically at every frequency
-      (the rho ≡ 1 special case of the same loop).
-
-    Either way the loss is the UNWEIGHTED MEAN of the per-frequency losses. Each
-    channel's error_weighting is normalized to its own measurement's peak (see
-    MGS.measure), so the mean weights frequencies equally regardless of absolute
-    RX power; do not "fix" it into a power-weighted sum. A single frequency is
-    simply the len(channels) == 1 case of the same code path, and — because
-    rho = 1.0 exactly there — is bit-identical under either phase model.
+    The loss is the UNWEIGHTED MEAN of the per-frequency losses. Each channel's
+    error_weighting is normalized to its own measurement's peak (see MGS.measure),
+    so the mean weights frequencies equally regardless of absolute RX power; do
+    not "fix" it into a power-weighted sum. A single frequency is simply the
+    len(channels) == 1 case of the same code path (rho = 1.0 exactly, so psi IS
+    that frequency's phase).
 
     `ref_freq` defaults to the centre-by-value of `channels`. Callers that solve
     different candidates on different channel SUBSETS (the grid sweep) must pass
@@ -171,10 +167,10 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
     dx = x_axis[1] - x_axis[0]
     n_freq = len(channels)
     assert n_freq >= 1, "gs_reconstruct needs at least one FreqChannel"
-    delay_model = params.phase_model == "delay"
     if ref_freq is None:
         ref_freq = channels[center_freq_index([ch.freq for ch in channels])].freq
-    # rho_f = f/f_ref = k_f/k_ref exactly; the chain-rule factor of the delay model
+    # rho_f = f/f_ref = k_f/k_ref exactly: each channel's phase is rho_f * psi, and
+    # the same factor chain-rules into its gradient contribution
     rho = np.array([ch.freq / ref_freq for ch in channels], dtype=np.float64)
 
     # The geometry is fixed for the whole solve, so there are exactly TWO kernels
@@ -215,9 +211,7 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
     rng = np.random.default_rng(seed)
 
     # track aperature amplitude and phase seperatly. curr_aper_phase is the shared
-    # unknown psi: the mask phase (achromatic) or the delay expressed as phase at
-    # ref_freq (delay). Same draw either way, so one seed gives the same starting
-    # array under both models.
+    # unknown psi: the plate's delay profile expressed as phase at ref_freq.
     curr_aper_amp = np.abs(orig_aper_amp.copy())
     curr_aper_phase = 2 * np.pi * rng.random(size)
     initial_phase = curr_aper_phase.copy()
@@ -260,18 +254,13 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
         # the batched form slower at every size tried, and going through the same
         # rs_apply path per frequency keeps the load-bearing complex64 downcast --
         # which is what makes n_freq == 1 bit-identical to the single-frequency
-        # solver this generalizes.
-        #
-        # The achromatic model shares ONE aperture field across every channel, so
-        # it is hoisted out of the channel loop; the delay model gives each channel
-        # its own phase rho_f * psi, so the field is built per channel.
-        u0_shared = None if delay_model else curr_aper_amp * np.exp(1j * curr_aper_phase)
+        # solver this generalizes. Each channel builds its own field from the one
+        # shared plate profile: phase = rho_f * psi.
         loss_pf = np.empty(n_freq, dtype=np.float64)
         grad_theta = np.zeros(size, dtype=np.float64)
         prop_fields = [] if history is not None else None
         for f, ch in enumerate(channels):
-            u0 = (u0_shared if u0_shared is not None
-                  else curr_aper_amp * np.exp(1j * (rho[f] * curr_aper_phase)))
+            u0 = curr_aper_amp * np.exp(1j * (rho[f] * curr_aper_phase))
             curr_prop_f = rs.rs_apply(u0, h_fwd[f], dx)
             r_cx = ch.error_weighting * (curr_prop_f - ch.rx_field)
             loss_pf[f] = 0.5 * np.mean(np.abs(r_cx)**2)
@@ -279,9 +268,8 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
                 prop_fields.append(curr_prop_f)
             # back propogate the residual from the RX plane to the TX (aperture) plane
             g_u0 = rs.rs_apply(r_cx, h_adj[f], dx)
-            g_phase = 2.0 * np.imag(g_u0 * np.conj(u0))
-            # chain rule for the delay model: d(theta_f)/d(psi) = rho_f
-            grad_theta += rho[f] * g_phase if delay_model else g_phase
+            # chain rule: d(theta_f)/d(psi) = rho_f
+            grad_theta += rho[f] * (2.0 * np.imag(g_u0 * np.conj(u0)))
         # gradient of the MEAN loss: the divisor is n_freq, not 1. Summing instead
         # would silently rescale the effective lr0 by n_freq and change backtracking
         # accept rates, breaking step-size comparability with single-frequency runs.
@@ -297,12 +285,9 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
         step = lr0
         for _ in range(bt_tries):
             theta_trial = curr_aper_phase - step * grad_theta
-            u0_trial_shared = (None if delay_model
-                               else curr_aper_amp * np.exp(1j * theta_trial))
             trial_pf = np.empty(n_freq, dtype=np.float64)
             for f, ch in enumerate(channels):
-                u0_trial = (u0_trial_shared if u0_trial_shared is not None
-                            else curr_aper_amp * np.exp(1j * (rho[f] * theta_trial)))
+                u0_trial = curr_aper_amp * np.exp(1j * (rho[f] * theta_trial))
                 um_trial = rs.rs_apply(u0_trial, h_fwd[f], dx)
                 r_trial = ch.error_weighting * (um_trial - ch.rx_field)
                 trial_pf[f] = 0.5 * np.mean(np.abs(r_trial)**2)
@@ -346,7 +331,7 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
                     n_iters_run=n_iters_run, stop_reason=stop_reason, seed=seed,
                     loss_full=loss_full, loss_full_per_freq=loss_full_per_freq,
                     frequencies=tuple(float(ch.freq) for ch in channels),
-                    phase_model=params.phase_model, ref_freq=float(ref_freq),
+                    ref_freq=float(ref_freq),
                     history=history)
 
 
@@ -566,8 +551,9 @@ class MGS():
         """Fill gs_rec_data with the field radiated by the MGS-reconstructed aperture.
 
         A re-illumination is inherently monochromatic; this (like _propagate and
-        plot_scene) runs at the PRIMARY frequency. The reconstructed mask itself is
-        achromatic — one phase fitted jointly across all configured frequencies."""
+        plot_scene) runs at the PRIMARY frequency. The reconstruction itself is one
+        delay plate fitted jointly across all configured frequencies, stored as its
+        reference-frequency field."""
         self.log.info("Running scene simulation with MGS reconstructed aperature")
         self.gs_rec_data = self._propagate(self.gs_tx)
 

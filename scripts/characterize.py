@@ -142,7 +142,6 @@ def _grid_digest(d: Path) -> dict:
         "counts": m["counts"],
         "ground_truth": m["ground_truth"],
         "seed": m["seed"],
-        "phase_model": m["gs"].get("phase_model"),
         "init": m["gs"].get("init"),
         "frequencies": [f["freq_hz"] for f in m["frequencies"]],
         "residuals": joint,
@@ -189,13 +188,6 @@ def check5_multifreq(d: Path) -> dict:
     return _grid_digest(d)
 
 
-def check6_achromatic(d: Path) -> dict:
-    """Check 5's twin with phase_model pinned to achromatic — the non-default mode.
-    Its residual floats are exactly what check 5 produced before the delay model
-    existed: the achromatic path was preserved, merely no longer the default."""
-    return _grid_digest(d)
-
-
 def build_digest(scratch: Path) -> dict:
     return {
         "check1_mgs_tiny": check1_mgs_tiny(scratch / "c1_mgs_tiny"),
@@ -204,7 +196,6 @@ def build_digest(scratch: Path) -> dict:
         "check4_grid_parallel": check4_grid_parallel(scratch / "c3_grid_j1",
                                                      scratch / "c4_grid_j4"),
         "check5_multifreq": check5_multifreq(scratch / "c5_multifreq"),
-        "check6_achromatic": check6_achromatic(scratch / "c6_achromatic"),
     }
 
 
