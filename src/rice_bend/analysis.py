@@ -1,6 +1,6 @@
-"""Numeric per-run analysis of a grid search: the top candidates, the region of
-interest around the argmin, the localization error, and the energy the RX window
-captures. Pure measurement — no matplotlib. The overlay drawing lives in
+"""Numeric per-run analysis of a grid search: the top candidates, the
+localization error, and the energy the RX window captures. Pure measurement —
+no matplotlib. The overlay drawing lives in
 residual_plots, which imports cell_edges FROM here; analysis never imports the
 plotting stack at runtime, so grid-sweep-side consumers stay matplotlib-free.
 
@@ -24,7 +24,6 @@ from pathlib import Path
 from typing import List, Optional, Sequence, TYPE_CHECKING
 
 import numpy as np
-from scipy import ndimage
 
 from rice_bend import rs
 from rice_bend.data_store import write_json
@@ -35,9 +34,8 @@ if TYPE_CHECKING:
     from rice_bend.residual_plots import ResidualSummary
 
 ANALYSIS_NAME = "analysis.json"
-ANALYSIS_SCHEMA_VERSION = 2
+ANALYSIS_SCHEMA_VERSION = 3
 TOP_K = 10                 # candidates outlined solid red on the heatmaps
-ROI_LOSS_FACTOR = 10.0     # ROI = connected cells with loss <= factor * min
 N_DOF_EPS = 0.1            # the project-wide accuracy convention (see the docs)
 
 
@@ -189,8 +187,9 @@ def analyze_grid(z_values: Sequence[float], x_values: Sequence[float],
 
     Cells are addressed as (z_idx, x_idx) with candidate index = z_idx*nx + x_idx
     (enumerate_grid's z-outer/x-inner order). NaN cells (skipped / not run) are
-    excluded everywhere. `argmin.error_distance_m` is THE localization error the
-    parameter studies put on their y-axis.
+    excluded everywhere. `argmin.error_distance_m` and `top_mean_dist_to_truth_m`
+    (unweighted mean over the top-K cells, argmin included) are the two
+    localization errors the parameter studies put on their y-axis.
     """
     zs = np.asarray(z_values, dtype=float)
     xs = np.asarray(x_values, dtype=float)
@@ -201,7 +200,6 @@ def analyze_grid(z_values: Sequence[float], x_values: Sequence[float],
     out = {
         "schema_version": ANALYSIS_SCHEMA_VERSION,
         "top_k": TOP_K,
-        "roi_loss_factor": ROI_LOSS_FACTOR,
         "ground_truth": {"real_tx_z": float(real_tx_z),
                          "real_tx_x_center": float(real_tx_x_center)},
         "loss": {"n_finite_cells": n_finite,
@@ -209,7 +207,7 @@ def analyze_grid(z_values: Sequence[float], x_values: Sequence[float],
                  "max": _f(np.nanmax(grid)) if n_finite else None},
         "argmin": None,
         "top_candidates": [],
-        "roi": None,
+        "top_mean_dist_to_truth_m": None,
         "energy": energy,
         "n_dof": n_dof,
     }
@@ -241,38 +239,10 @@ def analyze_grid(z_values: Sequence[float], x_values: Sequence[float],
             "z": float(zs[i]), "x_center": float(xs[j]),
             "final_loss": _f(grid[i, j]), "dist_to_truth_m": dist(i, j),
         })
-
-    # ROI: the 4-connected component containing the argmin, loss <= factor*min.
-    # ndimage.label's default structure IS the 4-connected cross.
-    loss_min = float(grid[ai, aj])
-    cutoff = ROI_LOSS_FACTOR * loss_min
-    mask = finite & (grid <= cutoff)
-    labels, _ = ndimage.label(mask)
-    roi_mask = labels == labels[ai, aj]
-    cells = np.argwhere(roi_mask)              # row-major sorted (z_idx, x_idx)
-    z_e, x_e = cell_edges(zs), cell_edges(xs)
-    csz = float((zs[-1] - zs[0]) / (len(zs) - 1)) if len(zs) > 1 else None
-    csx = float((xs[-1] - xs[0]) / (len(xs) - 1)) if len(xs) > 1 else None
-    i_min, i_max = int(cells[:, 0].min()), int(cells[:, 0].max())
-    j_min, j_max = int(cells[:, 1].min()), int(cells[:, 1].max())
-    centroid_z = float(zs[cells[:, 0]].mean())
-    centroid_x = float(xs[cells[:, 1]].mean())
-    out["roi"] = {
-        "loss_min": _f(loss_min), "loss_cutoff": _f(cutoff),
-        "mean_loss": _f(grid[roi_mask].mean()),
-        "n_cells": int(roi_mask.sum()),
-        "cells": [[int(i), int(j)] for i, j in cells],
-        "cell_size_z_m": csz, "cell_size_x_m": csx,
-        "area_m2": (int(roi_mask.sum()) * csz * csx
-                    if csz is not None and csx is not None else None),
-        "z_min_m": float(z_e[i_min]), "z_max_m": float(z_e[i_max + 1]),
-        "z_extent_m": float(z_e[i_max + 1] - z_e[i_min]),
-        "x_min_m": float(x_e[j_min]), "x_max_m": float(x_e[j_max + 1]),
-        "x_extent_m": float(x_e[j_max + 1] - x_e[j_min]),
-        "centroid": {"z": centroid_z, "x_center": centroid_x},
-        "centroid_dist_to_truth_m": float(np.hypot(centroid_z - real_tx_z,
-                                                   centroid_x - real_tx_x_center)),
-    }
+    dists = [c["dist_to_truth_m"] for c in out["top_candidates"]
+             if c["dist_to_truth_m"] is not None]
+    if dists:
+        out["top_mean_dist_to_truth_m"] = _f(float(np.mean(dists)))
     return out
 
 
