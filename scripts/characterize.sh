@@ -77,10 +77,16 @@ run $GRID --config "$C/scenario_caustic_hit_sparse.yml" --freq 150e9 \
 run $GRID --config "$C/scenario_caustic_hit_sparse.yml" --freq 150e9 \
     --limit 6 --jobs 4 -o "$S/c4_grid_j4"
 
-# 5. multi-frequency JOINT run: one flat layout (no frequencies.json, no freq_<GHz>/
-#    subdirs), the joint + per-frequency loss decomposition, the mean-combination rule,
-#    and the index -> (z, x_center) map that pins the z-outer/x-inner ordering.
+# 5. multi-frequency JOINT run under the DEFAULT (delay) phase model: one flat layout
+#    (no frequencies.json, no freq_<GHz>/ subdirs), the joint + per-frequency loss
+#    decomposition, the mean-combination rule, and the index -> (z, x_center) map that
+#    pins the z-outer/x-inner ordering.
 run $GRID --config "$C/tiny_check.yml" --freq 140e9 150e9 -o "$S/c5_multifreq"
+
+# 6. the same joint run with phase_model pinned to ACHROMATIC — the non-default mode
+#    must not rot. Its residuals are exactly what check 5 produced before the delay
+#    model existed.
+run $GRID --config "$C/tiny_check_achromatic.yml" --freq 140e9 150e9 -o "$S/c6_achromatic"
 
 echo "---"
 set +e
