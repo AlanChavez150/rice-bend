@@ -87,7 +87,8 @@ def _energy_dict(x_axis, rows, freqs, x_min, x_max) -> Optional[dict]:
 
 
 def _n_dof_dict(scene_x_axis, tx_axis, tx_profiles, freqs, wavelengths,
-                tx_z, rx_z, rx_x_min, rx_x_max) -> Optional[dict]:
+                tx_z, rx_z, rx_x_min, rx_x_max,
+                rx_elem_axes: Optional[Sequence] = None) -> Optional[dict]:
     """N_E(eps): the NOISELESS mode count of docs/information_metric.md.
 
     Per frequency, build the discrete radiation operator exactly as
@@ -110,6 +111,13 @@ def _n_dof_dict(scene_x_axis, tx_axis, tx_profiles, freqs, wavelengths,
     the doc cites (sufficiently separated observation arcs multiply the
     data-space dimension).
 
+    Rows model the RECEIVER, not the window: when the per-frequency RX element
+    axes are given, each row is the scene sample nearest an element position
+    (deduplicated) — so a sparse array (lambda/2 spacing) has fewer rows and a
+    genuinely smaller data space than the dense default (lambda/20, whose
+    elements are denser than the scene grid and reduce to every window sample).
+    Without element axes (legacy runs), all window samples are used.
+
     TX profiles are cast to complex64 first so the save-time and replot-time
     computations see bit-identical inputs (measurement.npz stores complex64).
     None when any ingredient is unavailable (experimental captures, legacy runs).
@@ -125,19 +133,27 @@ def _n_dof_dict(scene_x_axis, tx_axis, tx_profiles, freqs, wavelengths,
         return None
     per: List[dict] = []
     total = 0
-    for f, wl, profile in zip(freqs, wavelengths, tx_profiles):
+    for i, (f, wl, profile) in enumerate(zip(freqs, wavelengths, tx_profiles)):
+        elems = None
+        if rx_elem_axes is not None and i < len(rx_elem_axes):
+            elems = rx_elem_axes[i]
+        if elems is not None and len(elems):
+            e_pos = np.asarray(elems, dtype=float)
+            rows = np.unique(np.argmin(np.abs(x[None, :] - e_pos[:, None]), axis=1))
+        else:
+            rows = window
         profile = np.asarray(profile, dtype=np.complex64)
         amp = interp_amplitude(tx_axis, profile, x)
         support = np.where(amp > 0)[0]
-        if not len(support):
+        if not len(support) or not len(rows):
             per.append({"freq_hz": float(f), "n_dof": None})
             continue
         h_fwd = rs.rs_kernel(x, float(wl), -1.0 * (rx_z - tx_z))
-        cols = np.empty((len(window), len(support)), dtype=np.complex64)
+        cols = np.empty((len(rows), len(support)), dtype=np.complex64)
         e = np.zeros(len(x))
         for k, j in enumerate(support):
             e[j] = 1.0
-            cols[:, k] = rs.rs_apply(e, h_fwd, dx)[window]
+            cols[:, k] = rs.rs_apply(e, h_fwd, dx)[rows]
             e[j] = 0.0
         sigma, vh = np.linalg.svd(cols, full_matrices=False)[1:]
         u0 = interp_real_imag(tx_axis, profile, x)[support]
@@ -148,7 +164,9 @@ def _n_dof_dict(scene_x_axis, tx_axis, tx_profiles, freqs, wavelengths,
         total += n
         per.append({
             "freq_hz": float(f), "n_dof": n,
-            "n_support": int(len(support)), "n_window": int(len(window)),
+            "n_support": int(len(support)),
+            "n_rows": int(len(rows)),
+            "n_elements": int(len(elems)) if elems is not None else None,
             "sigma_max": _f(sigma[0]),
             "excitation_max": _f(a.max()) if len(a) else None,
             "threshold": _f(threshold),
@@ -264,7 +282,8 @@ def analysis_from_run(run: "GridSearchRun", summary: "ResidualSummary") -> dict:
                           run.rx_x_min, run.rx_x_max)
     n_dof = _n_dof_dict(run.scene_x_axis, run.real_tx_aper_axis,
                         run.real_tx_aper_profiles, run.freqs, run.wavelengths,
-                        run.real_tx_z, run.rx_z, run.rx_x_min, run.rx_x_max)
+                        run.real_tx_z, run.rx_z, run.rx_x_min, run.rx_x_max,
+                        rx_elem_axes=run.rx_aper_axes)
     return analyze_grid(summary.z_values, summary.x_values, summary.loss_grid,
                         summary.real_tx_z, summary.real_tx_x_center, energy,
                         n_dof=n_dof)
@@ -293,12 +312,17 @@ def analysis_from_manifest(run_dir: Path, summary: "ResidualSummary") -> dict:
                                       freq_hz, rx_win["x_min"], rx_win["x_max"])
             if ("real_tx_aper_profile" in z.files and rx_win.get("z") is not None
                     and np.asarray(z["real_tx_aper_profile"]).ndim == 2):
+                elem_axes = None
+                keys = [f"rx_aper_axis_{i:02d}" for i in range(len(freqs))]
+                if all(k in z.files for k in keys):
+                    elem_axes = [z[k] for k in keys]
                 n_dof = _n_dof_dict(
                     z["scene_x_axis"], z["real_tx_aper_axis"],
                     z["real_tx_aper_profile"], freq_hz,
                     [e["wavelength_m"] for e in freqs],
                     m["ground_truth"]["real_tx_z"], rx_win["z"],
-                    rx_win["x_min"], rx_win["x_max"])
+                    rx_win["x_min"], rx_win["x_max"],
+                    rx_elem_axes=elem_axes)
     return analyze_grid(summary.z_values, summary.x_values, summary.loss_grid,
                         summary.real_tx_z, summary.real_tx_x_center, energy,
                         n_dof=n_dof)
