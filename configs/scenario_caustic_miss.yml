@@ -51,8 +51,8 @@ output:
 
 # Speculative TX-location sweep for grid-search-mgs (ignored by plain mgs).
 grid_search:
-  z:        {min: 0.15, max: 0.80, num: 48}
-  x_center: {min: -0.15, max: 0.15, num: 48}
+  z:        {min: 0.15, max: 0.80, num: 96}
+  x_center: {min: -0.15, max: 0.15, num: 96}
   aperture: {width: 0.10, dx: 0.00025}
   seed: 0
   gs_overrides: {max_iters: 800}
