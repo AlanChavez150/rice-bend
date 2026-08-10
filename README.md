@@ -101,15 +101,17 @@ grid-search-mgs -j 8                            # worker processes (default: all
 grid-search-mgs -o results/my_run               # name the run directory outright
 grid-search-mgs --scenes                        # one PNG per candidate beam (scenes/) + an averaged scene
 grid-search-mgs --anim                          # animate the candidate beams -> candidate_beams.mp4 (ffmpeg)
+grid-search-mgs --surface-anim                  # orbit each residual surface -> residual_surface_orbit.mp4 (ffmpeg)
 grid-search-mgs --true-mgs                      # also recompute the baseline MGS run at the KNOWN TX
 grid-search-mgs --replot results/grid_search    # re-plot a saved run (single- or multi-frequency)
 grid-search-mgs --replot results/grid_search --scenes --anim   # standalone scenes + animation for a saved run
 ```
 
-The residual heatmap and scatter (with their high-contrast twins) are always written.
-One rule sets everything else: **cheap plots always run; anything that re-solves MGS
-or renders per-candidate PNGs is opt-in** (`--true-mgs`, `--scenes`, `--anim`). A
-fresh run and a `--replot` of it therefore produce the same set of files.
+The residual heatmap, surface and scatter (with their high-contrast twins) are always
+written. One rule sets everything else: **cheap plots always run; anything that
+re-solves MGS, renders per-candidate PNGs or encodes video is opt-in** (`--true-mgs`,
+`--scenes`, `--anim`, `--surface-anim`). A fresh run and a `--replot` of it therefore
+produce the same set of files.
 
 ```bash
 ```
@@ -132,15 +134,24 @@ marker file, and says so before starting work. Use `-o/--out` to keep them apart
 - `candidates/cand_####.{npz,json}` — each reconstructed aperture + loss curve, and its metadata.
 - `residual_heatmap.png` — GS residual over `(z, x_center)`; lower = better
   data fit, with the true location and best candidate marked.
+- `residual_surface.png` — the same grid as relief instead of colour: height is the
+  **inverted** residual, so the better a candidate fits, the higher the surface stands
+  and the best fit becomes a peak over the TX. The flat heatmap saturates (on a dense
+  caustic sweep over half the cells sit within 1% of the maximum), which hides how deep
+  the basin actually goes. The z-axis is labelled in real residual values, the flat
+  heatmap is projected on the floor beneath the surface, and the true TX and best
+  candidate carry full-height marker poles so neither can be hidden behind the terrain.
 - `residual_scatter.png` — a scatter of every candidate's GS residual (fixed
   `[0, 0.06]` axis, no colorbar) against its distance to the true TX, so the trend (a lower residual
   marking a candidate closer to the real transmitter) is visible.
-- `residual_heatmap_hc.png` / `residual_scatter_hc.png` — **high-contrast** twins written alongside
-  every residual plot: a log residual scale whose floor adapts to the data (that run's minimum loss,
-  rounded down to the nearest decade) with a fixed `0.06` ceiling, so each populated decade gets an
-  equal share of the colormap (or y-axis). The lowest (best-fit) residuals differentiate maximally
-  while high residuals compress into nearly one dark color. Because the floor is data-driven, hc
-  colors are NOT comparable across runs — use the linear `[0, 0.06]` plots for cross-run comparison.
+- `residual_heatmap_hc.png` / `residual_surface_hc.png` / `residual_scatter_hc.png` — **high-contrast**
+  twins written alongside every residual plot: a log residual scale whose floor adapts to the data
+  (that run's minimum loss, rounded down to the nearest decade) with a fixed `0.06` ceiling, so each
+  populated decade gets an equal share of the colormap (or y-axis, or surface height). The lowest
+  (best-fit) residuals differentiate maximally while high residuals compress into nearly one dark
+  color. Because the floor is data-driven, hc colors are NOT comparable across runs — use the linear
+  `[0, 0.06]` plots for cross-run comparison. On the surface this is the difference between a broad
+  mesa covering the whole basin (linear) and a single sharp summit on the TX (hc).
 - `true_mgs_scene.png` — (with `--true-mgs`) the single baseline MGS run at the *known* (true) TX
   location: the real scene vs. its MGS reconstruction plus the TX aperture phase/amplitude, exactly
   as plain `mgs` would produce. Unlike the residual plots this recomputes one full MGS solve.
@@ -148,6 +159,11 @@ marker file, and says so before starting work. Use `-o/--out` to keep them apart
   (candidate beam, real beam at the same color scale, candidate aperture phase, candidate aperture
   amplitude; scenes mark the RX aperture in red and the TX aperture in blue), plus a single plot
   averaging every candidate beam. Use `--scene-top N` to render only the N lowest-residual candidates.
+- `residual_surface_orbit.mp4` / `_hc.mp4` — (with `--surface-anim`) the residual surface orbited
+  through a full turn (needs ffmpeg). A still is fixed to one viewing angle, and which angle reads
+  best depends on where the basin lands, so this is the way past a peak hidden behind a ridge.
+  Opt-in because it is ~12 s of render per video per run directory, against a `--replot` that
+  otherwise finishes in seconds.
 - `candidate_beams.mp4` — (with `--anim`) an animation sweeping the candidate beams, one frame per
   candidate re-illuminating the scene (needs ffmpeg). Every frame is held in memory at once to fix
   a shared colour scale, so `--anim` renders the 100 lowest-residual candidates by default;
@@ -189,6 +205,10 @@ scales with wavelength when `rx_aperture.dx` is null). Results are laid out as:
   each `(z, x_center)` cell is the mean GS residual across all frequencies where that candidate ran,
   so a location that fits well at *every* frequency stands out. `residual_heatmap_avg_hc.png` is its
   high-contrast twin.
+- `<output_dir>/<run_name>/residual_surface_avg.png` — the same frequency-averaged grid as relief,
+  drawn exactly like the per-frequency `residual_surface.png`. `residual_surface_avg_hc.png` is its
+  high-contrast twin. Note the average is an arithmetic `nanmean`, so a frequency that fits far worse
+  than the rest dominates it; the per-frequency surfaces are the place to see that happening.
 - `<output_dir>/<run_name>/freq_<GHz>/residual_heatmap_vs_avg.png` — per-frequency **vs-average
   comparison**: that frequency's heatmap and the averaged heatmap side by side (shared linear scale),
   plus their difference (frequency − average) on a symmetric `viridis_r` scale — yellow where that
@@ -264,7 +284,7 @@ Entry points:
 - `animate.py` — TX-estimate animation from a saved run (`mgs-animate`)
 - `grid_search.py` — orchestration + CLI for the sweep (`grid-search-mgs`), over three modules:
   - `grid_sweep.py` — enumerate the grid, solve at each point, persist. No matplotlib
-  - `residual_plots.py` — the residual grid and its five plots
+  - `residual_plots.py` — the residual grid and its six plots
   - `candidate_scenes.py` — re-illuminated candidate beams and the true-MGS baseline
 
 ## Tests
