@@ -36,7 +36,6 @@ plot_path: scenario_caustic_hit_1f.png
 frequencies: [150.0e9]
 
 gerchberg_saxton:
-  phase_model: achromatic  # pinned: this case's saved results predate the delay default
   max_iters: 800
   convergence_count: 10
   convergence_threshold: -1.0e-8
