@@ -10,6 +10,8 @@ from typing import Optional, Sequence, Tuple
 
 import numpy as np
 
+from rice_bend import rs
+
 
 def draw_scene(fig, ax, field: np.ndarray, *,
                bounds: Tuple[float, float, float, float],
@@ -67,3 +69,26 @@ def draw_line_panel(ax, series: Sequence, *, title: str, xlabel: str, ylabel: st
     ax.grid(True)
     if any_labelled:
         ax.legend()
+
+
+def add_wavelength_axis(ax, ref_freq_hz: Optional[float], *,
+                        axis: str = "y", unit_m: float = 1.0) -> None:
+    """Secondary scale reading a distance axis in free-space wavelengths at
+    `ref_freq_hz` -- the run's centre frequency, i.e. the manifest's
+    gs.ref_freq_hz (config.center_freq_index convention).
+
+    `unit_m` is the primary axis's unit in metres (1.0 for a metres axis, 1e-3
+    for a millimetres axis). `ref_freq_hz=None` -- a legacy run saved before
+    gs.ref_freq_hz existed, or a study whose points disagree on the centre --
+    is a no-op, so callers draw with or without the scale from one
+    unconditional call.
+    """
+    if ref_freq_hz is None:
+        return
+    wl = rs.wavelength(float(ref_freq_hz))
+    label = f"distance (λ at {ref_freq_hz / 1e9:g} GHz)"
+    functions = (lambda d: d * (unit_m / wl), lambda lam: lam * (wl / unit_m))
+    if axis == "y":
+        ax.secondary_yaxis("right", functions=functions).set_ylabel(label)
+    else:
+        ax.secondary_xaxis("top", functions=functions).set_xlabel(label)

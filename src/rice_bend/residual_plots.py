@@ -27,16 +27,19 @@ from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers the 3d project
 from rice_bend.analysis import cell_edges
 from rice_bend.config import AxisSweep
 from rice_bend.grid_sweep import GridSearchRun
+from rice_bend.plotting import add_wavelength_axis
 
 @dataclass
 class ResidualSummary:
-    """The (z, x_center) grid of GS residuals, plus ground truth and the best point."""
+    """The (z, x_center) grid of GS residuals, plus ground truth and the best point,
+    plus the run's centre frequency for the λ axis."""
     z_values: np.ndarray
     x_values: np.ndarray
     loss_grid: np.ndarray              # shape (nz, nx); NaN where not run / skipped
     real_tx_z: float
     real_tx_x_center: float
     best: Optional[dict]               # {index, z, x_center, final_loss} or None
+    ref_freq_hz: Optional[float] = None  # gs.ref_freq_hz (centre frequency); None on legacy schema-2 runs
 
 
 def _assemble_summary(zs: List[float], xs: List[float],
@@ -65,8 +68,10 @@ def summary_from_run(run: GridSearchRun) -> ResidualSummary:
     """Build a ResidualSummary from an in-memory grid run."""
     cand = [(c.point.index, c.final_loss) for c in run.candidates]
     real_x_center = 0.5 * (run.real_tx_x_min + run.real_tx_x_max)
-    return _assemble_summary(run.grid_cfg.z.values(), run.grid_cfg.x_center.values(),
-                             cand, run.real_tx_z, real_x_center)
+    summary = _assemble_summary(run.grid_cfg.z.values(), run.grid_cfg.x_center.values(),
+                                cand, run.real_tx_z, real_x_center)
+    summary.ref_freq_hz = float(run.ref_freq)
+    return summary
 
 
 def summary_from_manifest(run_dir: Path) -> ResidualSummary:
@@ -83,7 +88,9 @@ def summary_from_manifest(run_dir: Path) -> ResidualSummary:
     cand = [(c["index"], c["final_loss"]) for c in manifest["candidates"]]
     gt = manifest["ground_truth"]
     real_x_center = 0.5 * (gt["real_tx_x_min"] + gt["real_tx_x_max"])
-    return _assemble_summary(zs, xs, cand, gt["real_tx_z"], real_x_center)
+    summary = _assemble_summary(zs, xs, cand, gt["real_tx_z"], real_x_center)
+    summary.ref_freq_hz = (manifest.get("gs") or {}).get("ref_freq_hz")
+    return summary
 
 
 def freq_summaries_from_manifest(run_dir: Path) -> List[Tuple[float, ResidualSummary]]:
@@ -259,7 +266,7 @@ def plot_residual_heatmap(summary: ResidualSummary, out_path: Path,
     if summary.best is not None:
         ax.scatter([summary.best["x_center"]], [summary.best["z"]], marker="*", s=260,
                    c="lime", edgecolor="black", linewidth=1.0, zorder=6,
-                   label=f"Best candidate (loss {summary.best['final_loss']:.4g})")
+                   label=f"Best candidate (residual {summary.best['final_loss']:.4g})")
     if analysis is not None:
         _overlay_analysis(ax, summary, analysis)
     ax.set_xlabel("x_center (m)")
@@ -373,7 +380,7 @@ def _draw_surface(ax, summary: ResidualSummary, hc: bool) -> Normalize:
     if summary.best is not None:
         _surface_pole(ax, summary.best["x_center"], summary.best["z"], floor, ceiling,
                       marker="*", color="lime", edgecolor="black", size=260,
-                      label=f"Best candidate (loss {summary.best['final_loss']:.4g})")
+                      label=f"Best candidate (residual {summary.best['final_loss']:.4g})")
 
     ax.set_zlim(floor, ceiling)
     positions, labels = _surface_zticks(norm)
@@ -514,6 +521,7 @@ def plot_residual_scatter(summary: ResidualSummary, out_path: Path, *,
         loss = np.maximum(loss, norm.vmin)   # keep sub-floor losses on the log axis
     ax.scatter(dist, loss, s=40, color="C0", edgecolor="black", linewidth=0.3, zorder=3)
     ax.set_xlabel("distance from candidate to true TX (m)")
+    add_wavelength_axis(ax, summary.ref_freq_hz, axis="x", unit_m=1.0)
     ax.set_ylabel("GS residual")
     if hc:
         ax.set_yscale("log")
