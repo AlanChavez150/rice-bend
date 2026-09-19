@@ -1,13 +1,15 @@
 # Frequency-comparison case 2 of 3: three frequencies, center 150 GHz ±5%.
 # Compare against scenario_caustic_hit_1f.yml (single frequency) and
-# scenario_caustic_hit_pm10.yml (±10%): identical scene, grid, seed and GS settings —
-# the frequency list is the only variable across the three cases.
+# scenario_caustic_hit_pm10.yml (±10%): identical scene, seed and GS settings —
+# the frequency list is the only variable across the three cases. (1f/pm10 keep
+# the original 64x48 grid; this file moved to 164x76 for the frequency study.)
 #
 # Scenario: caustic beam HITS the RX aperture (big arc curves into the window).
 # RX window: centered x=0, width 0.04 m. RX at z=0; TX projects -Z. TX width 0.132 m,
 # height z=0.3. Verified (150 GHz): big-arc caustic (a=0.8): launches ~-0.10, curves
 # into the RX. beam_peak_x=+0.000, FWHM=0.030 -> HIT (centred in the ±0.02 m RX window)
-# Dense 64x48 grid_search (3072 candidate spots).
+# Dense 164x76 grid_search (12,464 candidate spots; ~2λ cells: z step 3.99 mm,
+# x step 4.00 mm at 150 GHz).
 
 sim_scene:
   x_min: -0.3
@@ -55,8 +57,8 @@ output:
 
 # Speculative TX-location sweep for grid-search-mgs (ignored by plain mgs).
 grid_search:
-  z:        {min: 0.15, max: 0.80, num: 64}
-  x_center: {min: -0.15, max: 0.15, num: 48}
+  z:        {min: 0.15, max: 0.80, num: 164}
+  x_center: {min: -0.15, max: 0.15, num: 76}
   aperture: {width: 0.10, dx: 0.00025}
   seed: 0
   gs_overrides: {max_iters: 800}

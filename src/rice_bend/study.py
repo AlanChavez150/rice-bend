@@ -33,9 +33,10 @@ from rice_bend.config import SimConfig, load_config, resolve_frequencies
 from rice_bend.data_store import check_run_dir, make_run_dir, write_json
 from rice_bend.grid_search import persist_and_plot
 from rice_bend.grid_sweep import run_grid_search
+from rice_bend.plotting import add_wavelength_axis
 from rice_bend.residual_plots import summary_from_manifest
 
-STUDY_SCHEMA_VERSION = 3
+STUDY_SCHEMA_VERSION = 4   # v4: points[] gained ref_freq_hz (nullable)
 STUDY_NAME_FILE = "study.json"
 STUDY_DEFAULT_CONFIG = (Path(__file__).resolve().parents[2] / "configs"
                         / "scenario_caustic_hit_pm5.yml")
@@ -111,7 +112,7 @@ STUDIES = {
 
 
 def _record(study: StudyDef, value: float, point_name: str, analysis: dict,
-            resumed: bool) -> dict:
+            resumed: bool, ref_freq_hz: Optional[float]) -> dict:
     """One study.json points[] entry, from the point's analysis dict."""
     argmin = analysis.get("argmin")
     err_m = argmin["error_distance_m"] if argmin else None
@@ -124,6 +125,7 @@ def _record(study: StudyDef, value: float, point_name: str, analysis: dict,
         "param_value": float(value),
         "run_dir": point_name,
         "resumed": bool(resumed),
+        "ref_freq_hz": float(ref_freq_hz) if ref_freq_hz is not None else None,
         "error_distance_m": err_m,
         "error_mm": 1000.0 * err_m if err_m is not None else None,
         "argmin": ({"z": argmin["z"], "x_center": argmin["x_center"],
@@ -140,12 +142,13 @@ def _record(study: StudyDef, value: float, point_name: str, analysis: dict,
     return rec
 
 
-def _recompute_analysis(point_dir: Path, log) -> dict:
-    """Always recompute (cheap, and the run dir's analysis.json stays fresh)."""
+def _recompute_analysis(point_dir: Path, log) -> Tuple[dict, Optional[float]]:
+    """Always recompute (cheap, and the run dir's analysis.json stays fresh).
+    Also hands back the manifest's centre frequency for the record's λ axis."""
     summary = summary_from_manifest(point_dir)
     analysis = analysis_from_manifest(point_dir, summary)
     write_analysis(point_dir, analysis)
-    return analysis
+    return analysis, summary.ref_freq_hz
 
 
 def _warn_if_stale(study: StudyDef, base_cfg: SimConfig, value: float,
@@ -225,8 +228,8 @@ def _run_point(study: StudyDef, i: int, value: float, base_cfg: SimConfig,
         log.info(f"[{i + 1}/{n}] {name}: candidate_beams.json present — "
                  "skipping the solve")
         _warn_if_stale(study, base_cfg, value, point_dir, log)
-        return _record(study, value, name, _recompute_analysis(point_dir, log),
-                       resumed=True)
+        analysis, ref = _recompute_analysis(point_dir, log)
+        return _record(study, value, name, analysis, resumed=True, ref_freq_hz=ref)
     if point_dir.exists():
         _repair_partial(point_dir, log)
 
@@ -247,7 +250,8 @@ def _run_point(study: StudyDef, i: int, value: float, base_cfg: SimConfig,
     run = run_grid_search(cfg, freqs, limit=args.limit, jobs=args.jobs, log=log)
     out_dir = make_run_dir(root, name, kind="grid")
     analysis = persist_and_plot(run, out_dir, cfg, _plot_namespace(cfg_path, args), log)
-    return _record(study, value, name, analysis, resumed=False)
+    return _record(study, value, name, analysis, resumed=False,
+                   ref_freq_hz=run.ref_freq)
 
 
 def _write_study_json(root: Path, study: StudyDef, base_config, records: List[dict],
@@ -271,6 +275,14 @@ _ERROR_SERIES = (
     ("error_mm", "argmin to true TX", "C0", "o"),
     ("top_mean_dist_mm", "top candidates mean to true TX", "C1", "s"),
 )
+
+
+def _records_ref_freq(records: List[dict]) -> Optional[float]:
+    """The one centre frequency shared by every point, or None (no λ axis).
+    Today's study tables agree bit-exactly (150 GHz everywhere); a series that
+    varied the centre would have no single wavelength to offer."""
+    refs = {r.get("ref_freq_hz") for r in records} - {None}
+    return refs.pop() if len(refs) == 1 else None
 
 
 def _plot_study(study: StudyDef, records: List[dict], out_path: Path, log) -> None:
@@ -314,6 +326,7 @@ def _plot_study(study: StudyDef, records: List[dict], out_path: Path, log) -> No
                 transform=ax.transAxes)
     ax.set_xlabel(study.x_label)
     ax.set_ylabel("distance to true TX (mm)")
+    add_wavelength_axis(ax, _records_ref_freq(records), axis="y", unit_m=1e-3)
     ax.set_title(f"{study.name} study")
     ax.grid(True, alpha=0.3)
     fig.savefig(out_path, dpi=120)
@@ -351,6 +364,7 @@ def _plot_ndof(study: StudyDef, records: List[dict], out_path: Path, log) -> Non
                 transform=ax.transAxes)
     ax.set_xlabel("N_E(eps=0.1), summed over the comb")
     ax.set_ylabel("distance to true TX (mm)")
+    add_wavelength_axis(ax, _records_ref_freq(records), axis="y", unit_m=1e-3)
     ax.grid(True, alpha=0.3)
     fig.suptitle(f"{study.name} study — information metric view "
                  f"(points labelled by {study.param_name})")
@@ -374,8 +388,9 @@ def _replot_study(root: Path, args, log) -> None:
             log.warning(f"{name}: missing — skipped")
             complete = False
             continue
-        records.append(_record(study, value, name,
-                               _recompute_analysis(pdir, log), resumed=True))
+        analysis, ref = _recompute_analysis(pdir, log)
+        records.append(_record(study, value, name, analysis,
+                               resumed=True, ref_freq_hz=ref))
     _write_study_json(root, study, data.get("base_config", "?"), records,
                       status="complete" if complete else "partial")
     _plot_study(study, records, root / study.plot_name, log)

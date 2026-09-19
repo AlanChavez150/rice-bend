@@ -730,46 +730,51 @@ class MGS():
                 "plot_scene needs both scenes illuminated; call illuminate_real() and "
                 "illuminate_reconstructed() first")
 
-        fig = plt.figure(figsize=(20, 10), layout="constrained")
-        (ax_real, ax_rec), (ax_phase, ax_amp) = fig.subplots(2, 2)
+        # the 4-panel figure renders at single-column width in the report, where it
+        # shrinks ~3x, so the fonts are set large enough to survive that scaling
+        with plt.rc_context({"font.size": 19, "axes.titlesize": 20,
+                             "axes.labelsize": 19, "xtick.labelsize": 16,
+                             "ytick.labelsize": 16, "legend.fontsize": 15}):
+            fig = plt.figure(figsize=(10.5, 8), layout="constrained")
+            (ax_real, ax_rec), (ax_phase, ax_amp) = fig.subplots(2, 2)
 
-        v_max = np.nanmax([np.nanmax(np.abs(scene.data)),
-                           np.nanmax(np.abs(self.gs_rec_data))])
-        draw_scene(fig, ax_real, np.abs(scene.data), title="Scene Amplitude",
-                   vmax=v_max, **panel)
-        # Panel 2 autoscales. v_max above was computed to make the two panels
-        # comparable and then commented out at the call; the reconstruction renders
-        # dimmer than the real scene, so an independent scale is easier to read.
-        # Pass vmax=v_max here instead to put them on one scale.
-        draw_scene(fig, ax_rec, np.abs(self.gs_rec_data),
-                   title="MGS reconstruction Scene Amplitude", vmax=None, **panel)
+            v_max = np.nanmax([np.nanmax(np.abs(scene.data)),
+                               np.nanmax(np.abs(self.gs_rec_data))])
+            draw_scene(fig, ax_real, np.abs(scene.data), title="Scene Amplitude",
+                       vmax=v_max, **panel)
+            # Panel 2 autoscales. v_max above was computed to make the two panels
+            # comparable and then commented out at the call; the reconstruction renders
+            # dimmer than the real scene, so an independent scale is easier to read.
+            # Pass vmax=v_max here instead to put them on one scale.
+            draw_scene(fig, ax_rec, np.abs(self.gs_rec_data),
+                       title="MGS Reconstruction Amplitude", vmax=None, **panel)
 
-        # both aperture panels are drawn against the full scene x extent
-        xlim = (scene.x_min, scene.x_max)
-        tx_interp = interp_real_imag(scene.tx_ap.aper_axis, scene.tx_ap.aper_profile,
-                                     scene.x_axis)
-        gs_amp = interp_amplitude(gs_tx.aper_axis, gs_tx.aper_profile, scene.x_axis)
+            # both aperture panels are drawn against the full scene x extent
+            xlim = (scene.x_min, scene.x_max)
+            tx_interp = interp_real_imag(scene.tx_ap.aper_axis, scene.tx_ap.aper_profile,
+                                         scene.x_axis)
+            gs_amp = interp_amplitude(gs_tx.aper_axis, gs_tx.aper_profile, scene.x_axis)
 
-        phase_series, amp_series = [], []
-        if self.has_real_aper:
-            phase_series.append(("Real TX", scene.tx_ap.aper_axis,
-                                 np.unwrap(np.angle(scene.tx_ap.aper_profile))))
-            amp_series.append(("Real TX", scene.x_axis, np.abs(tx_interp)))
-        phase_series.append(("MGS Reconstructed TX", gs_tx.aper_axis,
-                             np.unwrap(np.angle(gs_tx.aper_profile))))
-        amp_series.append(("MGS Reconstructed TX", scene.x_axis, gs_amp))
+            phase_series, amp_series = [], []
+            if self.has_real_aper:
+                phase_series.append(("Real TX", scene.tx_ap.aper_axis,
+                                     np.unwrap(np.angle(scene.tx_ap.aper_profile))))
+                amp_series.append(("Real TX", scene.x_axis, np.abs(tx_interp)))
+            phase_series.append(("MGS Reconstructed TX", gs_tx.aper_axis,
+                                 np.unwrap(np.angle(gs_tx.aper_profile))))
+            amp_series.append(("MGS Reconstructed TX", scene.x_axis, gs_amp))
 
-        draw_line_panel(ax_phase, phase_series, title="TX Aperature Phase",
-                        xlabel="x (m)", ylabel="Phase [rad]", xlim=xlim)
-        draw_line_panel(ax_amp, amp_series, title="TX Aperature Amplitude",
-                        xlabel="x (m)", ylabel="Amplitude EMF (V/m)", xlim=xlim)
+            draw_line_panel(ax_phase, phase_series, title="TX Aperture Phase",
+                            xlabel="x (m)", ylabel="Phase [rad]", xlim=xlim)
+            draw_line_panel(ax_amp, amp_series, title="TX Aperture Amplitude",
+                            xlabel="x (m)", ylabel="Amplitude EMF (V/m)", xlim=xlim)
 
-        out_path = save_path if save_path is not None else self.plot_path
-        self.log.info(f"Saving scene plot to {out_path}")
-        fig.savefig(out_path)
-        if show:
-            plt.show()
-        plt.close(fig)
+            out_path = save_path if save_path is not None else self.plot_path
+            self.log.info(f"Saving scene plot to {out_path}")
+            fig.savefig(out_path)
+            if show:
+                plt.show()
+            plt.close(fig)
 
 def main():
     parser = argparse.ArgumentParser(

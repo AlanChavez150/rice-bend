@@ -1,8 +1,10 @@
 # Test scenario: Caustic beam HITS the RX aperture (big arc curves into the window)
 # Copy of scenario_caustic_hit.yml but with the RX aperture sampled at LAMBDA/2 spacing
-# instead of the default lambda/20. RX window: centered x=0, width 0.04 m. RX at z=0;
+# instead of the default lambda/20 (and a 164x76 grid_search, diverging from
+# scenario_caustic_hit.yml's 64x48). RX window: centered x=0, width 0.04 m. RX at z=0;
 # TX projects -Z. Verified (150 GHz): big-arc caustic (a=0.8) curves into the RX -> HIT.
-# Dense 64x48 grid_search (3072 candidate spots).
+# Dense 164x76 grid_search (12,464 candidate spots; ~2λ cells: z step 3.99 mm,
+# x step 4.00 mm at 150 GHz).
 # NOTE: rx dx is a fixed metres value = lambda/2 at 150 GHz; it does NOT auto-scale if --freq changes.
 
 sim_scene:
@@ -53,8 +55,8 @@ output:
 
 # Speculative TX-location sweep for grid-search-mgs (ignored by plain mgs).
 grid_search:
-  z:        {min: 0.15, max: 0.80, num: 64}
-  x_center: {min: -0.15, max: 0.15, num: 48}
+  z:        {min: 0.15, max: 0.80, num: 164}
+  x_center: {min: -0.15, max: 0.15, num: 76}
   aperture: {width: 0.10, dx: 0.00025}
   seed: 0
   gs_overrides: {max_iters: 800}

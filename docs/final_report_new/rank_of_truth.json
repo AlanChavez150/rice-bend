@@ -1,0 +1,530 @@
+{
+  "lambda20_coarse": [
+    {
+      "bandwidth_pct": 0.0,
+      "rank": 7,
+      "n_candidates": 3072,
+      "percentile": 0.22786458333333334,
+      "nearest_cell": {
+        "z": 0.3047619047619048,
+        "x_center": -0.09893617021276596,
+        "dist_to_truth_mm": 5.189906584142545
+      },
+      "argmin_dist_mm": 15.21994233193574,
+      "argmin_loss": 3.2771247351072233e-06
+    },
+    {
+      "bandwidth_pct": 1.0,
+      "rank": 11,
+      "n_candidates": 3072,
+      "percentile": 0.3580729166666667,
+      "nearest_cell": {
+        "z": 0.3047619047619048,
+        "x_center": -0.09893617021276596,
+        "dist_to_truth_mm": 5.189906584142545
+      },
+      "argmin_dist_mm": 9.696613376681746,
+      "argmin_loss": 1.3547682454531212e-05
+    },
+    {
+      "bandwidth_pct": 2.0,
+      "rank": 12,
+      "n_candidates": 3072,
+      "percentile": 0.390625,
+      "nearest_cell": {
+        "z": 0.3047619047619048,
+        "x_center": -0.09893617021276596,
+        "dist_to_truth_mm": 5.189906584142545
+      },
+      "argmin_dist_mm": 9.696613376681746,
+      "argmin_loss": 1.723963420688665e-05
+    },
+    {
+      "bandwidth_pct": 3.0,
+      "rank": 26,
+      "n_candidates": 3072,
+      "percentile": 0.8463541666666666,
+      "nearest_cell": {
+        "z": 0.3047619047619048,
+        "x_center": -0.09893617021276596,
+        "dist_to_truth_mm": 5.189906584142545
+      },
+      "argmin_dist_mm": 15.836249143589411,
+      "argmin_loss": 2.5211013028850513e-05
+    },
+    {
+      "bandwidth_pct": 5.0,
+      "rank": 11,
+      "n_candidates": 3072,
+      "percentile": 0.3580729166666667,
+      "nearest_cell": {
+        "z": 0.3047619047619048,
+        "x_center": -0.09893617021276596,
+        "dist_to_truth_mm": 5.189906584142545
+      },
+      "argmin_dist_mm": 5.926515917597718,
+      "argmin_loss": 1.2305764338453515e-05
+    },
+    {
+      "bandwidth_pct": 7.0,
+      "rank": 31,
+      "n_candidates": 3072,
+      "percentile": 1.0091145833333333,
+      "nearest_cell": {
+        "z": 0.3047619047619048,
+        "x_center": -0.09893617021276596,
+        "dist_to_truth_mm": 5.189906584142545
+      },
+      "argmin_dist_mm": 15.836249143589411,
+      "argmin_loss": 2.1800288584216082e-05
+    },
+    {
+      "bandwidth_pct": 10.0,
+      "rank": 14,
+      "n_candidates": 3072,
+      "percentile": 0.4557291666666667,
+      "nearest_cell": {
+        "z": 0.3047619047619048,
+        "x_center": -0.09893617021276596,
+        "dist_to_truth_mm": 5.189906584142545
+      },
+      "argmin_dist_mm": 15.836249143589411,
+      "argmin_loss": 1.8073409281116215e-05
+    },
+    {
+      "bandwidth_pct": 13.0,
+      "rank": 60,
+      "n_candidates": 3072,
+      "percentile": 1.953125,
+      "nearest_cell": {
+        "z": 0.3047619047619048,
+        "x_center": -0.09893617021276596,
+        "dist_to_truth_mm": 5.189906584142545
+      },
+      "argmin_dist_mm": 15.836249143589411,
+      "argmin_loss": 1.4165444577033007e-05
+    },
+    {
+      "bandwidth_pct": 16.0,
+      "rank": 36,
+      "n_candidates": 3072,
+      "percentile": 1.171875,
+      "nearest_cell": {
+        "z": 0.3047619047619048,
+        "x_center": -0.09893617021276596,
+        "dist_to_truth_mm": 5.189906584142545
+      },
+      "argmin_dist_mm": 15.836249143589411,
+      "argmin_loss": 2.8457348689631424e-05
+    },
+    {
+      "bandwidth_pct": 20.0,
+      "rank": 12,
+      "n_candidates": 3072,
+      "percentile": 0.390625,
+      "nearest_cell": {
+        "z": 0.3047619047619048,
+        "x_center": -0.09893617021276596,
+        "dist_to_truth_mm": 5.189906584142545
+      },
+      "argmin_dist_mm": 6.428902277548776,
+      "argmin_loss": 1.6077543049478187e-05
+    }
+  ],
+  "lambda20_fine": [
+    {
+      "bandwidth_pct": 0.0,
+      "rank": 33,
+      "n_candidates": 12464,
+      "percentile": 0.2647625160462131,
+      "nearest_cell": {
+        "z": 0.3015337423312884,
+        "x_center": -0.102,
+        "dist_to_truth_mm": 1.8309466236856606
+      },
+      "argmin_dist_mm": 11.807833472357508,
+      "argmin_loss": 3.059202316108424e-06
+    },
+    {
+      "bandwidth_pct": 1.0,
+      "rank": 24,
+      "n_candidates": 12464,
+      "percentile": 0.1925545571245186,
+      "nearest_cell": {
+        "z": 0.3015337423312884,
+        "x_center": -0.102,
+        "dist_to_truth_mm": 1.8309466236856606
+      },
+      "argmin_dist_mm": 12.560787495752626,
+      "argmin_loss": 1.563006786531883e-05
+    },
+    {
+      "bandwidth_pct": 2.0,
+      "rank": 22,
+      "n_candidates": 12464,
+      "percentile": 0.17650834403080873,
+      "nearest_cell": {
+        "z": 0.3015337423312884,
+        "x_center": -0.102,
+        "dist_to_truth_mm": 1.8309466236856606
+      },
+      "argmin_dist_mm": 18.269465851892218,
+      "argmin_loss": 1.9066932909321215e-05
+    },
+    {
+      "bandwidth_pct": 3.0,
+      "rank": 108,
+      "n_candidates": 12464,
+      "percentile": 0.8664955070603337,
+      "nearest_cell": {
+        "z": 0.3015337423312884,
+        "x_center": -0.102,
+        "dist_to_truth_mm": 1.8309466236856606
+      },
+      "argmin_dist_mm": 20.805168084087022,
+      "argmin_loss": 2.2527604642554625e-05
+    },
+    {
+      "bandwidth_pct": 5.0,
+      "rank": 23,
+      "n_candidates": 12464,
+      "percentile": 0.18453145057766368,
+      "nearest_cell": {
+        "z": 0.3015337423312884,
+        "x_center": -0.102,
+        "dist_to_truth_mm": 1.8309466236856606
+      },
+      "argmin_dist_mm": 15.15827768954823,
+      "argmin_loss": 1.503794160445347e-05
+    },
+    {
+      "bandwidth_pct": 7.0,
+      "rank": 98,
+      "n_candidates": 12464,
+      "percentile": 0.7862644415917843,
+      "nearest_cell": {
+        "z": 0.3015337423312884,
+        "x_center": -0.102,
+        "dist_to_truth_mm": 1.8309466236856606
+      },
+      "argmin_dist_mm": 15.15827768954823,
+      "argmin_loss": 2.368614880598404e-05
+    },
+    {
+      "bandwidth_pct": 10.0,
+      "rank": 22,
+      "n_candidates": 12464,
+      "percentile": 0.17650834403080873,
+      "nearest_cell": {
+        "z": 0.3015337423312884,
+        "x_center": -0.102,
+        "dist_to_truth_mm": 1.8309466236856606
+      },
+      "argmin_dist_mm": 15.15827768954823,
+      "argmin_loss": 1.674131290999715e-05
+    },
+    {
+      "bandwidth_pct": 13.0,
+      "rank": 301,
+      "n_candidates": 12464,
+      "percentile": 2.414955070603338,
+      "nearest_cell": {
+        "z": 0.3015337423312884,
+        "x_center": -0.102,
+        "dist_to_truth_mm": 1.8309466236856606
+      },
+      "argmin_dist_mm": 15.15827768954823,
+      "argmin_loss": 1.543460573157825e-05
+    },
+    {
+      "bandwidth_pct": 16.0,
+      "rank": 164,
+      "n_candidates": 12464,
+      "percentile": 1.3157894736842106,
+      "nearest_cell": {
+        "z": 0.3015337423312884,
+        "x_center": -0.102,
+        "dist_to_truth_mm": 1.8309466236856606
+      },
+      "argmin_dist_mm": 15.15827768954823,
+      "argmin_loss": 2.7286841170838753e-05
+    },
+    {
+      "bandwidth_pct": 20.0,
+      "rank": 20,
+      "n_candidates": 12464,
+      "percentile": 0.16046213093709885,
+      "nearest_cell": {
+        "z": 0.3015337423312884,
+        "x_center": -0.102,
+        "dist_to_truth_mm": 1.8309466236856606
+      },
+      "argmin_dist_mm": 15.15827768954823,
+      "argmin_loss": 1.9731247097398916e-05
+    }
+  ],
+  "lambda2_coarse": [
+    {
+      "bandwidth_pct": 0.0,
+      "rank": 13,
+      "n_candidates": 3072,
+      "percentile": 0.4231770833333333,
+      "nearest_cell": {
+        "z": 0.3047619047619048,
+        "x_center": -0.09893617021276596,
+        "dist_to_truth_mm": 5.189906584142545
+      },
+      "argmin_dist_mm": 9.696613376681746,
+      "argmin_loss": 0.00011076743561988469
+    },
+    {
+      "bandwidth_pct": 1.0,
+      "rank": 6,
+      "n_candidates": 3072,
+      "percentile": 0.1953125,
+      "nearest_cell": {
+        "z": 0.3047619047619048,
+        "x_center": -0.09893617021276596,
+        "dist_to_truth_mm": 5.189906584142545
+      },
+      "argmin_dist_mm": 9.696613376681746,
+      "argmin_loss": 0.00012009021829315232
+    },
+    {
+      "bandwidth_pct": 2.0,
+      "rank": 6,
+      "n_candidates": 3072,
+      "percentile": 0.1953125,
+      "nearest_cell": {
+        "z": 0.3047619047619048,
+        "x_center": -0.09893617021276596,
+        "dist_to_truth_mm": 5.189906584142545
+      },
+      "argmin_dist_mm": 9.696613376681746,
+      "argmin_loss": 0.00012456507046510455
+    },
+    {
+      "bandwidth_pct": 3.0,
+      "rank": 31,
+      "n_candidates": 3072,
+      "percentile": 1.0091145833333333,
+      "nearest_cell": {
+        "z": 0.3047619047619048,
+        "x_center": -0.09893617021276596,
+        "dist_to_truth_mm": 5.189906584142545
+      },
+      "argmin_dist_mm": 28.292694808478863,
+      "argmin_loss": 0.00014592595563850172
+    },
+    {
+      "bandwidth_pct": 5.0,
+      "rank": 2,
+      "n_candidates": 3072,
+      "percentile": 0.06510416666666667,
+      "nearest_cell": {
+        "z": 0.3047619047619048,
+        "x_center": -0.09893617021276596,
+        "dist_to_truth_mm": 5.189906584142545
+      },
+      "argmin_dist_mm": 9.696613376681746,
+      "argmin_loss": 0.0001202874604812136
+    },
+    {
+      "bandwidth_pct": 7.0,
+      "rank": 25,
+      "n_candidates": 3072,
+      "percentile": 0.8138020833333334,
+      "nearest_cell": {
+        "z": 0.3047619047619048,
+        "x_center": -0.09893617021276596,
+        "dist_to_truth_mm": 5.189906584142545
+      },
+      "argmin_dist_mm": 17.980578603604656,
+      "argmin_loss": 0.0001657127175109715
+    },
+    {
+      "bandwidth_pct": 10.0,
+      "rank": 2,
+      "n_candidates": 3072,
+      "percentile": 0.06510416666666667,
+      "nearest_cell": {
+        "z": 0.3047619047619048,
+        "x_center": -0.09893617021276596,
+        "dist_to_truth_mm": 5.189906584142545
+      },
+      "argmin_dist_mm": 9.696613376681746,
+      "argmin_loss": 0.00012943836424491174
+    },
+    {
+      "bandwidth_pct": 13.0,
+      "rank": 76,
+      "n_candidates": 3072,
+      "percentile": 2.4739583333333335,
+      "nearest_cell": {
+        "z": 0.3047619047619048,
+        "x_center": -0.09893617021276596,
+        "dist_to_truth_mm": 5.189906584142545
+      },
+      "argmin_dist_mm": 17.96566329553587,
+      "argmin_loss": 0.00019799765649734506
+    },
+    {
+      "bandwidth_pct": 16.0,
+      "rank": 49,
+      "n_candidates": 3072,
+      "percentile": 1.5950520833333333,
+      "nearest_cell": {
+        "z": 0.3047619047619048,
+        "x_center": -0.09893617021276596,
+        "dist_to_truth_mm": 5.189906584142545
+      },
+      "argmin_dist_mm": 46.87085641682428,
+      "argmin_loss": 0.00020121722981619898
+    },
+    {
+      "bandwidth_pct": 20.0,
+      "rank": 2,
+      "n_candidates": 3072,
+      "percentile": 0.06510416666666667,
+      "nearest_cell": {
+        "z": 0.3047619047619048,
+        "x_center": -0.09893617021276596,
+        "dist_to_truth_mm": 5.189906584142545
+      },
+      "argmin_dist_mm": 9.696613376681746,
+      "argmin_loss": 0.0001335773118697306
+    }
+  ],
+  "lambda2_fine": [
+    {
+      "bandwidth_pct": 0.0,
+      "rank": 46,
+      "n_candidates": 12464,
+      "percentile": 0.36906290115532736,
+      "nearest_cell": {
+        "z": 0.3015337423312884,
+        "x_center": -0.102,
+        "dist_to_truth_mm": 1.8309466236856606
+      },
+      "argmin_dist_mm": 11.807833472357508,
+      "argmin_loss": 0.00011061349399287462
+    },
+    {
+      "bandwidth_pct": 1.0,
+      "rank": 204,
+      "n_candidates": 12464,
+      "percentile": 1.6367137355584083,
+      "nearest_cell": {
+        "z": 0.3015337423312884,
+        "x_center": -0.102,
+        "dist_to_truth_mm": 1.8309466236856606
+      },
+      "argmin_dist_mm": 21.674256215922522,
+      "argmin_loss": 0.00012103079463690006
+    },
+    {
+      "bandwidth_pct": 2.0,
+      "rank": 283,
+      "n_candidates": 12464,
+      "percentile": 2.2705391527599486,
+      "nearest_cell": {
+        "z": 0.3015337423312884,
+        "x_center": -0.102,
+        "dist_to_truth_mm": 1.8309466236856606
+      },
+      "argmin_dist_mm": 21.674256215922522,
+      "argmin_loss": 0.00012485602768171243
+    },
+    {
+      "bandwidth_pct": 3.0,
+      "rank": 312,
+      "n_candidates": 12464,
+      "percentile": 2.503209242618742,
+      "nearest_cell": {
+        "z": 0.3015337423312884,
+        "x_center": -0.102,
+        "dist_to_truth_mm": 1.8309466236856606
+      },
+      "argmin_dist_mm": 21.674256215922522,
+      "argmin_loss": 0.00012802692872704272
+    },
+    {
+      "bandwidth_pct": 5.0,
+      "rank": 470,
+      "n_candidates": 12464,
+      "percentile": 3.770860077021823,
+      "nearest_cell": {
+        "z": 0.3015337423312884,
+        "x_center": -0.102,
+        "dist_to_truth_mm": 1.8309466236856606
+      },
+      "argmin_dist_mm": 21.674256215922522,
+      "argmin_loss": 0.00012026729704264822
+    },
+    {
+      "bandwidth_pct": 7.0,
+      "rank": 454,
+      "n_candidates": 12464,
+      "percentile": 3.642490372272144,
+      "nearest_cell": {
+        "z": 0.3015337423312884,
+        "x_center": -0.102,
+        "dist_to_truth_mm": 1.8309466236856606
+      },
+      "argmin_dist_mm": 21.674256215922522,
+      "argmin_loss": 0.00012921959858707967
+    },
+    {
+      "bandwidth_pct": 10.0,
+      "rank": 679,
+      "n_candidates": 12464,
+      "percentile": 5.447689345314505,
+      "nearest_cell": {
+        "z": 0.3015337423312884,
+        "x_center": -0.102,
+        "dist_to_truth_mm": 1.8309466236856606
+      },
+      "argmin_dist_mm": 21.674256215922522,
+      "argmin_loss": 0.0001232358269277549
+    },
+    {
+      "bandwidth_pct": 13.0,
+      "rank": 571,
+      "n_candidates": 12464,
+      "percentile": 4.581193838254172,
+      "nearest_cell": {
+        "z": 0.3015337423312884,
+        "x_center": -0.102,
+        "dist_to_truth_mm": 1.8309466236856606
+      },
+      "argmin_dist_mm": 21.674256215922522,
+      "argmin_loss": 0.00012737839232795383
+    },
+    {
+      "bandwidth_pct": 16.0,
+      "rank": 655,
+      "n_candidates": 12464,
+      "percentile": 5.255134788189987,
+      "nearest_cell": {
+        "z": 0.3015337423312884,
+        "x_center": -0.102,
+        "dist_to_truth_mm": 1.8309466236856606
+      },
+      "argmin_dist_mm": 21.674256215922522,
+      "argmin_loss": 0.00014029358292296347
+    },
+    {
+      "bandwidth_pct": 20.0,
+      "rank": 936,
+      "n_candidates": 12464,
+      "percentile": 7.509627727856226,
+      "nearest_cell": {
+        "z": 0.3015337423312884,
+        "x_center": -0.102,
+        "dist_to_truth_mm": 1.8309466236856606
+      },
+      "argmin_dist_mm": 21.674256215922522,
+      "argmin_loss": 0.00013588702062172076
+    }
+  ]
+}
