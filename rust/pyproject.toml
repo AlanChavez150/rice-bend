@@ -1,0 +1,21 @@
+# Build config for the rice_bend_core extension module (maturin, NOT setuptools —
+# the main package at ../pyproject.toml is untouched; this is a separate,
+# optional distribution).
+#
+# Dev loop from the repo root:
+#   uv pip install maturin
+#   VIRTUAL_ENV=$PWD/.venv .venv/bin/maturin develop --release -m rust/Cargo.toml
+
+[build-system]
+requires = ["maturin>=1.4,<2"]
+build-backend = "maturin"
+
+[project]
+name = "rice-bend-core"
+version = "0.1.0"
+description = "Rust hot path for the rice-bend MGS solver (optional; python engine remains the reference)"
+requires-python = ">=3.8"
+
+[tool.maturin]
+module-name = "rice_bend_core"
+features = ["python"]
