@@ -6,3 +6,4 @@ build/
 dist/
 uv.lock
 results/
+rust/target/

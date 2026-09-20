@@ -1,0 +1,37 @@
+{
+ "arrays": {
+  "u0": {
+   "file": "u0.bin",
+   "dtype": "c128",
+   "shape": [
+    2399
+   ]
+  },
+  "h": {
+   "file": "h.bin",
+   "dtype": "c128",
+   "shape": [
+    2399
+   ]
+  },
+  "expected_f64": {
+   "file": "expected_f64.bin",
+   "dtype": "c128",
+   "shape": [
+    2399
+   ]
+  },
+  "expected_c64": {
+   "file": "expected_c64.bin",
+   "dtype": "c64",
+   "shape": [
+    2399
+   ]
+  }
+ },
+ "scalars": {
+  "n": 2399,
+  "nfft": 4800,
+  "dx": 0.00025
+ }
+}

@@ -1,0 +1,114 @@
+{
+ "arrays": {
+  "initial_phase": {
+   "file": "initial_phase.bin",
+   "dtype": "f64",
+   "shape": [
+    400
+   ]
+  },
+  "aper_amp": {
+   "file": "aper_amp.bin",
+   "dtype": "f64",
+   "shape": [
+    400
+   ]
+  },
+  "freqs": {
+   "file": "freqs.bin",
+   "dtype": "f64",
+   "shape": [
+    2
+   ]
+  },
+  "rx_field": {
+   "file": "rx_field.bin",
+   "dtype": "c128",
+   "shape": [
+    2,
+    400
+   ]
+  },
+  "error_weighting": {
+   "file": "error_weighting.bin",
+   "dtype": "f64",
+   "shape": [
+    2,
+    400
+   ]
+  },
+  "h_fwd": {
+   "file": "h_fwd.bin",
+   "dtype": "c128",
+   "shape": [
+    2,
+    400
+   ]
+  },
+  "curr_aper_f": {
+   "file": "curr_aper_f.bin",
+   "dtype": "c128",
+   "shape": [
+    400
+   ]
+  },
+  "final_loss_per_freq": {
+   "file": "final_loss_per_freq.bin",
+   "dtype": "f64",
+   "shape": [
+    2
+   ]
+  },
+  "loss_full": {
+   "file": "loss_full.bin",
+   "dtype": "f32",
+   "shape": [
+    12
+   ]
+  },
+  "loss_full_per_freq": {
+   "file": "loss_full_per_freq.bin",
+   "dtype": "f32",
+   "shape": [
+    12,
+    2
+   ]
+  },
+  "psi0": {
+   "file": "psi0.bin",
+   "dtype": "f64",
+   "shape": [
+    400
+   ]
+  },
+  "warm_psi": {
+   "file": "warm_psi.bin",
+   "dtype": "f64",
+   "shape": [
+    400
+   ]
+  }
+ },
+ "scalars": {
+  "ref_freq": 150000000000.0,
+  "dx": 0.0015037593984962294,
+  "seed": 0,
+  "tx_z": 0.15,
+  "rx_z": 0.0,
+  "init_mode": "warm_start",
+  "max_iters": 40,
+  "convergence_count": 10,
+  "convergence_threshold": -1e-08,
+  "lr0": 0.05,
+  "bt_shrink": 0.5,
+  "bt_tries": 8,
+  "final_loss": 0.05461985129995563,
+  "n_iters_run": 12,
+  "stop_reason": "converged",
+  "warm_best_delta": 30.892872608141047,
+  "warm_best_loss": 0.05461985127458229,
+  "warm_period": 94.2477796076938,
+  "warm_n_samples": 961,
+  "warm_ref_channel": 1
+ }
+}

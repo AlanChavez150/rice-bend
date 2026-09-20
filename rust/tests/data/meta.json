@@ -1,0 +1,7 @@
+{
+ "generated": "2026-09-19",
+ "commit": "edff357d72494004dc1fcae1c47e55d33d413ce5",
+ "python": "3.8.10",
+ "numpy": "1.24.4",
+ "scipy": "1.10.1"
+}

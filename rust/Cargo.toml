@@ -1,0 +1,44 @@
+# rice-bend-core: Rust implementation of the gs_reconstruct hot path.
+#
+# Version pins that must not drift casually:
+#   - pyo3 0.22 + numpy(rust) 0.22 + abi3-py38 is the verified pairing for the
+#     project's CPython 3.8.10 venv. Newer pyo3 lines raise the CPython floor;
+#     do not bump without revisiting the 3.8 constraint in ../pyproject.toml.
+#   - The `python` feature gates ALL pyo3/numpy code, so `cargo test` and
+#     `cargo bench` build the pure-Rust core without touching a Python
+#     interpreter. maturin builds with `--features python` (see pyproject.toml).
+
+[package]
+name = "rice-bend-core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "rice_bend_core"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rustfft = "6.2"
+num-complex = "0.4"
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py38"], optional = true }
+numpy = { version = "0.22", optional = true }
+
+[features]
+default = []
+python = ["dep:pyo3", "dep:numpy"]
+
+[dev-dependencies]
+criterion = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[[bench]]
+name = "solve"
+harness = false
+
+[profile.release]
+lto = "thin"
+
+# Benches and the parity gates should run at full speed even under `cargo test --release`.
+[profile.bench]
+lto = "thin"
