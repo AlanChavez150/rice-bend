@@ -272,6 +272,10 @@ def _parse_args():
                         help="Worker processes for the candidate sweep and scene rendering "
                              "(default: all cores; 1 = serial). Per-candidate results are "
                              "identical regardless of value.")
+    parser.add_argument("--engine", choices=["python", "rust"], default=None,
+                        help="Solver engine (overrides gerchberg_saxton.engine; default: "
+                             "the config's, python unless set). 'rust' needs the "
+                             "rice_bend_core extension (rust/README.md).")
     parser.add_argument("--dry-run", action="store_true",
                         help="Enumerate the grid and print a summary without running MGS")
     parser.add_argument("--replot", type=Path, default=None,
@@ -322,6 +326,8 @@ def main():
         return
 
     config = load_config(args.config)
+    if args.engine is not None:
+        config.gerchberg_saxton.engine = args.engine
     if config.grid_search is None:
         log.error(f"Config {args.config} has no `grid_search` block")
         raise SystemExit(2)

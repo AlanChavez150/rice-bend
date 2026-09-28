@@ -13,6 +13,8 @@
 //!                             c64 quantization)   [gate: tests/conv_parity.rs]
 //!   solve.rs + warm_start.rs — solver core (descent + backtracking +
 //!                             warm start)         [gate: tests/solve_parity.rs]
+//!   npmath.rs               — bit-exact numpy reduction/unwrap mirrors
+//!                                                 [gate: tests/numerics_parity.rs]
 //!   types.rs + py.rs        — data interface + PyO3 boundary
 //!                                                 [gate: rust/python/parity.py]
 //!
@@ -21,6 +23,7 @@
 
 pub mod conv;
 pub mod fft;
+pub mod npmath;
 pub mod solve;
 pub mod types;
 pub mod warm_start;

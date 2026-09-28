@@ -62,19 +62,80 @@
 //!
 //! psi = psi0 + best_delta everywhere, then psi[!support] = 0.
 
+use std::f64::consts::PI;
+
+use num_complex::Complex64;
+
 use crate::conv::Convolver;
+use crate::npmath::{np_mean_f64, np_unwrap};
+use crate::solve::gs_core;
 use crate::types::{ChannelData, KernelPair, SolveParams};
+
+/// WARM_START_SCAN_STEP (mgs.py:30), as the same expression.
+const SCAN_STEP: f64 = 2.0 * PI / 64.0;
+/// WARM_START_MAX_SAMPLES (mgs.py:34).
+const MAX_SAMPLES: usize = 100_000;
+
+/// The offset grid of mgs.py:82-93: one synthetic-wavelength period of the
+/// comb, sampled at SCAN_STEP. Returns (period, n_samples).
+fn scan_grid(channels: &[ChannelData], ref_freq: f64) -> (f64, usize) {
+    let mut freqs: Vec<f64> = channels.iter().map(|ch| ch.freq).collect();
+    freqs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let min_gap = freqs
+        .windows(2)
+        .map(|p| p[1] - p[0])
+        .filter(|&g| g > 0.0)
+        .fold(f64::INFINITY, f64::min);
+    let period = if min_gap.is_finite() { 2.0 * PI * ref_freq / min_gap } else { 2.0 * PI };
+    let n_samples = ((period / SCAN_STEP).ceil() as usize).min(MAX_SAMPLES);
+    (period, n_samples)
+}
 
 /// Best (delta, loss) over the offset grid, given the already-propagated
 /// per-channel base fields (QUANTIZED c64 values, len N each). Split out from
 /// `warm_start_psi` so the parity test can gate the scan on its own.
+///
+/// Analytic form: channel f's loss at offset delta is A_f - Re(e^{i rho_f delta} S_f),
+/// so each channel reduces to two numbers once and every grid point costs O(F).
 pub fn delta_scan(
     channels: &[ChannelData],
-    base_props: &[Vec<num_complex::Complex64>],
+    base_props: &[Vec<Complex64>],
     ref_freq: f64,
 ) -> (f64, f64) {
-    let _ = (channels, base_props, ref_freq);
-    todo!("solver work package: stage-3 scan (literal or analytic)")
+    let n_freq = channels.len();
+    let mut a_f = Vec::with_capacity(n_freq);
+    let mut s_f = Vec::with_capacity(n_freq);
+    for (ch, b) in channels.iter().zip(base_props) {
+        let n = b.len();
+        let (mut a, mut s_re, mut s_im) = (vec![0.0; n], vec![0.0; n], vec![0.0; n]);
+        for j in 0..n {
+            let (w2, m) = (ch.error_weighting[j] * ch.error_weighting[j], ch.rx_field[j]);
+            a[j] = w2 * (b[j].norm_sqr() + m.norm_sqr());
+            let bm = b[j] * m.conj();
+            s_re[j] = w2 * bm.re;
+            s_im[j] = w2 * bm.im;
+        }
+        a_f.push(0.5 * np_mean_f64(&a));
+        s_f.push(Complex64::new(np_mean_f64(&s_re), np_mean_f64(&s_im)));
+    }
+
+    let (period, n_samples) = scan_grid(channels, ref_freq);
+    let step = period / n_samples as f64;
+    let (mut best_delta, mut best_loss) = (0.0, f64::INFINITY);
+    for k in 0..n_samples {
+        let delta = k as f64 * step;
+        let mut loss = 0.0;
+        for f in 0..n_freq {
+            let (s, c) = (channels[f].rho * delta).sin_cos();
+            loss += a_f[f] - (c * s_f[f].re - s * s_f[f].im);
+        }
+        loss /= n_freq as f64;
+        if loss < best_loss {
+            best_loss = loss;
+            best_delta = delta;
+        }
+    }
+    (best_delta, best_loss)
 }
 
 /// Full warm start: stage-1 solve -> unwrap -> scan. Returns the starting psi
@@ -91,6 +152,60 @@ pub fn warm_start_psi(
     params: &SolveParams,
     conv: &mut Convolver,
 ) -> Vec<f64> {
-    let _ = (initial_phase, aper_amp, support, channels, kernels, ref_freq, dx, params, conv);
-    todo!("solver work package: stages 1-3 above")
+    let n = aper_amp.len();
+
+    // 1. reference solve: the channel nearest rho == 1 (first wins ties), solved
+    //    ALONE against its own frequency, so its rho is exactly 1.0
+    let mut c_idx = 0;
+    for (f, ch) in channels.iter().enumerate() {
+        if (ch.rho - 1.0).abs() < (channels[c_idx].rho - 1.0).abs() {
+            c_idx = f;
+        }
+    }
+    let mut ch_ref = channels[c_idx].clone();
+    ch_ref.rho = 1.0; // freq / freq, which IEEE makes exactly 1.0
+    let stage1 = gs_core(
+        initial_phase,
+        aper_amp,
+        support,
+        std::slice::from_ref(&ch_ref),
+        std::slice::from_ref(&kernels[c_idx]),
+        dx,
+        params,
+        conv,
+    );
+
+    // 2. unwrap angle(amp * exp(i theta)) over the support, into psi units
+    let support_idx: Vec<usize> = (0..n).filter(|&j| support[j]).collect();
+    let angles: Vec<f64> = support_idx
+        .iter()
+        .map(|&j| {
+            let (s, c) = stage1.aper_phase[j].sin_cos();
+            (aper_amp[j] * s).atan2(aper_amp[j] * c)
+        })
+        .collect();
+    let mut psi0 = vec![0.0; n];
+    for (&j, u) in support_idx.iter().zip(np_unwrap(&angles)) {
+        psi0[j] = u / channels[c_idx].rho;
+    }
+
+    // 3. the absolute-offset scan over each channel's once-propagated field
+    let mut base_props = Vec::with_capacity(channels.len());
+    let mut u0 = vec![Complex64::new(0.0, 0.0); n];
+    for (ch, kp) in channels.iter().zip(kernels) {
+        for &j in &support_idx {
+            let (s, c) = (ch.rho * psi0[j]).sin_cos();
+            u0[j] = Complex64::new(aper_amp[j] * c, aper_amp[j] * s);
+        }
+        let mut prop = vec![Complex64::new(0.0, 0.0); n];
+        conv.rs_apply_into(&u0, &kp.fwd, dx, &mut prop);
+        base_props.push(prop);
+    }
+    let (best_delta, _) = delta_scan(channels, &base_props, ref_freq);
+
+    let mut psi = vec![0.0; n];
+    for &j in &support_idx {
+        psi[j] = psi0[j] + best_delta;
+    }
+    psi
 }

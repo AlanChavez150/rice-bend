@@ -1,0 +1,82 @@
+{
+ "arrays": {
+  "sum64_data": {
+   "file": "sum64_data.bin",
+   "dtype": "f64",
+   "shape": [
+    78271
+   ]
+  },
+  "sum64_lens": {
+   "file": "sum64_lens.bin",
+   "dtype": "f64",
+   "shape": [
+    59
+   ]
+  },
+  "sum64_expected": {
+   "file": "sum64_expected.bin",
+   "dtype": "f64",
+   "shape": [
+    59
+   ]
+  },
+  "sum32_data": {
+   "file": "sum32_data.bin",
+   "dtype": "f32",
+   "shape": [
+    3017
+   ]
+  },
+  "sum32_lens": {
+   "file": "sum32_lens.bin",
+   "dtype": "f64",
+   "shape": [
+    38
+   ]
+  },
+  "sum32_expected": {
+   "file": "sum32_expected.bin",
+   "dtype": "f32",
+   "shape": [
+    38
+   ]
+  },
+  "win_data": {
+   "file": "win_data.bin",
+   "dtype": "f32",
+   "shape": [
+    600
+   ]
+  },
+  "win_expected": {
+   "file": "win_expected.bin",
+   "dtype": "f32",
+   "shape": [
+    60
+   ]
+  },
+  "unwrap_in": {
+   "file": "unwrap_in.bin",
+   "dtype": "f64",
+   "shape": [
+    3413
+   ]
+  },
+  "unwrap_lens": {
+   "file": "unwrap_lens.bin",
+   "dtype": "f64",
+   "shape": [
+    6
+   ]
+  },
+  "unwrap_out": {
+   "file": "unwrap_out.bin",
+   "dtype": "f64",
+   "shape": [
+    3413
+   ]
+  }
+ },
+ "scalars": {}
+}

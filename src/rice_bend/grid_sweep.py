@@ -26,7 +26,7 @@ from rice_bend.config import (GridSearchConfig, SimConfig, SimSceneConfig,
                               center_freq_index)
 from rice_bend.data_store import (c64, f64, provenance, save_config_snapshot,
                                   write_json)
-from rice_bend.mgs import MGS, gs_reconstruct
+from rice_bend.mgs import MGS, gs_reconstruct, rust_core
 from rice_bend.parallel import map_workers, worker_shared
 from rice_bend.sim_scene import sampled_axis
 
@@ -285,6 +285,9 @@ def run_grid_search(config: SimConfig, freqs: List[float], *, limit: Optional[in
     elif gs_cfg.seed is None:
         log.warning("grid_search.seed and gerchberg_saxton.seed are both null; candidates "
                     "will use independent random initial phases (residuals not comparable)")
+    if gs_cfg.engine == "rust":
+        rust_core()   # fail here, not in every worker after the setup
+    log.info(f"Solver engine: {gs_cfg.engine}")
 
     # 3. enumerate + report. Validity is per (z, frequency); a point is usable when
     #    it passes at >= 1 frequency, so `usable` (and therefore --limit's slice) is

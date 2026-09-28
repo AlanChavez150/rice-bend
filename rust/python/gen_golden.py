@@ -14,6 +14,8 @@ Cases produced (names are pinned by rust/tests/conv_parity.rs / solve_parity.rs)
   solve_single            one F=1 candidate solve, tiny_check geometry (N=400)
   solve_joint             the same candidate at F=2 with the full warm start,
                           including the stage-2/3 intermediates (psi0, delta)
+  numerics                np.add.reduce (f64/f32), the f32 convergence-window
+                          mean, and np.unwrap — gates src/npmath.rs bit-exactly
 """
 import json
 import subprocess
@@ -245,6 +247,52 @@ def gen_solve_joint():
     save_case("solve_joint", arrays, scalars)
 
 
+def gen_numerics():
+    """Ragged batches stored flat: `<name>_data` concatenated, `<name>_lens` as
+    f64 (exact small integers), `<name>_expected` one value per batch."""
+    rng = np.random.default_rng(7)
+
+    def pack(arrays):
+        return (np.concatenate(arrays),
+                np.array([len(a) for a in arrays], dtype=np.float64))
+
+    # f64 sums: every size class of the pairwise tree, incl. the 2400 scene size
+    lens64 = [1, 2, 7, 8, 9, 15, 16, 17, 127, 128, 129, 130, 255, 256, 400, 1000,
+              2399, 2400, 2401] + [int(v) for v in rng.integers(1, 3000, 40)]
+    arr64 = [rng.standard_normal(n) * 10.0 ** rng.integers(-6, 6) for n in lens64]
+    sum64_data, sum64_lens = pack(arr64)
+    sum64_expected = np.array([np.add.reduce(a) for a in arr64], dtype=np.float64)
+
+    # f32 sums, including the loss-history sizes the convergence window sees
+    lens32 = [1, 7, 8, 9, 10, 16, 17, 100] + [int(v) for v in rng.integers(1, 200, 30)]
+    arr32 = [(rng.standard_normal(n) * 10.0 ** rng.integers(-6, 3)).astype(np.float32)
+             for n in lens32]
+    sum32_data, sum32_lens = pack(arr32)
+    sum32_expected = np.array([np.add.reduce(a) for a in arr32], dtype=np.float32)
+
+    # the convergence test verbatim: mean(diff(10 f32 losses)) (mgs.py:309-310)
+    win = (1e-3 * np.exp(-rng.uniform(0, 3, (60, 10)).cumsum(axis=1))).astype(np.float32)
+    win_expected = np.array([np.mean(np.diff(w)) for w in win], dtype=np.float32)
+
+    # unwrap: smooth ramps, noisy walks, and exact +/-pi steps (the ambiguous boundary)
+    unw = [np.angle(np.exp(1j * np.cumsum(rng.normal(0, s, n))))
+           for s, n in ((0.3, 400), (1.5, 400), (2.9, 200), (0.05, 2400))]
+    unw.append(np.array([0.0, np.pi, 0.0, -np.pi, 0.0, np.pi, 2 * np.pi, -np.pi]))
+    unw.append(np.array([3.0, -3.0, 3.1, -3.1, 1e-3]))
+    unwrap_in, unwrap_lens = pack(unw)
+    unwrap_out = np.concatenate([np.unwrap(a) for a in unw])
+
+    save_case("numerics",
+              {"sum64_data": sum64_data, "sum64_lens": sum64_lens,
+               "sum64_expected": sum64_expected,
+               "sum32_data": sum32_data, "sum32_lens": sum32_lens,
+               "sum32_expected": sum32_expected,
+               "win_data": win.ravel(), "win_expected": win_expected,
+               "unwrap_in": unwrap_in, "unwrap_lens": unwrap_lens,
+               "unwrap_out": unwrap_out},
+              {})
+
+
 def main():
     assert sys.byteorder == "little", "golden vectors are little-endian raw bytes"
     DATA.mkdir(parents=True, exist_ok=True)
@@ -252,6 +300,7 @@ def main():
     gen_conv_cases()
     gen_solve_single()
     gen_solve_joint()
+    gen_numerics()
     commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, check=True,
                             capture_output=True, text=True).stdout.strip()
     meta = {

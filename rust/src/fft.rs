@@ -7,7 +7,10 @@
 //!
 //! WORK PACKAGE: FFT/convolution layer. Gate: `cargo test --test conv_parity`.
 
+use std::sync::Arc;
+
 use num_complex::Complex64;
+use rustfft::{Fft, FftPlanner};
 
 /// Smallest n' >= n whose prime factors are all in {2, 3, 5, 7, 11}.
 pub fn next_fast_len(n: usize) -> usize {
@@ -42,24 +45,36 @@ pub fn next_fast_len(n: usize) -> usize {
 /// methods are the interface `conv::Convolver` compiles against.
 pub struct FftPair {
     pub nfft: usize,
-    // implementation fields go here (forward/inverse plans + scratch)
+    forward: Arc<dyn Fft<f64>>,
+    inverse: Arc<dyn Fft<f64>>,
+    scratch: Vec<Complex64>,
 }
 
 impl FftPair {
     pub fn new(nfft: usize) -> Self {
-        let _ = nfft;
-        todo!("FFT work package: build forward/inverse rustfft plans + scratch")
+        let mut planner = FftPlanner::<f64>::new();
+        let forward = planner.plan_fft_forward(nfft);
+        let inverse = planner.plan_fft_inverse(nfft);
+        let scratch_len = forward
+            .get_inplace_scratch_len()
+            .max(inverse.get_inplace_scratch_len());
+        FftPair {
+            nfft,
+            forward,
+            inverse,
+            scratch: vec![Complex64::new(0.0, 0.0); scratch_len],
+        }
     }
 
     /// In-place forward FFT of `buf` (len == nfft).
     pub fn fft_in_place(&mut self, buf: &mut [Complex64]) {
-        let _ = buf;
-        todo!("FFT work package")
+        debug_assert_eq!(buf.len(), self.nfft);
+        self.forward.process_with_scratch(buf, &mut self.scratch);
     }
 
     /// In-place inverse FFT of `buf` (len == nfft), UNNORMALIZED (no 1/nfft).
     pub fn ifft_in_place(&mut self, buf: &mut [Complex64]) {
-        let _ = buf;
-        todo!("FFT work package")
+        debug_assert_eq!(buf.len(), self.nfft);
+        self.inverse.process_with_scratch(buf, &mut self.scratch);
     }
 }

@@ -31,7 +31,7 @@
 
 use num_complex::Complex64;
 
-use crate::fft::FftPair;
+use crate::fft::{next_fast_len, FftPair};
 
 /// The forward FFT of one zero-padded kernel (len == nfft), computed once per
 /// solve. The ADJOINT kernel's spectrum must be built from the time-domain
@@ -50,21 +50,59 @@ pub struct KernelSpectrum {
 pub struct Convolver {
     pub n_signal: usize,
     pub nfft: usize,
-    // implementation fields go here (FftPair + one nfft staging buffer)
+    fft: FftPair,
+    buf: Vec<Complex64>,
+    /// 1/nfft, precomputed: pocketfft applies its normalization as a multiply.
+    fct: f64,
+    /// First index of the centered "same" slice of the linear convolution.
+    start: usize,
 }
 
 impl Convolver {
     pub fn new(n_signal: usize) -> Self {
-        let _ = n_signal;
-        let _ = FftPair::new; // the intended building block
-        todo!("conv work package: nfft = next_fast_len(2 * n_signal - 1)")
+        assert!(n_signal > 0, "Convolver needs a non-empty signal");
+        let nfft = next_fast_len(2 * n_signal - 1);
+        Convolver {
+            n_signal,
+            nfft,
+            fft: FftPair::new(nfft),
+            buf: vec![Complex64::new(0.0, 0.0); nfft],
+            fct: 1.0 / nfft as f64,
+            start: (n_signal - 1) / 2,
+        }
     }
 
     /// FFT of the zero-padded kernel `h` (len == n_signal). Once per solve per
     /// kernel; allocation here is fine.
     pub fn kernel_spectrum(&mut self, h: &[Complex64]) -> KernelSpectrum {
-        let _ = h;
-        todo!("conv work package")
+        assert_eq!(h.len(), self.n_signal, "kernel length");
+        let mut spec = vec![Complex64::new(0.0, 0.0); self.nfft];
+        spec[..self.n_signal].copy_from_slice(h);
+        self.fft.fft_in_place(&mut spec);
+        KernelSpectrum { n_signal: self.n_signal, spec }
+    }
+
+    /// Steps 1-5: leaves the full-precision "same" result in `out`.
+    fn convolve_same(&mut self, u0: &[Complex64], ks: &KernelSpectrum, dx: f64, out: &mut [Complex64]) {
+        let n = self.n_signal;
+        debug_assert_eq!(u0.len(), n);
+        debug_assert_eq!(out.len(), n);
+        debug_assert_eq!(ks.n_signal, n);
+
+        self.buf[..n].copy_from_slice(u0);
+        self.buf[n..].fill(Complex64::new(0.0, 0.0));
+        self.fft.fft_in_place(&mut self.buf);
+        // signal spectrum on the left: numpy evaluates sp1 * sp2 in this order
+        for (b, &k) in self.buf.iter_mut().zip(&ks.spec) {
+            *b *= k;
+        }
+        self.fft.ifft_in_place(&mut self.buf);
+
+        let (fct, start) = (self.fct, self.start);
+        for (o, &v) in out.iter_mut().zip(&self.buf[start..start + n]) {
+            // two separate multiplies: pocketfft's 1/nfft, then rs.py's * dx
+            *o = Complex64::new((v.re * fct) * dx, (v.im * fct) * dx);
+        }
     }
 
     /// The rs_apply hot path: steps 1-6 above. `out` has len n_signal and
@@ -76,8 +114,10 @@ impl Convolver {
         dx: f64,
         out: &mut [Complex64],
     ) {
-        let _ = (u0, ks, dx, out);
-        todo!("conv work package")
+        self.convolve_same(u0, ks, dx, out);
+        for o in out.iter_mut() {
+            *o = quantize_c64(*o);
+        }
     }
 
     /// Steps 1-5 WITHOUT the quantization — the pre-downcast value, used only by
@@ -89,20 +129,31 @@ impl Convolver {
         dx: f64,
         out: &mut [Complex64],
     ) {
-        let _ = (u0, ks, dx, out);
-        todo!("conv work package")
+        self.convolve_same(u0, ks, dx, out);
     }
+}
+
+/// The load-bearing complex64 round-trip (rs.py:79-82), kept in c128 storage.
+#[inline]
+pub fn quantize_c64(v: Complex64) -> Complex64 {
+    Complex64::new((v.re as f32) as f64, (v.im as f32) as f64)
 }
 
 /// One-shot convenience for tests and the Python-side smoke hook: build a
 /// Convolver + spectrum, apply once, return the quantized result.
 pub fn fftconvolve_same(u0: &[Complex64], h: &[Complex64], dx: f64) -> Vec<Complex64> {
-    let _ = (u0, h, dx);
-    todo!("conv work package: Convolver::new + kernel_spectrum + rs_apply_into")
+    let mut conv = Convolver::new(u0.len());
+    let ks = conv.kernel_spectrum(h);
+    let mut out = vec![Complex64::new(0.0, 0.0); u0.len()];
+    conv.rs_apply_into(u0, &ks, dx, &mut out);
+    out
 }
 
 /// One-shot un-quantized variant (parity tests only).
 pub fn fftconvolve_same_f64(u0: &[Complex64], h: &[Complex64], dx: f64) -> Vec<Complex64> {
-    let _ = (u0, h, dx);
-    todo!("conv work package")
+    let mut conv = Convolver::new(u0.len());
+    let ks = conv.kernel_spectrum(h);
+    let mut out = vec![Complex64::new(0.0, 0.0); u0.len()];
+    conv.rs_apply_f64_into(u0, &ks, dx, &mut out);
+    out
 }

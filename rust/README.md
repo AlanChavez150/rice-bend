@@ -2,13 +2,14 @@
 
 > Milestone status and the remaining work order live in [PLAN.md](PLAN.md).
 
-The Python implementation under `src/rice_bend/` is **the reference** and is not
-modified by this work: `scripts/characterize.sh` pins it byte-for-byte, and this
-crate is a second, tolerance-validated engine for the sweep's compute
-(`gs_reconstruct`, ~90% of a grid search's multi-hour cost). Engine wiring into
-the CLI (`--engine rust`) is deliberately deferred to a later, separately
-approved change; until then the extension is exercised only by
-`rust/python/parity.py`.
+The Python implementation under `src/rice_bend/` is **the reference**:
+`scripts/characterize.sh` pins it byte-for-byte, and this crate is a second,
+tolerance-validated engine for the sweep's compute (`gs_reconstruct`, ~90% of a
+grid search's multi-hour cost). Select it with `--engine rust` on
+`grid-search-mgs` / `mgs-study` (or `gerchberg_saxton.engine: rust`). The
+dispatch lives at one point in `gs_reconstruct`, after the shared seed/kernel
+setup, so both engines start from identical arrays. Compare two saved runs with
+`python/compare_runs.py <python_run> <rust_run>`.
 
 ## Parity bar (settled)
 
@@ -48,17 +49,17 @@ verified pairing for CPython 3.8.10. Do not bump without revisiting the floor.
 
 ## Work split and gates
 
-| Package | Files | Author | Gate |
+| Package | Files | Gate | Status |
 |---|---|---|---|
-| FFT/convolution | `src/fft.rs`, `src/conv.rs` | Alan | `cargo test --test conv_parity` |
-| Solver core | `src/solve.rs`, `src/warm_start.rs` | Alan | `cargo test --test solve_parity` |
-| PyO3 boundary | `src/py.rs` (+`src/types.rs` if fields need adjusting) | Alan | `maturin develop` builds, `parity.py` green |
-| Scaffolding, contracts, golden vectors, parity/bench harness | everything else here | Claude | `cargo build` clean; vectors committed |
+| FFT/convolution | `src/fft.rs`, `src/conv.rs` | `cargo test --test conv_parity` | green — 100% post-downcast bit-equal |
+| numpy mirrors | `src/npmath.rs` | `cargo test --test numerics_parity` | green — bit-exact |
+| Solver core | `src/solve.rs`, `src/warm_start.rs` | `cargo test --test solve_parity` | green — final loss bit-identical |
+| PyO3 boundary | `src/py.rs` | `maturin develop` + `python/parity.py` | green — worst rel Δloss 5e-14 |
 
-Suggested order: conv → solve → warm start → py (each test layer builds on the
-previous one). Every stub's doc comment carries the exact semantics contract,
-with `src/rice_bend/mgs.py` / `rs.py` line references as the source of truth.
-The load-bearing traps, in one place:
+Alan wrote `next_fast_len`; Claude wrote the harness and, at Alan's request,
+the rest of the implementation. Every module's doc comment carries its
+semantics contract, with `src/rice_bend/mgs.py` / `rs.py` line references as
+the source of truth. The load-bearing traps, in one place:
 
 - **complex64 quantization** exactly at the two `rs_apply` outputs, nowhere else.
 - **Adjoint spectrum from the time-domain conjugate** (`FFT(pad(conj(h)))`),
@@ -87,6 +88,47 @@ The load-bearing traps, in one place:
 | cached-kernel-spectrum FFT equivalent (what `rs_apply_into` should beat) | ~68 µs/call |
 
 Full-scale context: one `study_frequency_grid2l` point = 12 464 candidates ×
-~694 iterations ≈ 10⁸ convolutions ≈ 4.5 core-hours; target is 5–10× on that.
-Record the M5 numbers (criterion + `parity.py` timings + one full 64×48 point)
-here when they exist.
+~694 iterations ≈ 10⁸ convolutions ≈ 4.5 core-hours.
+
+## Measured speedup (M5, 2026-09-27, `python/bench.py`)
+
+Single process, single thread, identical inputs; 16 candidates spread evenly
+over the 12 464-point `scenario_caustic_hit_pm5.yml` grid. Rust timings include
+the Python-side kernel build and marshaling.
+
+| Workload | Python s/cand | Rust s/cand | Speedup (range) | max rel Δloss | same n_iters | argmin |
+|---|---|---|---|---|---|---|
+| A: pm5 study point (3-tone, warm start) | 1.403 | 0.282 | **5.0×** (4.8–5.2) | 5.2e-12 | 16/16 | same |
+| B: 1-frequency anchor (150 GHz) | 0.368 | 0.073 | **5.1×** (4.9–5.2) | 2.0e-13 | 16/16 | same |
+
+Projected single-core cost of one full pm5 study point: **4.86 → 0.98
+core-hours**; a 10-point study on 16 cores: ~3 h → ~37 min.
+
+Primitive (N=2400): scipy `fftconvolve` 106.5 µs/call vs Rust
+`rs_apply_into` **23.6 µs** (criterion) — 4.5×. The Rust solve is now ~90%
+FFT time, so further gains need FFT-level changes (e.g. pruned transforms
+exploiting the sparse support/RX window), not more loop tuning.
+
+### End to end through the CLI (2026-09-27)
+
+One pm5 study point on the settled 64×48 grid: `grid-search-mgs --config
+configs/scenario_caustic_hit.yml --freq 142.5e9 150e9 157.5e9 --engine {python,rust}`
+(3 072 candidates, 3 tones, warm start, 800 iterations, default `-j` = 32).
+
+| | Python | Rust |
+|---|---|---|
+| Wall time (whole run incl. setup, persistence, plots) | 247.0 s | 56.5 s (**4.4×**) |
+| argmin cell / error to truth | #680 / 5.93 mm | #680 / 5.93 mm |
+| top-candidate cluster (7 cells) / mean distance | 9.54 mm | identical |
+
+`python/compare_runs.py`: max per-candidate rel Δloss 1.3e-9, 1 506/3 072
+bit-identical, n_iters and stop_reason identical 3 072/3 072. The gap from 5× to
+4.4× is fixed Python-side work both runs share (estimated ~9 s: measurement,
+3 072 `.npz` writes, analysis, plots). It matters less as grids grow.
+
+Parity is far tighter than the rtol-1e-3 bar because the c64 quantization
+resynchronizes the two engines: rustfft's ulp differences almost never cross an
+f32 rounding boundary (100% of conv golden elements bit-equal), and the
+reductions mirror numpy's pairwise summation exactly (`src/npmath.rs`). The
+only unmirrored ops are numpy's SIMD complex `exp`/`abs` (1-2 ulp on 0.1-3.6%
+of elements), which is why a few candidates differ at the 1e-12 level.

@@ -13,6 +13,14 @@ Supports both pure simulation and real experimental data captured from an oscill
 pip install -e .
 ```
 
+Optional: the Rust solver engine (`--engine rust`, ~5× faster per candidate) is a
+separate extension module under `rust/`. It needs a Rust toolchain and maturin:
+
+```bash
+uv pip install maturin
+VIRTUAL_ENV=$PWD/.venv .venv/bin/maturin develop --release -m rust/Cargo.toml
+```
+
 ## Usage
 
 Three console entry points are installed:
@@ -109,6 +117,7 @@ grid-search-mgs --freq 140e9 150e9 160e9        # joint sweep: one solve per can
 grid-search-mgs --dry-run                       # enumerate the grid (counts + per-frequency validity), no MGS
 grid-search-mgs --limit 10                      # quick partial run
 grid-search-mgs -j 8                            # worker processes (default: all cores; 1 = serial)
+grid-search-mgs --engine rust                   # solve with the Rust engine (see "Solver engines")
 grid-search-mgs -o results/my_run               # name the run directory outright
 grid-search-mgs --scenes                        # one PNG per candidate beam (scenes/) + an averaged scene
 grid-search-mgs --anim                          # animate the candidate beams -> candidate_beams.mp4 (ffmpeg)
@@ -188,6 +197,20 @@ candidate-ranking step. On a headless machine set `MPLBACKEND=Agg`.
 (default: all cores; `1` = serial). Results do not depend on it — every candidate uses the
 same fixed seed, and results are assembled by input index, so the manifest and every
 candidate `.npz` are byte-identical whatever `-j` you pass.
+
+#### Solver engines
+
+`--engine {python,rust}` (on `grid-search-mgs` and `mgs-study`, or
+`gerchberg_saxton.engine` in the config) picks who runs each candidate's solve.
+`python` is the default and the reference implementation. `rust` runs the same
+algorithm in the `rice_bend_core` extension (build it per Install), about 5× faster.
+It is checked against python by `rust/python/parity.py` and
+`rust/python/compare_runs.py`, and agrees far inside the parity bar:
+per-candidate losses within ~1e-12, with identical argmin and top candidates.
+The rest of the run (measurement, persistence, analysis, plots) is python either way.
+Solves that record GS history (single-run `mgs`, `--true-mgs`) always use python.
+The engine a run used is recorded in its `config_snapshot.json`. Asking for `rust`
+without the extension built fails immediately; it never falls back to python.
 
 #### Multiple frequencies
 
@@ -366,4 +389,5 @@ scripts/characterize.sh --bless    # regenerate the expected digest
 ```
 
 Takes ~25 s. The expected values are generated, never transcribed — hand-typed float literals
-rot the moment nobody re-blesses them.
+rot the moment nobody re-blesses them. It pins the python engine only. The Rust engine has
+its own gates (`cd rust && cargo test`, `rust/python/parity.py`); see `rust/README.md`.

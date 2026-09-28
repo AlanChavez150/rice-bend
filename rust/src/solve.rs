@@ -50,11 +50,10 @@
 //! n_iters_run = iter_idx + 1. The losses MUST be read back at f32; running this
 //! window in f64 skews n_iters systematically.
 //!
-//! Known accepted divergence: numpy's mean over a small f32 array uses an 8-way
-//! unrolled pairwise sum; a plain sequential f32 sum can differ in the last ulp
-//! and (rarely, when the mean sits within an ulp of the threshold) move the stop
-//! decision by an iteration. The parity bar treats n_iters as report-only for
-//! exactly this reason — do not chase bit-parity here.
+//! The window mean mirrors numpy's pairwise f32 summation exactly (npmath.rs).
+//! n_iters can still differ from Python when the LOSSES differ — numpy's SIMD
+//! complex exp/abs are not mirrored (1-2 ulp) — so the parity bar keeps n_iters
+//! report-only.
 //!
 //! ## What is returned
 //!
@@ -77,8 +76,49 @@
 
 use num_complex::Complex64;
 
-use crate::conv::Convolver;
-use crate::types::{ChannelData, CoreResult, KernelPair, SolveParams};
+use crate::conv::{Convolver, KernelSpectrum};
+use crate::npmath::{np_mean_f64, np_sum_f32};
+use crate::types::{ChannelData, CoreResult, KernelPair, SolveParams, StopReason};
+
+/// Preallocated per-solve work buffers: the loop body allocates nothing.
+struct Work {
+    u0: Vec<Complex64>,
+    prop: Vec<Complex64>,
+    r: Vec<Complex64>,
+    abs2: Vec<f64>,
+    g: Vec<Complex64>,
+}
+
+impl Work {
+    fn new(n: usize) -> Self {
+        let z = Complex64::new(0.0, 0.0);
+        Work { u0: vec![z; n], prop: vec![z; n], r: vec![z; n], abs2: vec![0.0; n], g: vec![z; n] }
+    }
+}
+
+/// u0 = amp * exp(i * rho * psi), evaluated on the support only: amp is 0 off
+/// the support, so u0 is 0 there and the costly sin_cos can be skipped.
+fn build_u0(u0: &mut [Complex64], aper_amp: &[f64], support_idx: &[usize], rho: f64, psi: &[f64]) {
+    for &j in support_idx {
+        let (s, c) = (rho * psi[j]).sin_cos();
+        let a = aper_amp[j];
+        u0[j] = Complex64::new(a * c, a * s);
+    }
+}
+
+/// Forward-propagate the current u0 for one channel and return its loss
+/// 0.5 * mean(|w (prop - rx)|^2), leaving the weighted residual in `work.r`.
+fn channel_loss(work: &mut Work, ch: &ChannelData, fwd: &KernelSpectrum, dx: f64, conv: &mut Convolver) -> f64 {
+    conv.rs_apply_into(&work.u0, fwd, dx, &mut work.prop);
+    for j in 0..work.r.len() {
+        let d = work.prop[j] - ch.rx_field[j];
+        let w = ch.error_weighting[j];
+        let r = Complex64::new(w * d.re, w * d.im);
+        work.r[j] = r;
+        work.abs2[j] = r.re * r.re + r.im * r.im;
+    }
+    0.5 * np_mean_f64(&work.abs2)
+}
 
 /// Run the descent from `initial_phase`. Inputs are on the full scene x-axis
 /// (length N == conv.n_signal); `channels` and `kernels` are index-aligned.
@@ -97,7 +137,105 @@ pub fn gs_core(
     params: &SolveParams,
     conv: &mut Convolver,
 ) -> CoreResult {
-    let _ = (initial_phase, aper_amp, support, channels, kernels, dx, params, conv);
-    let _ = Complex64::new(0.0, 0.0);
-    todo!("solver work package: the per-iteration recipe above")
+    let n = conv.n_signal;
+    let n_freq = channels.len();
+    assert!(n_freq >= 1, "gs_core needs at least one channel");
+    assert_eq!(kernels.len(), n_freq);
+    assert!(initial_phase.len() == n && aper_amp.len() == n && support.len() == n);
+
+    let support_idx: Vec<usize> = (0..n).filter(|&j| support[j]).collect();
+    let mut work = Work::new(n);
+    let mut psi = initial_phase.to_vec();
+    let mut off_support_zeroed = false;
+    let mut theta = vec![0.0; n];
+    let mut grad = vec![0.0; n];
+    let mut loss_pf = vec![0.0; n_freq];
+    let mut trial_pf = vec![0.0; n_freq];
+    let mut hist = vec![0.0f32; params.max_iters];
+    let mut hist_pf = vec![0.0f32; params.max_iters * n_freq];
+    let mut diffs = Vec::with_capacity(params.convergence_count);
+
+    let mut stop_reason = StopReason::MaxIters;
+    let mut n_iters_run = params.max_iters;
+    let mut loss = f64::NAN;
+
+    for iter_idx in 0..params.max_iters {
+        // forward + adjoint per channel; gradient of the MEAN loss
+        grad.fill(0.0);
+        for (f, (ch, kp)) in channels.iter().zip(kernels).enumerate() {
+            build_u0(&mut work.u0, aper_amp, &support_idx, ch.rho, &psi);
+            loss_pf[f] = channel_loss(&mut work, ch, &kp.fwd, dx, conv);
+            conv.rs_apply_into(&work.r, &kp.adj, dx, &mut work.g);
+            for &j in &support_idx {
+                // imag(g * conj(u0)), in numpy's complex-multiply operand order
+                let (g, u) = (work.g[j], work.u0[j]);
+                let im = g.re * (-u.im) + g.im * u.re;
+                grad[j] += ch.rho * (2.0 * im);
+            }
+        }
+        for &j in &support_idx {
+            grad[j] /= n_freq as f64;
+        }
+
+        loss = np_mean_f64(&loss_pf);
+        hist[iter_idx] = loss as f32;
+        for f in 0..n_freq {
+            hist_pf[iter_idx * n_freq + f] = loss_pf[f] as f32;
+        }
+
+        // backtracking line search on the joint loss (strict decrease, first win)
+        let mut step = params.lr0;
+        for _ in 0..params.bt_tries {
+            for &j in &support_idx {
+                theta[j] = psi[j] - step * grad[j];
+            }
+            for (f, (ch, kp)) in channels.iter().zip(kernels).enumerate() {
+                build_u0(&mut work.u0, aper_amp, &support_idx, ch.rho, &theta);
+                trial_pf[f] = channel_loss(&mut work, ch, &kp.fwd, dx, conv);
+            }
+            let loss_trial = np_mean_f64(&trial_pf);
+            if loss_trial < loss {
+                for &j in &support_idx {
+                    psi[j] = theta[j];
+                }
+                if !off_support_zeroed {
+                    for j in 0..n {
+                        if !support[j] {
+                            psi[j] = 0.0;
+                        }
+                    }
+                    off_support_zeroed = true;
+                }
+                loss = loss_trial;
+                loss_pf.copy_from_slice(&trial_pf);
+                break;
+            }
+            step *= params.bt_shrink;
+        }
+
+        // convergence: mean(diff(recent f32 losses)), in f32, current index excluded
+        let count = params.convergence_count;
+        if iter_idx > count {
+            diffs.clear();
+            diffs.extend(hist[iter_idx - count..iter_idx].windows(2).map(|p| p[1] - p[0]));
+            let flatness = np_sum_f32(&diffs) / diffs.len() as f32;
+            if f64::from(flatness) > params.convergence_threshold {
+                stop_reason = StopReason::Converged;
+                n_iters_run = iter_idx + 1;
+                break;
+            }
+        }
+    }
+
+    hist.truncate(n_iters_run);
+    hist_pf.truncate(n_iters_run * n_freq);
+    CoreResult {
+        aper_phase: psi,
+        final_loss: loss,
+        final_loss_per_freq: loss_pf,
+        n_iters_run,
+        stop_reason,
+        loss_full: hist,
+        loss_full_per_freq: hist_pf,
+    }
 }

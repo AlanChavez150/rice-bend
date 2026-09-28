@@ -128,6 +128,48 @@ GSResult = namedtuple(
 )
 
 
+def rust_core():
+    """The optional rust engine (rust/, module rice_bend_core), or a RuntimeError
+    naming the build command. Never falls back to python silently: a run that
+    asked for rust and got python would misattribute its timings and results."""
+    try:
+        import rice_bend_core
+    except ImportError as e:
+        raise RuntimeError(
+            "gerchberg_saxton.engine is 'rust' but the rice_bend_core extension is "
+            "not installed; build it with: VIRTUAL_ENV=$PWD/.venv .venv/bin/maturin "
+            "develop --release -m rust/Cargo.toml") from e
+    return rice_bend_core
+
+
+def _gs_solve_rust(channels, params, ref_freq, seed, initial_phase, curr_aper_amp,
+                   h_fwd, dx, log=None) -> "GSResult":
+    """The warm start + descent of gs_reconstruct, run by rice_bend_core.gs_solve
+    from the SAME seed draw, kernels and measurements the python path would use.
+    Parity with the python engine: rust/python/parity.py, rust/README.md."""
+    (curr_aper_f, final_loss, final_loss_pf, n_iters_run, stop_reason, loss_full,
+     loss_full_pf) = rust_core().gs_solve(
+        initial_phase, np.asarray(curr_aper_amp, dtype=np.float64),
+        np.array([ch.freq for ch in channels], dtype=np.float64), float(ref_freq),
+        np.stack([np.asarray(ch.rx_field, dtype=np.complex128) for ch in channels]),
+        np.stack([np.asarray(ch.error_weighting, dtype=np.float64) for ch in channels]),
+        np.stack(h_fwd).astype(np.complex128, copy=False), float(dx),
+        params.init, int(params.max_iters), int(params.convergence_count),
+        float(params.convergence_threshold), float(params.lr0),
+        float(params.bt_shrink), int(params.bt_tries))
+    if log is not None:
+        if stop_reason == "converged":
+            log.info(f"MGS has converged after {n_iters_run} iterations")
+        else:
+            log.error(f"MGS did not converge after {params.max_iters} iterations")
+    return GSResult(curr_aper_f=curr_aper_f, final_loss=float(final_loss),
+                    final_loss_per_freq=final_loss_pf,
+                    n_iters_run=int(n_iters_run), stop_reason=str(stop_reason),
+                    seed=seed, loss_full=loss_full, loss_full_per_freq=loss_full_pf,
+                    frequencies=tuple(float(ch.freq) for ch in channels),
+                    ref_freq=float(ref_freq), history=None)
+
+
 def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
                    rx_z: float, channels: Sequence[FreqChannel],
                    params: GerchbergSaxtonConfig, ref_freq: Optional[float] = None,
@@ -162,7 +204,16 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
     curves + final aperture are produced (the grid-search path). The math is identical
     either way, so results do not depend on `capture`. `log` (optional) receives the
     per-iteration progress lines; workers pass None to stay quiet.
+
+    `params.engine == "rust"` hands the warm start and descent to the rust engine
+    after the shared setup below (seed, initial draw, kernels, sampling checks).
+    GS history exists only on the python engine, so a capture=True solve runs
+    wholly on python — including its warm-start stage-1 recursion.
     """
+    if capture and params.engine == "rust":
+        if log is not None:
+            log.info("engine 'rust' does not capture GS history; this solve runs on python")
+        params = params.model_copy(update={"engine": "python"})
     size = len(x_axis)
     dx = x_axis[1] - x_axis[0]
     n_freq = len(channels)
@@ -217,6 +268,10 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
     initial_phase = curr_aper_phase.copy()
 
     support = np.abs(orig_aper_amp) > 0  # aperature mask
+
+    if params.engine == "rust":
+        return _gs_solve_rust(channels, params, ref_freq, seed, curr_aper_phase,
+                              curr_aper_amp, h_fwd, dx, log=log)
 
     # Multi-wavelength warm start: replace the random start with a point inside the
     # true basin (reference-frequency solve -> unwrap -> absolute-offset scan). A

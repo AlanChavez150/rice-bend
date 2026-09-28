@@ -106,6 +106,11 @@ class GerchbergSaxtonConfig(BaseModel):
         description="RNG seed for the initial phase. If null, one is drawn and recorded.")
     history_stride: int = Field(default=50, gt=0,
         description="Capture phase/RX-field every Nth iteration (1 = every iteration)")
+    engine: Literal["python", "rust"] = Field(default="python",
+        description="Solver implementation: 'python' (the reference) or 'rust' (the "
+                    "rice_bend_core extension, ~5x faster, parity-checked against the "
+                    "reference; see rust/README.md). Solves that capture GS history "
+                    "(single-run mgs, --true-mgs) always run on python.")
 
 
 class OutputConfig(BaseModel):

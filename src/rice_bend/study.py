@@ -413,6 +413,10 @@ def _parse_args():
                         help="Worker processes per point (default: all cores)")
     parser.add_argument("--limit", type=int, default=None,
                         help="Per-point candidate cap (smoke tests)")
+    parser.add_argument("--engine", choices=["python", "rust"], default=None,
+                        help="Solver engine (overrides gerchberg_saxton.engine; default: "
+                             "the config's, python unless set). 'rust' needs the "
+                             "rice_bend_core extension (rust/README.md).")
     parser.add_argument("--replot", type=Path, default=None,
                         help="Rebuild study.json + the study plot from a saved "
                              "study dir (recomputes each point's analysis; no solving)")
@@ -436,6 +440,8 @@ def main():
 
     study = STUDIES[args.study]
     base_cfg = load_config(args.config)
+    if args.engine is not None:
+        base_cfg.gerchberg_saxton.engine = args.engine
     root = (Path(args.out) if args.out is not None
             else Path(base_cfg.output.output_dir) / f"study_{study.name}")
 
