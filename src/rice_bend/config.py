@@ -1,11 +1,12 @@
 """Pydantic models for the simulation configuration .yml.
 See configs/caustic_config.yml and configs/directional_config.yml."""
 
+import argparse
 from pathlib import Path
-from typing import List, Literal, Optional
+from typing import List, Literal, Optional, Union
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class SimSceneConfig(BaseModel):
@@ -111,6 +112,25 @@ class GerchbergSaxtonConfig(BaseModel):
                     "rice_bend_core extension, ~5x faster, parity-checked against the "
                     "reference; see rust/README.md). Solves that capture GS history "
                     "(single-run mgs, --true-mgs) always run on python.")
+
+
+class NoiseConfig(BaseModel):
+    """Receiver noise added to the SIMULATED measurement: complex AWGN on the RX
+    elements, one floor for every antenna and every frequency, referenced to the
+    peak RX-element power across all tones (see rice_bend/noise.py for the model).
+
+    Ignored on the experimental path, whose capture carries its own receiver noise.
+    """
+    # a typo (snr_dB) must not silently run noiseless
+    model_config = ConfigDict(extra="forbid")
+
+    snr_db: Optional[float] = Field(default=None, allow_inf_nan=False,
+        description="Peak-referenced SNR in dB: sigma^2 = P_peak / 10^(snr_db/10), "
+                    "P_peak the max |field|^2 over RX elements and tones. "
+                    "null -> noiseless (no random draw at all)")
+    seed: Optional[int] = Field(default=0, ge=0, lt=2**32,
+        description="Seed of the noise draw (each tone's stream is keyed by its "
+                    "frequency). If null, one is drawn and recorded.")
 
 
 class OutputConfig(BaseModel):
@@ -222,6 +242,8 @@ class SimConfig(BaseModel):
     plot_path: Path = Field(description="Path that plot_scene() writes the output figure to")
     gerchberg_saxton: GerchbergSaxtonConfig = Field(default_factory=GerchbergSaxtonConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
+    noise: NoiseConfig = Field(default_factory=NoiseConfig,
+        description="Receiver noise on the simulated RX measurement (default: none)")
     experimental: ExperimentalConfig = Field(default_factory=ExperimentalConfig,
         description="Bench constants for the experimental .mat path (ignored by "
                     "the simulated workflows)")
@@ -272,6 +294,42 @@ def resolve_frequencies(config: "SimConfig",
     else:
         return [150e9]
     return list(dict.fromkeys(freqs))
+
+
+# `--snr-db off`: force a noiseless run even when the config's noise block enables noise
+SNR_OFF = "off"
+
+
+def parse_snr_db_arg(text: str) -> Union[float, str]:
+    """argparse `type=` for --snr-db: a number of dB, or `off` (any case) -> SNR_OFF.
+    Finiteness is NOT checked here; apply_noise_overrides validates through the
+    model, so the CLI and the YAML reject the same values."""
+    if text.strip().lower() == SNR_OFF:
+        return SNR_OFF
+    try:
+        return float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected a number of dB or '{SNR_OFF}', got {text!r}")
+
+
+def apply_noise_overrides(config: "SimConfig", snr_db: Union[float, str, None],
+                          noise_seed: Optional[int]) -> None:
+    """CLI overrides onto config.noise. None keeps the config's value; snr_db ==
+    SNR_OFF forces noiseless.
+
+    REBUILDS config.noise through the NoiseConfig constructor so validation runs
+    (plain attribute assignment bypasses pydantic: the models have no
+    validate_assignment) — argparse happily parses `nan`, `inf` and negative seeds.
+    Raises pydantic.ValidationError on an invalid value."""
+    cur = config.noise
+    new_snr = cur.snr_db
+    if snr_db == SNR_OFF:
+        new_snr = None
+    elif snr_db is not None:
+        new_snr = snr_db
+    new_seed = cur.seed if noise_seed is None else noise_seed
+    config.noise = NoiseConfig(snr_db=new_snr, seed=new_seed)
 
 
 # Default config shipped in the repo's configs/ folder, used by both entry points

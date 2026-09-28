@@ -55,6 +55,17 @@ output:
   save_scene_fields: false         # the big 2D complex scene arrays (~tens of MB)
   save_gs_history: true            # strided per-iteration phase + RX field history
 
+# Receiver noise on the SIMULATED RX measurement: complex AWGN added per RX element
+# (independent per frequency and antenna) before interpolation onto the solver
+# grid. One floor for all antennas and tones: sigma^2 = P_peak / 10^(snr_db/10),
+# P_peak = max |field|^2 over the RX elements of every tone. Override with
+# --snr-db DB|off / --noise-seed on mgs, grid-search-mgs and mgs-study.
+# Ignored (with a warning) on the experimental .mat path.
+noise:
+  snr_db: null                     # null -> noiseless (no random draw at all)
+  seed: 0                          # noise draw seed, keyed per tone by frequency;
+                                   # null -> drawn at runtime and recorded
+
 # Speculative TX-location sweep for `grid-search-mgs` (ignored by plain `mgs`).
 # The real TX location/trajectory above is used only to synthesize the shared RX
 # measurement; the search itself treats the TX location as unknown. At each grid

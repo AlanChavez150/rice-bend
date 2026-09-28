@@ -11,9 +11,15 @@ Run from the repo root:
 
     .venv/bin/python rust/python/parity.py
 
-Pass criteria (the settled parity bar — python stays the golden reference):
+Four slices: the two noiseless ones (tiny_check joint F=2; the characterize
+caustic_hit_sparse F=1 slice) and the same two with receiver noise on the
+measurement (noise.snr_db 20 / 10 dB). Noise is added in python by MGS.measure()
+before the engine boundary, so both engines get the identical noisy arrays — the
+noisy slices check the solver on a measurement that is no longer an exact field.
+
+Pass criteria (the settled parity bar — python stays the golden reference), per slice:
   - every candidate's final_loss within rtol 1e-3;
-  - identical argmin index over the 6-candidate slice;
+  - identical argmin index over the slice;
   - n_iters_run / stop_reason reported but NOT gated (ulp drift near the
     convergence threshold legitimately moves the stop point).
 """
@@ -30,7 +36,7 @@ except ImportError:
              "  VIRTUAL_ENV=$PWD/.venv .venv/bin/maturin develop --release -m rust/Cargo.toml")
 
 from rice_bend import rs
-from rice_bend.config import center_freq_index, load_config
+from rice_bend.config import apply_noise_overrides, center_freq_index, load_config
 from rice_bend.grid_sweep import enumerate_grid
 from rice_bend.mgs import MGS, gs_reconstruct
 
@@ -57,9 +63,11 @@ def rust_solve(tx_z, amp, x_axis, rx_z, channels, params, ref_freq):
         float(params.lr0), float(params.bt_shrink), int(params.bt_tries))
 
 
-def sweep_setup(cfg_path, freqs):
-    """Steps 1-4 of run_grid_search (grid_sweep.py:243-317), without persistence."""
+def sweep_setup(cfg_path, freqs, *, snr_db=None, noise_seed=0):
+    """Steps 1-4 of run_grid_search (grid_sweep.py:243-317), without persistence.
+    snr_db None keeps the config's noise block (noiseless in every shipped config)."""
     cfg = load_config(cfg_path)
+    apply_noise_overrides(cfg, snr_db, noise_seed)
     m = MGS(freqs, cfg)
     m.measure()
     gs_cfg = cfg.gerchberg_saxton
@@ -75,11 +83,13 @@ def sweep_setup(cfg_path, freqs):
     return x_axis, rx_z, m.measurement_channels(), gs_cfg.model_copy(), ref_freq, points
 
 
-def run_slice(tag, cfg_path, freqs, limit):
-    x_axis, rx_z, channels, params, ref_freq, points = sweep_setup(cfg_path, freqs)
+def run_slice(tag, cfg_path, freqs, limit, *, snr_db=None, noise_seed=0):
+    x_axis, rx_z, channels, params, ref_freq, points = sweep_setup(
+        cfg_path, freqs, snr_db=snr_db, noise_seed=noise_seed)
     usable = [p for p in points if p.ok][:limit]
+    noise = "off" if snr_db is None else f"SNR {snr_db:g} dB seed {noise_seed}"
     print(f"\n== {tag}: {len(usable)} candidates, F={len(channels)}, "
-          f"max_iters={params.max_iters}, seed={params.seed}")
+          f"max_iters={params.max_iters}, seed={params.seed}, noise {noise}")
 
     py_losses, rust_losses = [], []
     t_py = t_rust = 0.0
@@ -131,6 +141,13 @@ def main():
     ok &= run_slice("caustic_hit_sparse limit-6",
                     REPO / "configs" / "scenario_caustic_hit_sparse.yml",
                     [150e9], limit=6)
+    # the same two slices on a NOISY measurement: identical arrays reach both
+    # engines, so the bar does not move
+    ok &= run_slice("tiny_check joint, 20 dB", REPO / "configs" / "tiny_check.yml",
+                    [140e9, 150e9], limit=3, snr_db=20.0, noise_seed=0)
+    ok &= run_slice("caustic_hit_sparse limit-6, 10 dB",
+                    REPO / "configs" / "scenario_caustic_hit_sparse.yml",
+                    [150e9], limit=6, snr_db=10.0, noise_seed=0)
     print(f"\nPARITY: {'PASS' if ok else 'FAIL'} (rtol {RTOL}, argmin exact)")
     sys.exit(0 if ok else 1)
 

@@ -26,6 +26,13 @@ The one bit-level requirement is the complex64 quantization at the two
 rankings"): ≥99% of quantized elements bit-equal on the conv golden vectors,
 the rest within 1 ulp.
 
+**Receiver noise** (`noise.snr_db`, `--snr-db`) is added in Python by
+`MGS.measure()`, before the engine boundary, so the engine is unchanged: both
+engines receive the identical noisy `rx_field` / `error_weighting` arrays. The
+golden vectors stay noiseless. `python/parity.py` runs its two slices a second
+time on a noisy measurement (20 dB and 10 dB) under the same bar, and
+`python/compare_runs.py` refuses two runs whose `(snr_db, seed)` differ.
+
 ## Build / dev loop
 
 ```bash

@@ -6,12 +6,15 @@ from pathlib import Path
 from typing import List, Optional, Sequence
 
 import numpy as np
+from pydantic import ValidationError
 
 from rice_bend import rs
 from rice_bend.cli import setup_logging
 from rice_bend.config import (DEFAULT_CONFIG, GerchbergSaxtonConfig, SimConfig,
-                              center_freq_index, load_config, resolve_frequencies)
+                              apply_noise_overrides, center_freq_index, load_config,
+                              parse_snr_db_arg, resolve_frequencies)
 from rice_bend.interp import interp_amplitude, interp_real_imag
+from rice_bend.noise import add_awgn
 from rice_bend.plotting import draw_line_panel, draw_scene
 from rice_bend.data_store import GSHistory, check_run_dir, make_run_dir, save_run
 from rice_bend.exp_data import parse_oscope_heatmap_data, parse_oscope_rx_data
@@ -409,6 +412,22 @@ class FreqState:
     #   plane, BEFORE the RX-element interpolation (set by _synthesize_rx; None on
     #   the experimental path). analysis.py's energy metric needs the un-windowed
     #   field — rx_field is zero-filled outside the window.
+    rx_aper_profile_clean: Optional[np.ndarray] = None  # the NOISELESS RX element
+    #   profile when measure() added noise (rx_ap.aper_profile then holds the noisy
+    #   one); None when noiseless or on the experimental path. rx_plane_row stays
+    #   noiseless either way — noise is a receiver property, added at the elements.
+
+
+def _db_or_none(num, den) -> Optional[float]:
+    """10*log10(num/den) as a plain float, or None when it is not finite (a
+    JSON-safe noise report: json.dump would write a bare NaN/Infinity)."""
+    with np.errstate(divide="ignore", invalid="ignore"):
+        v = float(10 * np.log10(np.float64(num) / np.float64(den)))
+    return v if np.isfinite(v) else None
+
+
+def _fmt_db(v: Optional[float]) -> str:
+    return "n/a" if v is None else f"{v:.1f} dB"
 
 
 class MGS():
@@ -456,6 +475,10 @@ class MGS():
         self.wavelength = rs.wavelength(self.freq)
         self.plot_path = config.plot_path
         self.gs_cfg = config.gerchberg_saxton
+        # an ALIAS, like gs_cfg: a drawn noise seed written back here lands in the
+        # config that save_run later snapshots
+        self.noise_cfg = config.noise
+        self.noise_report = None       # set by measure() when noise is on
         self.output_cfg = config.output
         self.gs_history = None
         self.gs_result = None
@@ -662,6 +685,19 @@ class MGS():
         Each frequency's weighting is normalized to its OWN measurement's peak, so
         a joint solve's mean loss weights frequencies equally regardless of their
         absolute RX power.
+
+        With noise.snr_db set, the simulated path adds complex AWGN to every tone's
+        RX ELEMENT profile before it is interpolated onto the scene grid — where a
+        real receiver adds it (rice_bend/noise.py has the model). The floor is
+        referenced to the peak over every tone, so all clean profiles are
+        synthesized first, then noised, then interpolated. The weighting is built
+        from the NOISY measurement, as it would be from a capture. The clean profile
+        is kept on FreqState.rx_aper_profile_clean and the realized SNRs in
+        self.noise_report. Idempotency holds with noise too: the clean field is
+        re-synthesized from the TX and each tone's stream rebuilt from (seed,
+        frequency), and a null seed is drawn once and written back to the config.
+        On the experimental path noise.snr_db is ignored (with a warning): the
+        capture carries its own receiver noise.
         """
         # Fail fast, naming EVERY undersampled frequency at once — rs() would raise
         # on only the first it meets, and the highest frequency binds, so "which
@@ -681,9 +717,34 @@ class MGS():
                     f"sim_scene.spacing or drop the highest frequencies.")
 
         x_axis = self.scene.x_axis
+        snr_db = self.noise_cfg.snr_db
+        noise_on = self.has_real_aper and snr_db is not None
+        if self.has_real_aper:
+            # every clean profile first: the noise floor is referenced to the peak
+            # over ALL tones, so no tone can be noised before the last is synthesized
+            clean = [self._synthesize_rx(fs) for fs in self.freq_states]
+            if noise_on:
+                if self.noise_cfg.seed is None:
+                    # same idiom as the solver's seed; written back so the run is
+                    # replayable from its config snapshot, and so a second measure()
+                    # reuses it (idempotency)
+                    self.noise_cfg.seed = int(np.random.SeedSequence().entropy % (2**32))
+                seed = self.noise_cfg.seed
+                noisy, peak_power, sigma2 = add_awgn(
+                    clean, [fs.freq for fs in self.freq_states], snr_db, seed)
+                for fs, c, y in zip(self.freq_states, clean, noisy):
+                    fs.rx_ap.aper_profile = y
+                    fs.rx_aper_profile_clean = c
+            else:
+                for fs, c in zip(self.freq_states, clean):
+                    fs.rx_ap.aper_profile = c
+                    fs.rx_aper_profile_clean = None
+        elif snr_db is not None:
+            self.log.warning(f"noise.snr_db ({snr_db:g} dB) is ignored on the experimental "
+                             "path: the capture carries its own receiver noise")
+
+        per_freq = []
         for fs in self.freq_states:
-            if self.has_real_aper:
-                fs.rx_ap.aper_profile = self._synthesize_rx(fs)
             rx_ap = fs.rx_ap
             # A FIELD, so cartesian: interpolating its phase through the ±π branch cut
             # corrupted the measurement by 20.8% rel L2 on scenario_caustic_hit and 55%
@@ -695,6 +756,40 @@ class MGS():
             error_weighting[(x_axis < rx_ap.x_min) | (x_axis > rx_ap.x_max)] = 0.0
             fs.rx_field = orig_prop_f
             fs.error_weighting = error_weighting
+            if noise_on:
+                # what the solver actually sees: the interpolation onto the scene
+                # grid averages the element noise, so this sits above the per-antenna
+                # figure. Measured inside the RX window only (the weighting zeroes
+                # the rest).
+                clean_interp = interp_real_imag(rx_ap.aper_axis, fs.rx_aper_profile_clean,
+                                                x_axis)
+                in_win = (x_axis >= rx_ap.x_min) & (x_axis <= rx_ap.x_max)
+                per_freq.append({
+                    "freq_hz": float(fs.freq),
+                    "n_elements": int(len(fs.rx_aper_profile_clean)),
+                    "mean_snr_db": _db_or_none(
+                        np.mean(np.abs(fs.rx_aper_profile_clean) ** 2), sigma2),
+                    "effective_snr_db": _db_or_none(
+                        np.sum(np.abs(clean_interp[in_win]) ** 2),
+                        np.sum(np.abs(orig_prop_f[in_win] - clean_interp[in_win]) ** 2)),
+                })
+
+        if not noise_on:
+            self.noise_report = None
+            return
+        self.noise_report = {
+            "snr_db": float(snr_db), "seed": int(seed),
+            "reference": "peak_rx_elements",
+            "peak_power": float(peak_power), "sigma2": float(sigma2),
+            "numpy_version": np.__version__,
+            "per_freq": per_freq,
+        }
+        self.log.info(f"RX noise: SNR {snr_db:g} dB re peak RX element, seed {seed}, "
+                      f"peak power {peak_power:.4g}, sigma^2 {sigma2:.4g}")
+        for rec in per_freq:
+            self.log.info(f" - {rec['freq_hz'] / 1e9:g} GHz: {rec['n_elements']} elements, "
+                          f"mean per-antenna SNR {_fmt_db(rec['mean_snr_db'])}, "
+                          f"effective solver-grid SNR {_fmt_db(rec['effective_snr_db'])}")
 
     def measurement_channels(self) -> List[FreqChannel]:
         """FreqChannel payloads for gs_reconstruct, one per frequency in self.freqs
@@ -887,6 +982,20 @@ def main():
         action="store_true",
         default=False
     )
+    parser.add_argument(
+        "--snr-db",
+        type=parse_snr_db_arg,
+        metavar="DB|off",
+        help="Peak-referenced SNR in dB of the complex AWGN added to the simulated RX "
+             "measurement (overrides noise.snr_db); 'off' forces a noiseless run",
+        default=None
+    )
+    parser.add_argument(
+        "--noise-seed",
+        type=int,
+        help="Override noise.seed for a reproducible noise draw",
+        default=None
+    )
     args = parser.parse_args()
     setup_logging(args.debug)
 
@@ -898,6 +1007,11 @@ def main():
         config.output.run_name = Path(args.out).name
     if args.seed is not None: config.gerchberg_saxton.seed = args.seed
     if args.no_save: config.output.save_run = False
+    try:
+        apply_noise_overrides(config, args.snr_db, args.noise_seed)
+    except ValidationError as e:
+        parser.error("invalid noise override: " + "; ".join(
+            f"{'.'.join(str(p) for p in err['loc'])}: {err['msg']}" for err in e.errors()))
 
     # Fail fast on a run-directory collision, before spending the solve.
     if config.output.save_run:

@@ -270,6 +270,10 @@ def _collect_arrays(mgs) -> dict:
     genuinely ragged across frequencies (dx defaults to wavelength/20): those get
     indexed keys rx_aper_axis_00, rx_aper_profile_00, ... instead (no object
     arrays — they would break content hashing and require allow_pickle).
+
+    With receiver noise on, rx_aper_profile_NN is the NOISY profile the solver saw
+    and rx_aper_profile_clean_NN holds the noiseless one. The clean keys are written
+    only when noise is on, so a noiseless run's key set is unchanged.
     """
     out = {}
     scene = mgs.scene
@@ -287,6 +291,8 @@ def _collect_arrays(mgs) -> dict:
     for i, fs in enumerate(mgs.freq_states):
         out[f"rx_aper_axis_{i:02d}"] = f64(fs.rx_ap.aper_axis)
         out[f"rx_aper_profile_{i:02d}"] = c64(fs.rx_ap.aper_profile)
+        if fs.rx_aper_profile_clean is not None:
+            out[f"rx_aper_profile_clean_{i:02d}"] = c64(fs.rx_aper_profile_clean)
     out["gs_tx_aper_axis"] = f64(gs_tx.aper_axis)
     out["gs_tx_aper_profile"] = c64(gs_tx.aper_profile)
 
@@ -348,6 +354,8 @@ def _collect_metadata(mgs, run_dir: Path,
         "wavelengths_m": [float(fs.wavelength) for fs in mgs.freq_states],
         "n_frequencies": len(mgs.freqs),
         "provenance": provenance(args_dict, plot_filename=Path(mgs.plot_path).name),
+        # receiver-noise block (None when the measurement is noiseless)
+        "noise": mgs.noise_report,
         "gerchberg_saxton": {
             "init": gs_cfg.init,
             "max_iters": gs_cfg.max_iters,

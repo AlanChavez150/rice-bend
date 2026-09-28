@@ -238,6 +238,11 @@ class GridSearchRun:
     real_tx_x_min: float
     real_tx_x_max: float
     scene_bounds: Tuple[float, float, float, float]  # x_min, x_max, z_min, z_max
+    # receiver noise (both None when the measurement is noiseless). With noise on,
+    # rx_fields / error_weightings / rx_aper_profiles are the NOISY measurement the
+    # solver saw and these are the noiseless element profiles beside it.
+    rx_aper_profiles_clean: Optional[List[np.ndarray]] = None
+    noise: Optional[dict] = None     # MGS.noise_report: the JSON-safe noise block
 
 
 def run_grid_search(config: SimConfig, freqs: List[float], *, limit: Optional[int] = None,
@@ -361,6 +366,10 @@ def run_grid_search(config: SimConfig, freqs: List[float], *, limit: Optional[in
         real_tx_x_min=float(real_tx.x_min),
         real_tx_x_max=float(real_tx.x_max),
         scene_bounds=(scene_cfg.x_min, scene_cfg.x_max, scene_cfg.z_min, scene_cfg.z_max),
+        rx_aper_profiles_clean=(None if mgs.noise_report is None
+                                else [fs.rx_aper_profile_clean.copy()
+                                      for fs in mgs.freq_states]),
+        noise=mgs.noise_report,
     )
 
 
@@ -387,6 +396,10 @@ def save_grid_run(run: GridSearchRun, run_dir: Path, config: SimConfig,
     The manifest's `frequencies` list order is THE alignment order for every
     per-frequency value in the run (per_freq_losses, freq_valid, the (F, ...) npz
     stacks and the rx_aper_*_NN indexed keys).
+
+    With receiver noise on, the manifest's `noise` block records it (null when off)
+    and measurement.npz additionally carries rx_aper_profile_clean_NN; a noiseless
+    run's key set is unchanged.
     """
     cand_dir = run_dir / "candidates"
     cand_dir.mkdir(parents=True, exist_ok=True)
@@ -407,6 +420,13 @@ def save_grid_run(run: GridSearchRun, run_dir: Path, config: SimConfig,
     for i, (ax, prof) in enumerate(zip(run.rx_aper_axes, run.rx_aper_profiles)):
         meas[f"rx_aper_axis_{i:02d}"] = f64(ax)
         meas[f"rx_aper_profile_{i:02d}"] = c64(prof)
+    # With noise on, rx_field / error_weighting / rx_aper_profile_NN above are the
+    # NOISY measurement the solver saw; the clean element profiles go beside them.
+    # rx_plane_row below stays noiseless: it feeds the energy metric, which scores
+    # the beam's physics, not the measurement.
+    if run.rx_aper_profiles_clean is not None:
+        for i, prof in enumerate(run.rx_aper_profiles_clean):
+            meas[f"rx_aper_profile_clean_{i:02d}"] = c64(prof)
     if run.rx_plane_rows is not None:
         # pre-interp RX-plane fields: lets --replot recompute the energy metric
         # without re-propagating (rs already produced complex64 — lossless)
@@ -481,6 +501,7 @@ def save_grid_run(run: GridSearchRun, run_dir: Path, config: SimConfig,
         "gs": {"effective_max_iters": run.effective_max_iters, "loss_combine": "mean",
                "init": run.init, "ref_freq_hz": run.ref_freq},
         "provenance": provenance(args_dict),
+        "noise": run.noise,          # receiver-noise block; null when noiseless
         "counts": {"total": len(run.grid_points), "usable": n_usable,
                    "ran": len(run.candidates), "skipped": len(skipped_entries),
                    "ran_per_freq": ran_per_freq},

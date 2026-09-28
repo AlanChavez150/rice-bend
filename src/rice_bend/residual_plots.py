@@ -32,7 +32,8 @@ from rice_bend.plotting import add_wavelength_axis
 @dataclass
 class ResidualSummary:
     """The (z, x_center) grid of GS residuals, plus ground truth and the best point,
-    plus the run's centre frequency for the λ axis."""
+    plus the run's centre frequency for the λ axis and its receiver-noise block
+    (for the SNR in plot titles)."""
     z_values: np.ndarray
     x_values: np.ndarray
     loss_grid: np.ndarray              # shape (nz, nx); NaN where not run / skipped
@@ -40,6 +41,7 @@ class ResidualSummary:
     real_tx_x_center: float
     best: Optional[dict]               # {index, z, x_center, final_loss} or None
     ref_freq_hz: Optional[float] = None  # gs.ref_freq_hz (centre frequency); None on legacy schema-2 runs
+    noise: Optional[dict] = None         # the manifest's noise block; None when noiseless or pre-noise
 
 
 def _assemble_summary(zs: List[float], xs: List[float],
@@ -71,6 +73,7 @@ def summary_from_run(run: GridSearchRun) -> ResidualSummary:
     summary = _assemble_summary(run.grid_cfg.z.values(), run.grid_cfg.x_center.values(),
                                 cand, run.real_tx_z, real_x_center)
     summary.ref_freq_hz = float(run.ref_freq)
+    summary.noise = run.noise
     return summary
 
 
@@ -90,6 +93,7 @@ def summary_from_manifest(run_dir: Path) -> ResidualSummary:
     real_x_center = 0.5 * (gt["real_tx_x_min"] + gt["real_tx_x_max"])
     summary = _assemble_summary(zs, xs, cand, gt["real_tx_z"], real_x_center)
     summary.ref_freq_hz = (manifest.get("gs") or {}).get("ref_freq_hz")
+    summary.noise = manifest.get("noise")
     return summary
 
 
@@ -114,8 +118,9 @@ def freq_summaries_from_manifest(run_dir: Path) -> List[Tuple[float, ResidualSum
     for i, entry in enumerate(manifest["frequencies"]):
         cand = [(c["index"], c["per_freq_losses"][i]) for c in manifest["candidates"]
                 if c["per_freq_losses"][i] is not None]
-        out.append((float(entry["freq_hz"]),
-                    _assemble_summary(zs, xs, cand, gt["real_tx_z"], real_x_center)))
+        summary = _assemble_summary(zs, xs, cand, gt["real_tx_z"], real_x_center)
+        summary.noise = manifest.get("noise")
+        out.append((float(entry["freq_hz"]), summary))
     return out
 
 
@@ -128,8 +133,9 @@ def freq_summaries_from_run(run: GridSearchRun) -> List[Tuple[float, ResidualSum
     for i, freq in enumerate(run.freqs):
         cand = [(c.point.index, float(c.per_freq_losses[i])) for c in run.candidates
                 if np.isfinite(c.per_freq_losses[i])]
-        out.append((float(freq),
-                    _assemble_summary(zs, xs, cand, run.real_tx_z, real_x_center)))
+        summary = _assemble_summary(zs, xs, cand, run.real_tx_z, real_x_center)
+        summary.noise = run.noise
+        out.append((float(freq), summary))
     return out
 
 
@@ -221,7 +227,17 @@ def _mark_true_tx(ax, summary: "ResidualSummary", size: float = 170) -> None:
                zorder=5)
 
 
-def _hc_title(title: str, hc: bool) -> str:
+def snr_suffix(noise: Optional[dict]) -> str:
+    """The title suffix naming a noisy run's SNR (" — SNR 20 dB"); empty when
+    noiseless, so a noiseless run's titles (and PNGs) are exactly what they were
+    before noise existed."""
+    if not noise or noise.get("snr_db") is None:
+        return ""
+    return f" — SNR {noise['snr_db']:g} dB"
+
+
+def _hc_title(title: str, hc: bool, noise: Optional[dict] = None) -> str:
+    title = title + snr_suffix(noise)
     return title + HC_SUFFIX if hc else title
 
 
@@ -271,7 +287,7 @@ def plot_residual_heatmap(summary: ResidualSummary, out_path: Path,
         _overlay_analysis(ax, summary, analysis)
     ax.set_xlabel("x_center (m)")
     ax.set_ylabel("z (m)")
-    ax.set_title(_hc_title(title, hc))
+    ax.set_title(_hc_title(title, hc, summary.noise))
     ax.legend(loc="upper right", framealpha=0.9)
     fig.savefig(out_path, dpi=120)
     plt.close(fig)
@@ -448,12 +464,12 @@ def plot_residual_surface(summary: ResidualSummary, out_path: Path,
     """
     reason = _surface_unplottable(summary.loss_grid)
     if reason is not None:
-        _surface_placeholder(out_path, _hc_title(title, hc), reason)
+        _surface_placeholder(out_path, _hc_title(title, hc, summary.noise), reason)
         return
     fig = plt.figure(figsize=(11, 8))
     ax = fig.add_subplot(projection="3d")
     norm = _draw_surface(ax, summary, hc)
-    _finish_surface(fig, ax, norm, _hc_title(title, hc))
+    _finish_surface(fig, ax, norm, _hc_title(title, hc, summary.noise))
     fig.savefig(out_path, dpi=120, bbox_inches="tight")
     plt.close(fig)
 
@@ -480,7 +496,7 @@ def animate_residual_surface(summary: ResidualSummary, log, out_path: Path, *,
     fig = plt.figure(figsize=(11, 8))
     ax = fig.add_subplot(projection="3d")
     norm = _draw_surface(ax, summary, hc)
-    _finish_surface(fig, ax, norm, _hc_title(title, hc))
+    _finish_surface(fig, ax, norm, _hc_title(title, hc, summary.noise))
     # No bbox_inches="tight" on this path -- FFMpegWriter needs every frame the same
     # size, and a tight box is recomputed per frame. Set the margins once instead.
     fig.subplots_adjust(left=0.02, right=0.90, top=0.94, bottom=0.04)
@@ -511,7 +527,7 @@ def plot_residual_scatter(summary: ResidualSummary, out_path: Path, *,
     if loss.size == 0:
         ax.text(0.5, 0.5, "no candidates", ha="center", va="center",
                 transform=ax.transAxes)
-        fig.suptitle(_hc_title(title, hc))
+        fig.suptitle(_hc_title(title, hc, summary.noise))
         fig.savefig(out_path, dpi=120)
         plt.close(fig)
         return
@@ -529,7 +545,7 @@ def plot_residual_scatter(summary: ResidualSummary, out_path: Path, *,
     ax.set_title("Residual vs. distance to true TX")
     ax.grid(True, alpha=0.3)
 
-    fig.suptitle(_hc_title(title, hc))
+    fig.suptitle(_hc_title(title, hc, summary.noise))
     fig.savefig(out_path, dpi=120)
     plt.close(fig)
 
@@ -605,7 +621,8 @@ def plot_residual_scatter_3d(summaries: List[Tuple[float, ResidualSummary]],
         return DOT_MIN + ((1.0 - np.clip(loss / RESIDUAL_VMAX, 0.0, 1.0)) ** 3) * (DOT_MAX - DOT_MIN)
 
     _scatter_3d([(f, s, s.loss_grid) for f, s in summaries], out_path, norm=norm,
-                dot_size=dot_size, title=_hc_title(title, hc),
+                # every per-frequency summary carries the same run-level noise block
+                dot_size=dot_size, title=_hc_title(title, hc, summaries[0][1].noise),
                 colorbar_label=RESIDUAL_LABEL,
                 footnote="dot size shrinks cubically as residual grows")
 
@@ -636,7 +653,8 @@ def plot_residual_scatter_3d_diff(summaries: List[Tuple[float, ResidualSummary]]
 
     _scatter_3d(layers, out_path, norm=Normalize(vmin=-vlim, vmax=vlim),
                 dot_size=dot_size,
-                title=f"Candidate residual difference vs. {baseline_ghz:g} GHz baseline",
+                title=(f"Candidate residual difference vs. {baseline_ghz:g} GHz baseline"
+                       + snr_suffix(ordered[0][1].noise)),
                 colorbar_label=f"residual difference vs. {baseline_ghz:g} GHz "
                                "(yellow = better than baseline)",
                 footnote="dot size grows with deviation from the baseline")
@@ -683,6 +701,6 @@ def plot_residual_freq_vs_joint(freq_hz: float, summary: ResidualSummary,
         ax.set_xlabel("x_center (m)")
     axes[0].set_ylabel("z (m)")
     axes[0].legend(loc="upper right", framealpha=0.9)
-    fig.suptitle(_hc_title(f"Residual: {f_ghz:g} GHz vs. joint", hc))
+    fig.suptitle(_hc_title(f"Residual: {f_ghz:g} GHz vs. joint", hc, joint.noise))
     fig.savefig(out_path, dpi=120)
     plt.close(fig)

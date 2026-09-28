@@ -14,11 +14,13 @@ after every point, so an interrupted study resumes), configs/point_*.yml (the
 materialized effective config per point — passing it to persistence makes each
 point dir's config_source.yml reconstruct the derived experiment, not the base),
 one ordinary grid run dir per point, and the study plot. A point whose
-candidate_beams.json already exists skips its solve on re-run.
+candidate_beams.json already exists skips its solve on re-run — so a root whose
+saved points were solved with different noise is refused up front, not reused.
 """
 
 import argparse
 import json
+import math
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,17 +28,21 @@ from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 import yaml
+from pydantic import ValidationError
 
 from rice_bend.analysis import analysis_from_manifest, write_analysis
 from rice_bend.cli import setup_logging
-from rice_bend.config import SimConfig, load_config, resolve_frequencies
+from rice_bend.config import (NoiseConfig, SimConfig, apply_noise_overrides,
+                              load_config, parse_snr_db_arg, resolve_frequencies)
 from rice_bend.data_store import check_run_dir, make_run_dir, write_json
 from rice_bend.grid_search import persist_and_plot
 from rice_bend.grid_sweep import run_grid_search
 from rice_bend.plotting import add_wavelength_axis
-from rice_bend.residual_plots import summary_from_manifest
+from rice_bend.residual_plots import snr_suffix, summary_from_manifest
 
-STUDY_SCHEMA_VERSION = 4   # v4: points[] gained ref_freq_hz (nullable)
+STUDY_SCHEMA_VERSION = 5   # v4: points[] gained ref_freq_hz (nullable)
+#                            v5: top-level noise {snr_db, seed} (null when noiseless);
+#                                points[] gained snr_db (nullable)
 STUDY_NAME_FILE = "study.json"
 STUDY_DEFAULT_CONFIG = (Path(__file__).resolve().parents[2] / "configs"
                         / "scenario_caustic_hit_pm5.yml")
@@ -112,7 +118,8 @@ STUDIES = {
 
 
 def _record(study: StudyDef, value: float, point_name: str, analysis: dict,
-            resumed: bool, ref_freq_hz: Optional[float]) -> dict:
+            resumed: bool, ref_freq_hz: Optional[float],
+            noise: Optional[dict]) -> dict:
     """One study.json points[] entry, from the point's analysis dict."""
     argmin = analysis.get("argmin")
     err_m = argmin["error_distance_m"] if argmin else None
@@ -126,6 +133,7 @@ def _record(study: StudyDef, value: float, point_name: str, analysis: dict,
         "run_dir": point_name,
         "resumed": bool(resumed),
         "ref_freq_hz": float(ref_freq_hz) if ref_freq_hz is not None else None,
+        "snr_db": noise.get("snr_db") if noise else None,
         "error_distance_m": err_m,
         "error_mm": 1000.0 * err_m if err_m is not None else None,
         "argmin": ({"z": argmin["z"], "x_center": argmin["x_center"],
@@ -142,13 +150,15 @@ def _record(study: StudyDef, value: float, point_name: str, analysis: dict,
     return rec
 
 
-def _recompute_analysis(point_dir: Path, log) -> Tuple[dict, Optional[float]]:
+def _recompute_analysis(point_dir: Path,
+                        log) -> Tuple[dict, Optional[float], Optional[dict]]:
     """Always recompute (cheap, and the run dir's analysis.json stays fresh).
-    Also hands back the manifest's centre frequency for the record's λ axis."""
+    Also hands back the manifest's centre frequency for the record's λ axis, and
+    its noise block (None when noiseless) for the record's snr_db."""
     summary = summary_from_manifest(point_dir)
     analysis = analysis_from_manifest(point_dir, summary)
     write_analysis(point_dir, analysis)
-    return analysis, summary.ref_freq_hz
+    return analysis, summary.ref_freq_hz, summary.noise
 
 
 def _warn_if_stale(study: StudyDef, base_cfg: SimConfig, value: float,
@@ -175,6 +185,80 @@ def _warn_if_stale(study: StudyDef, base_cfg: SimConfig, value: float,
                             "series edited?")
     except Exception as e:                                  # cross-check only
         log.warning(f"{point_dir.name}: could not cross-check the resumed run ({e})")
+
+
+def _noise_block(cfg: SimConfig) -> Optional[dict]:
+    """study.json's top-level noise record: what every point is solved with."""
+    if cfg.noise.snr_db is None:
+        return None
+    return {"snr_db": cfg.noise.snr_db, "seed": cfg.noise.seed}
+
+
+def _describe_noise(noise: Optional[dict]) -> str:
+    if not noise or noise.get("snr_db") is None:
+        return "no noise"
+    return f"SNR {noise['snr_db']:g} dB, seed {noise.get('seed')}"
+
+
+def _same_snr(a: Optional[float], b: Optional[float]) -> bool:
+    if a is None or b is None:
+        return a is None and b is None
+    return math.isclose(a, b, rel_tol=0.0, abs_tol=1e-9)
+
+
+def _resolve_noise_seed(study: StudyDef, base_cfg: SimConfig, root: Path, log) -> None:
+    """Fix a null noise seed ONCE for the whole study. Every point deep-copies
+    base_cfg, so left null each point would draw its own seed, and the
+    configs/point_*.yml written before the solve would record null. A resume
+    adopts the seed the root's study.json recorded for the same SNR — otherwise
+    the pre-flight guard would refuse every re-run of a null-seed study."""
+    nz = base_cfg.noise
+    if nz.snr_db is None or nz.seed is not None:
+        return
+    seed = None
+    marker = root / STUDY_NAME_FILE
+    if marker.exists():
+        try:
+            with open(marker) as f:
+                data = json.load(f)
+            saved = data.get("noise") if data.get("study") == study.name else None
+        except (OSError, ValueError, AttributeError):
+            saved = None
+        if (saved and _same_snr(saved.get("snr_db"), nz.snr_db)
+                and saved.get("seed") is not None):
+            seed = int(saved["seed"])
+            log.info(f"noise.seed is null: adopting seed {seed} from {marker}")
+    if seed is None:
+        seed = int(np.random.SeedSequence().entropy % (2**32))
+        log.info(f"noise.seed is null: drew seed {seed} for every point of the study")
+    base_cfg.noise = NoiseConfig(snr_db=nz.snr_db, seed=seed)
+
+
+def _check_resume_noise(study: StudyDef, base_cfg: SimConfig, root: Path, log) -> None:
+    """Pre-flight: refuse a root whose saved points were solved with different
+    noise. The resume cache key is only the point dir name, so without this a
+    20 dB re-run over a 10 dB root would silently mix the two. Runs BEFORE
+    study.json is rewritten and before any solve, so a refusal modifies nothing
+    (and stays out of _warn_if_stale, whose broad except would demote it)."""
+    want = _noise_block(base_cfg)
+    for i, value in enumerate(study.values):
+        name = f"point_{i:02d}_{study.tag(value)}"
+        manifest = root / name / "candidate_beams.json"
+        if not manifest.exists():
+            continue
+        with open(manifest) as f:
+            got = json.load(f).get("noise")         # absent (pre-noise) or null: off
+        if want is None:
+            ok = not got or got.get("snr_db") is None
+        else:
+            ok = (bool(got) and _same_snr(got.get("snr_db"), want["snr_db"])
+                  and got.get("seed") == want["seed"])
+        if not ok:
+            log.error(f"{root / name} was solved with {_describe_noise(got)}, but this "
+                      f"invocation asks for {_describe_noise(want)}; resuming would mix "
+                      "the two. Pass a different --out (or matching --snr-db/"
+                      "--noise-seed).")
+            raise SystemExit(2)
 
 
 def _repair_partial(point_dir: Path, log) -> None:
@@ -215,7 +299,8 @@ def _plot_namespace(cfg_path: Path, args) -> argparse.Namespace:
         config=cfg_path, out=None, freq=None, limit=args.limit, jobs=args.jobs,
         dry_run=False, replot=None, true_mgs=False, scenes=False, scene_top=None,
         scene_freq=None, anim=False, surface_anim=False, debug=args.debug,
-        study=getattr(args, "study", None))
+        study=getattr(args, "study", None), snr_db=getattr(args, "snr_db", None),
+        noise_seed=getattr(args, "noise_seed", None))
 
 
 def _run_point(study: StudyDef, i: int, value: float, base_cfg: SimConfig,
@@ -228,8 +313,9 @@ def _run_point(study: StudyDef, i: int, value: float, base_cfg: SimConfig,
         log.info(f"[{i + 1}/{n}] {name}: candidate_beams.json present — "
                  "skipping the solve")
         _warn_if_stale(study, base_cfg, value, point_dir, log)
-        analysis, ref = _recompute_analysis(point_dir, log)
-        return _record(study, value, name, analysis, resumed=True, ref_freq_hz=ref)
+        analysis, ref, noise = _recompute_analysis(point_dir, log)
+        return _record(study, value, name, analysis, resumed=True, ref_freq_hz=ref,
+                       noise=noise)
     if point_dir.exists():
         _repair_partial(point_dir, log)
 
@@ -251,16 +337,17 @@ def _run_point(study: StudyDef, i: int, value: float, base_cfg: SimConfig,
     out_dir = make_run_dir(root, name, kind="grid")
     analysis = persist_and_plot(run, out_dir, cfg, _plot_namespace(cfg_path, args), log)
     return _record(study, value, name, analysis, resumed=False,
-                   ref_freq_hz=run.ref_freq)
+                   ref_freq_hz=run.ref_freq, noise=run.noise)
 
 
 def _write_study_json(root: Path, study: StudyDef, base_config, records: List[dict],
-                      status: str) -> None:
+                      status: str, noise: Optional[dict]) -> None:
     write_json(root / STUDY_NAME_FILE, {
         "schema_version": STUDY_SCHEMA_VERSION,
         "study": study.name,
         "status": status,
         "base_config": str(base_config),
+        "noise": noise,
         "param_name": study.param_name,
         "param_unit": study.param_unit,
         "x_axis": study.x_axis,
@@ -283,6 +370,13 @@ def _records_ref_freq(records: List[dict]) -> Optional[float]:
     varied the centre would have no single wavelength to offer."""
     refs = {r.get("ref_freq_hz") for r in records} - {None}
     return refs.pop() if len(refs) == 1 else None
+
+
+def _records_snr(records: List[dict]) -> Optional[float]:
+    """The one SNR shared by every point, or None (noiseless, or a mixed root —
+    which the resume guard refuses, so only a hand-assembled study gets here)."""
+    snrs = {r.get("snr_db") for r in records}
+    return snrs.pop() if len(snrs) == 1 else None
 
 
 def _plot_study(study: StudyDef, records: List[dict], out_path: Path, log) -> None:
@@ -327,7 +421,7 @@ def _plot_study(study: StudyDef, records: List[dict], out_path: Path, log) -> No
     ax.set_xlabel(study.x_label)
     ax.set_ylabel("distance to true TX (mm)")
     add_wavelength_axis(ax, _records_ref_freq(records), axis="y", unit_m=1e-3)
-    ax.set_title(f"{study.name} study")
+    ax.set_title(f"{study.name} study" + snr_suffix({"snr_db": _records_snr(records)}))
     ax.grid(True, alpha=0.3)
     fig.savefig(out_path, dpi=120)
     plt.close(fig)
@@ -367,7 +461,8 @@ def _plot_ndof(study: StudyDef, records: List[dict], out_path: Path, log) -> Non
     add_wavelength_axis(ax, _records_ref_freq(records), axis="y", unit_m=1e-3)
     ax.grid(True, alpha=0.3)
     fig.suptitle(f"{study.name} study — information metric view "
-                 f"(points labelled by {study.param_name})")
+                 f"(points labelled by {study.param_name})"
+                 + snr_suffix({"snr_db": _records_snr(records)}))
     fig.savefig(out_path, dpi=120)
     plt.close(fig)
     log.info(f"Wrote n_dof plot to {out_path}")
@@ -388,11 +483,13 @@ def _replot_study(root: Path, args, log) -> None:
             log.warning(f"{name}: missing — skipped")
             complete = False
             continue
-        analysis, ref = _recompute_analysis(pdir, log)
+        analysis, ref, noise = _recompute_analysis(pdir, log)
         records.append(_record(study, value, name, analysis,
-                               resumed=True, ref_freq_hz=ref))
+                               resumed=True, ref_freq_hz=ref, noise=noise))
+    # no config here: carry the saved noise block through, or a replot drops it
     _write_study_json(root, study, data.get("base_config", "?"), records,
-                      status="complete" if complete else "partial")
+                      status="complete" if complete else "partial",
+                      noise=data.get("noise"))
     _plot_study(study, records, root / study.plot_name, log)
     _plot_ndof(study, records, root / "study_metrics_vs_ndof.png", log)
 
@@ -408,7 +505,8 @@ def _parse_args():
                              f"(default: {STUDY_DEFAULT_CONFIG.name})")
     parser.add_argument("--out", type=Path, default=None,
                         help="Study root directory (default: "
-                             "<output.output_dir>/study_<study>)")
+                             "<output.output_dir>/study_<study>, plus _snr<DB>dB "
+                             "with noise on)")
     parser.add_argument("--jobs", "-j", type=int, default=None,
                         help="Worker processes per point (default: all cores)")
     parser.add_argument("--limit", type=int, default=None,
@@ -417,6 +515,13 @@ def _parse_args():
                         help="Solver engine (overrides gerchberg_saxton.engine; default: "
                              "the config's, python unless set). 'rust' needs the "
                              "rice_bend_core extension (rust/README.md).")
+    parser.add_argument("--snr-db", type=parse_snr_db_arg, default=None, metavar="DB|off",
+                        help="Peak-referenced SNR in dB of the complex AWGN added to the "
+                             "simulated RX measurement at every point (overrides "
+                             "noise.snr_db); 'off' forces a noiseless study")
+    parser.add_argument("--noise-seed", type=int, default=None,
+                        help="Override noise.seed for a reproducible noise draw (one "
+                             "seed for every point)")
     parser.add_argument("--replot", type=Path, default=None,
                         help="Rebuild study.json + the study plot from a saved "
                              "study dir (recomputes each point's analysis; no solving)")
@@ -435,6 +540,9 @@ def main():
     log = setup_logging(args.debug)
 
     if args.replot is not None:
+        if args.snr_db is not None or args.noise_seed is not None:
+            log.warning("--snr-db/--noise-seed are ignored with --replot: the replot "
+                        "rebuilds from the saved runs and the noise they recorded")
         _replot_study(Path(args.replot), args, log)
         return
 
@@ -442,22 +550,39 @@ def main():
     base_cfg = load_config(args.config)
     if args.engine is not None:
         base_cfg.gerchberg_saxton.engine = args.engine
+    try:
+        apply_noise_overrides(base_cfg, args.snr_db, args.noise_seed)
+    except ValidationError as e:
+        log.error("invalid noise override: " + "; ".join(
+            f"{'.'.join(str(p) for p in err['loc'])}: {err['msg']}" for err in e.errors()))
+        raise SystemExit(2)
+    snr = base_cfg.noise.snr_db
+    # noisy and noiseless studies of the same series must not share a default root
     root = (Path(args.out) if args.out is not None
-            else Path(base_cfg.output.output_dir) / f"study_{study.name}")
+            else Path(base_cfg.output.output_dir)
+            / (f"study_{study.name}" + (f"_snr{snr:g}dB" if snr is not None else "")))
 
     # marker-first initialization: study.json lands before any other content, so
-    # an interrupt at any point leaves a resumable root, never a refused one
+    # an interrupt at any point leaves a resumable root, never a refused one. The
+    # seed and the resume guard come first: both read the root as it was left.
     check_run_dir(root.parent, root.name, kind="study")
+    _resolve_noise_seed(study, base_cfg, root, log)
+    _check_resume_noise(study, base_cfg, root, log)
+    noise = _noise_block(base_cfg)
+    if noise is not None:
+        log.info(f"Every point is solved at {_describe_noise(noise)}")
     root.mkdir(parents=True, exist_ok=True)
-    _write_study_json(root, study, args.config, [], status="running")
+    _write_study_json(root, study, args.config, [], status="running", noise=noise)
     (root / "configs").mkdir(exist_ok=True)
 
     records: List[dict] = []
     for i, value in enumerate(study.values):
         records.append(_run_point(study, i, value, base_cfg, root, args, log))
-        _write_study_json(root, study, args.config, records, status="running")
+        _write_study_json(root, study, args.config, records, status="running",
+                          noise=noise)
 
-    _write_study_json(root, study, args.config, records, status="complete")
+    _write_study_json(root, study, args.config, records, status="complete",
+                      noise=noise)
     _plot_study(study, records, root / study.plot_name, log)
     _plot_ndof(study, records, root / "study_metrics_vs_ndof.png", log)
     n_ok = sum(1 for r in records if r.get("error_mm") is not None)

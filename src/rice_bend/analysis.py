@@ -15,7 +15,10 @@ extent is excluded from both — that is the metric's actual definition. The fie
 used is the PRE-interpolation RX-plane row synthesized by MGS.measure()
 (FreqState.rx_plane_row, persisted as measurement.npz['rx_plane_row']): the
 windowed measurement (rx_field) is zero-filled outside the window and cannot
-supply the denominator.
+supply the denominator. It is also NOISELESS: with noise.snr_db set, receiver
+noise is added at the RX elements (rx_field and the element profiles are then the
+noisy measurement), while rx_plane_row stays the clean field — so this metric,
+like N_E below, describes the geometry, not the noise draw.
 """
 
 import json
@@ -103,7 +106,9 @@ def _n_dof_dict(scene_x_axis, tx_axis, tx_profiles, freqs, wavelengths,
         N_E(eps) = #{ k : a_k >= eps * sigma_1 * ||u0[support]|| }
 
     The doc's threshold is sigma_n/eps — a receiver-noise floor. This variant is
-    deliberately noise-free (per project direction: no SNR modeling): the
+    deliberately noise-free, and it STAYS noise-free when noise.snr_db is set:
+    the measurement can now carry receiver noise, but this metric is built from
+    the clean TX beam and the channel alone, never from the noisy rx_field. The
     absolute reference is the channel's own capacity, sigma_1*||u0|| — the
     largest received amplitude THIS geometry could deliver from THIS beam power.
     A beam walking off the window collapses every received mode amplitude a_k

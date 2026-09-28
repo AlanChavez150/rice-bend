@@ -11,6 +11,8 @@ import os
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from pydantic import ValidationError
+
 from rice_bend import rs
 from rice_bend.analysis import analysis_from_manifest, analysis_from_run, write_analysis
 from rice_bend.candidate_scenes import (ANIM_FPS, ANIM_TOP_DEFAULT, ANIM_WARN_FRAMES,
@@ -18,8 +20,8 @@ from rice_bend.candidate_scenes import (ANIM_FPS, ANIM_TOP_DEFAULT, ANIM_WARN_FR
                                         make_candidate_scenes, make_true_mgs_plot,
                                         scenes_from_manifest, scenes_from_run)
 from rice_bend.cli import setup_logging
-from rice_bend.config import (DEFAULT_CONFIG, SimConfig, load_config,
-                              resolve_frequencies)
+from rice_bend.config import (DEFAULT_CONFIG, SimConfig, apply_noise_overrides,
+                              load_config, parse_snr_db_arg, resolve_frequencies)
 from rice_bend.data_store import check_run_dir, make_run_dir
 from rice_bend.grid_sweep import (GridSearchRun,
                                   enumerate_grid, grid_summary, load_frequencies_index,
@@ -252,6 +254,11 @@ def _parse_args():
     shipped config sets them); --scene-z-planes and --fps demoted to module constants;
     --summary/--scatter made unconditional; --no-save deleted; --skip-true-mgs inverted
     to an opt-in --true-mgs.
+
+    --snr-db/--noise-seed are a deliberate exception to dropping --seed: SNR is the
+    knob that gets swept from the shell. Like --engine and --freq they override the
+    config, and the effective values land in the manifest's noise block and the
+    config snapshot, so the run still records what the experiment was.
     """
     parser = argparse.ArgumentParser(
         description="Grid search over speculative TX locations, running MGS at each "
@@ -276,6 +283,12 @@ def _parse_args():
                         help="Solver engine (overrides gerchberg_saxton.engine; default: "
                              "the config's, python unless set). 'rust' needs the "
                              "rice_bend_core extension (rust/README.md).")
+    parser.add_argument("--snr-db", type=parse_snr_db_arg, default=None, metavar="DB|off",
+                        help="Peak-referenced SNR in dB of the complex AWGN added to the "
+                             "simulated RX measurement (overrides noise.snr_db); 'off' "
+                             "forces a noiseless run")
+    parser.add_argument("--noise-seed", type=int, default=None,
+                        help="Override noise.seed for a reproducible noise draw")
     parser.add_argument("--dry-run", action="store_true",
                         help="Enumerate the grid and print a summary without running MGS")
     parser.add_argument("--replot", type=Path, default=None,
@@ -308,6 +321,11 @@ def main():
     log = setup_logging(args.debug)
 
     if args.replot is not None:
+        if args.snr_db is not None or args.noise_seed is not None:
+            # a replot re-reads a finished run; --true-mgs replays it with the
+            # noise its manifest recorded, so an override here would be a lie
+            log.warning("--snr-db/--noise-seed are ignored with --replot: a replot "
+                        "(including --true-mgs) uses the noise recorded in the saved run")
         base = Path(args.replot)
         freq_index = load_frequencies_index(base)
         if freq_index is None:
@@ -328,6 +346,12 @@ def main():
     config = load_config(args.config)
     if args.engine is not None:
         config.gerchberg_saxton.engine = args.engine
+    try:
+        apply_noise_overrides(config, args.snr_db, args.noise_seed)
+    except ValidationError as e:
+        log.error("invalid noise override: " + "; ".join(
+            f"{'.'.join(str(p) for p in err['loc'])}: {err['msg']}" for err in e.errors()))
+        raise SystemExit(2)
     if config.grid_search is None:
         log.error(f"Config {args.config} has no `grid_search` block")
         raise SystemExit(2)

@@ -17,7 +17,7 @@ import numpy as np
 from matplotlib.animation import FuncAnimation
 
 from rice_bend import rs
-from rice_bend.config import center_freq_index
+from rice_bend.config import NoiseConfig, center_freq_index
 from rice_bend.data_store import load_run_config, write_mp4
 from rice_bend.grid_sweep import GridSearchRun
 from rice_bend.mgs import MGS
@@ -68,6 +68,34 @@ def _manifest_freqs(manifest: dict) -> List[float]:
     return [float(manifest["freq_hz"])]
 
 
+def _restore_run_noise(config, manifest: dict, log: logging.Logger) -> None:
+    """Set config.noise to the receiver noise the saved run ACTUALLY measured with.
+
+    load_run_config prefers the verbatim config_source.yml, which knows neither a
+    --snr-db/--noise-seed override nor a seed drawn at run time, so re-measuring from
+    it alone would replay a different measurement than the one the sweep solved. The
+    manifest's `noise` block records what ran; a missing or null block (a noiseless
+    run, or one that predates noise) means noiseless. The replay then draws the same
+    noise because each tone's stream is keyed by its frequency value, whatever order
+    the frequency list is in (--scene-freq rotates it).
+    """
+    block = manifest.get("noise")
+    if block:
+        config.noise = NoiseConfig(snr_db=block["snr_db"], seed=block["seed"])
+        log.info(f"true MGS run: restored the run's receiver noise "
+                 f"(SNR {block['snr_db']:g} dB, seed {block['seed']})")
+        recorded = block.get("numpy_version")
+        if recorded is not None and recorded != np.__version__:
+            log.warning(f"true MGS run: the noise was drawn under numpy {recorded}, this "
+                        f"is numpy {np.__version__}; the replayed noise draw may differ")
+        return
+    if config.noise.snr_db is not None:
+        log.info(f"true MGS run: the saved config enables noise (SNR "
+                 f"{config.noise.snr_db:g} dB) but the run recorded none; replaying "
+                 f"noiseless")
+    config.noise = NoiseConfig(snr_db=None, seed=config.noise.seed)
+
+
 def make_true_mgs_plot(run_dir: Path, log: Optional[logging.Logger] = None,
                        scene_freq: Optional[float] = None) -> Optional[Path]:
     """Reconstruct + plot the single "true" MGS run for a saved grid run.
@@ -106,6 +134,8 @@ def make_true_mgs_plot(run_dir: Path, log: Optional[logging.Logger] = None,
         config.gerchberg_saxton.seed = 0 if pinned is None else int(pinned)
         log.info(f"true MGS run: gerchberg_saxton.seed was null; pinned to "
                  f"{config.gerchberg_saxton.seed} for a reproducible baseline")
+    # likewise the noise: replay the measurement the sweep actually solved against
+    _restore_run_noise(config, manifest, log)
 
     out_path = run_dir / "true_mgs_scene.png"
     ghz = ", ".join(f"{f / 1e9:.3g}" for f in freqs)

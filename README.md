@@ -343,6 +343,90 @@ How many frames each mode renders:
   `history_stride`. Use `--frame-stride 1` for every captured iteration (slow), and
   `--z-stride` to trade scene resolution for speed.
 
+### Receiver noise (SNR)
+
+By default the simulated RX measurement is exact (infinite SNR). Setting an SNR adds
+complex white Gaussian noise to it, the way a receiver would. The model is one noise
+floor for every antenna and every frequency, referenced to the brightest RX element:
+
+```
+P_pk    = max over tones f and RX elements n of |s_f[n]|^2      (clean field)
+sigma^2 = P_pk / 10^(snr_db / 10)                               (same for all f, n)
+n_f[n]  ~ CN(0, sigma^2), independent per (frequency, antenna)
+```
+
+The noise is added on the RX **element** axis, before the interpolation onto the solver
+grid, and the error weighting is built from the noisy measurement. Noise is **off by
+default**: with `snr_db: null` no random number is drawn and every result is identical
+to a run made before this option existed.
+
+Set it in the config's `noise:` block, or on the command line of `mgs`,
+`grid-search-mgs` and `mgs-study` (the flags override the config):
+
+```yaml
+noise:
+  snr_db: 20      # null -> noiseless
+  seed: 0         # null -> drawn at runtime and recorded
+```
+
+```bash
+mgs --config configs/tiny_check.yml --snr-db 20                     # one noisy solve
+grid-search-mgs --config configs/tiny_check.yml --snr-db 20 --noise-seed 3 -o results/g20
+grid-search-mgs --config noisy.yml --snr-db off                     # force noiseless over a noisy config
+mgs-study --study frequency --snr-db 20                             # every point at 20 dB
+```
+
+`--snr-db DB|off` takes a number of dB or `off`, which forces a noiseless run even when
+the config enables noise. `--noise-seed INT` picks the realization. Invalid command-line
+values (`nan`, `inf`, a negative seed) are rejected with exit code 2. The same values in
+the `noise:` block, or a misspelled key there, fail config validation before anything
+runs, so a typo cannot silently run noiseless. Write a negative SNR as
+`--snr-db=-10`: argparse reads `--snr-db -1e1` as a flag.
+
+What "SNR" means here, and three things to know before reading results:
+
+1. **Nominal vs. realized.** The dB value is relative to the *peak* RX element. The mean
+   per-antenna SNR is lower by the beam's peak-to-average ratio: on
+   `scenario_caustic_hit_pm5`, a nominal 20 dB is about 16.5 dB per antenna. The
+   interpolation onto the solver grid then averages some of the noise away, so the
+   solver sees about 18-19 dB there. Nothing is compensated. Both figures are logged
+   and recorded per frequency (`mean_snr_db`, `effective_snr_db`).
+2. **The floor tracks the beam.** The peak is taken over the RX antennas, so a beam that
+   walks off the window lowers the absolute noise floor with it. Every run sits at the
+   configured SNR, but the absolute noise is not constant across geometries.
+3. **Common random numbers.** Each tone's draw is keyed by its frequency value and the
+   seed, never its position in the list. Runs that share a tone and a seed share that
+   tone's normalized draw, scaled by their own `sigma`. SNR sweeps therefore vary
+   smoothly, but their points are not independent realizations. Change `--noise-seed`
+   for a different draw.
+
+**What is saved.** `run.json` and `candidate_beams.json` carry a `noise` block: `snr_db`,
+`seed` (a drawn seed is written back), `reference`, `peak_power`, `sigma2`,
+`numpy_version`, and `per_freq` realized SNRs. It is `null` when noise is off and absent
+in runs saved before this option existed. With noise on, `rx_aper_profile_NN` (both
+files), `rx_field` / `error_weighting` in `measurement.npz` and `gs_target_rx_field` /
+`gs_error_weighting` in `run.npz` are the **noisy** measurement the solver saw, and
+`rx_aper_profile_clean_NN` holds the noiseless element profile beside it.
+`rx_plane_row` stays noiseless, and so do the energy and N_E metrics in
+`analysis.json`. `grid-search-mgs --replot DIR --true-mgs` restores the noise settings
+from the manifest, so the baseline solve replays the same noisy measurement.
+`--snr-db`/`--noise-seed` are ignored (with a warning) together with `--replot` on both
+`grid-search-mgs` and `mgs-study`: a replot always uses the noise recorded in the saved
+run. Residual and study plot titles gain a ` — SNR 20 dB` suffix.
+
+**Studies.** On `mgs-study` the flags apply to every point of the series. With noise on
+and no `--out`, the default root gains a suffix (`study_frequency_snr20dB`), so noisy
+and noiseless studies do not collide. Resuming a study root whose points were solved
+with different noise settings is refused (exit 2). `study.json` records the noise block
+and a per-point `snr_db`. With `seed: null`, one seed is drawn for the whole study and
+recorded in `study.json`; resuming the same root at the same SNR adopts that recorded
+seed.
+
+**Engines and data.** The noise is added in Python before the solver engine is called,
+so `--engine rust` needs nothing extra: both engines receive the identical noisy
+arrays. The experimental `.mat` path ignores `snr_db` with a warning, because a real
+capture already carries its own receiver noise.
+
 ## Source layout
 
 All code lives in `src/rice_bend/`:
@@ -352,10 +436,12 @@ Numerics and geometry:
 - `rs.py` — Rayleigh-Sommerfeld propagation: the kernel, applying it, and whole-scene illumination
 - `caustic.py` — phase-plate design for parabolic beam trajectories
 - `sim_scene.py` — aperture and scene geometry
+- `noise.py` — receiver noise: peak-referenced complex AWGN on the simulated RX elements,
+  one seeded stream per tone
 - `interp.py` — the complex-interpolation conventions, named (cartesian for fields, amplitude-only
   for magnitudes, polar for the caustic construction). They are **not** interchangeable
 - `config.py` — pydantic config models (scene, TX beam, RX aperture, Gerchberg-Saxton, output,
-  grid search, experimental bench constants)
+  grid search, receiver noise, experimental bench constants)
 
 Infrastructure:
 
@@ -390,4 +476,5 @@ scripts/characterize.sh --bless    # regenerate the expected digest
 
 Takes ~25 s. The expected values are generated, never transcribed — hand-typed float literals
 rot the moment nobody re-blesses them. It pins the python engine only. The Rust engine has
-its own gates (`cd rust && cargo test`, `rust/python/parity.py`); see `rust/README.md`.
+its own gates (`cd rust && cargo test`, `rust/python/parity.py`, which also runs noisy
+slices at 20 and 10 dB); see `rust/README.md`. Every characterize case is noiseless.

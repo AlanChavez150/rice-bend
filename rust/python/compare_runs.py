@@ -7,6 +7,10 @@ engine vs the rust engine — on everything a study consumes.
 Exits 0 when the runs agree under the parity bar (rust/README.md): every
 candidate's final_loss within rtol 1e-3, the same argmin cell, and the same
 top-candidate set. n_iters/stop_reason and the localization metrics are reported.
+
+Refuses (exit 1) when the two runs' receiver noise differs — the manifest's
+`noise` block, (snr_db, seed); a missing or null block means noiseless: two
+engines on different noise draws saw different measurements.
 """
 import json
 import sys
@@ -28,18 +32,35 @@ def load(run_dir: Path):
         with open(snap) as f:
             engine = json.load(f).get("gerchberg_saxton", {}).get("engine", "python")
     cands = {c["index"]: c for c in manifest["candidates"]}
-    return cands, analysis, engine
+    return cands, analysis, engine, noise_key(manifest.get("noise"))
+
+
+def noise_key(block):
+    """(snr_db, seed) of a manifest's noise block; (None, None) when noiseless
+    (null, or absent in runs saved before receiver noise existed)."""
+    if not block or block.get("snr_db") is None:
+        return (None, None)
+    return (float(block["snr_db"]), block.get("seed"))
+
+
+def noise_str(key):
+    return "off" if key[0] is None else f"SNR {key[0]:g} dB, seed {key[1]}"
 
 
 def main():
     if len(sys.argv) != 3:
         sys.exit(__doc__)
     a_dir, b_dir = Path(sys.argv[1]), Path(sys.argv[2])
-    a, a_an, a_eng = load(a_dir)
-    b, b_an, b_eng = load(b_dir)
-    print(f"A: {a_dir}  (engine {a_eng}, {len(a)} candidates)")
-    print(f"B: {b_dir}  (engine {b_eng}, {len(b)} candidates)")
+    a, a_an, a_eng, a_noise = load(a_dir)
+    b, b_an, b_eng, b_noise = load(b_dir)
+    print(f"A: {a_dir}  (engine {a_eng}, {len(a)} candidates, noise {noise_str(a_noise)})")
+    print(f"B: {b_dir}  (engine {b_eng}, {len(b)} candidates, noise {noise_str(b_noise)})")
     ok = True
+
+    if a_noise != b_noise:
+        print(f"FAIL receiver noise differs ({noise_str(a_noise)} vs {noise_str(b_noise)}): "
+              "the runs solved different measurements, so an engine comparison is meaningless")
+        sys.exit(1)
 
     if set(a) != set(b):
         print(f"FAIL candidate index sets differ ({len(set(a) ^ set(b))} mismatched)")
