@@ -13,8 +13,8 @@ sim_scene:
   spacing: 0.00025
 
 tx_aperture:
-  x_min: -0.167
-  x_max: -0.035
+  x_min: -0.137
+  x_max: -0.065
   z: 0.3
   dx: 0.00025
   beam:
@@ -55,6 +55,6 @@ output:
 grid_search:
   z:        {min: 0.15, max: 0.80, num: 64}
   x_center: {min: -0.15, max: 0.15, num: 48}
-  aperture: {width: 0.10, dx: 0.00025}
+  aperture: {width: 0.072, dx: 0.00025}
   seed: 0
   gs_overrides: {max_iters: 800}

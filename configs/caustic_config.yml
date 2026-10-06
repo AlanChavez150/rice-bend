@@ -14,8 +14,8 @@ sim_scene:
 # The TX sits at height `z` and projects -Z (down) onto the RX fixed at z=0.
 # Move the TX around by editing these values. All units in meters.
 tx_aperture:
-  x_min: -0.20
-  x_max: 0.20
+  x_min: -0.1125
+  x_max: 0.0
   z: 0.75                       # TX plane height (beam travels this far down to the RX)
   dx: 0.00025                   # aperture sampling spacing (0.25 mm)
   beam:
@@ -74,6 +74,6 @@ noise:
 grid_search:
   z:        {min: 0.40, max: 0.95, num: 20}   # speculative TX height sweep (m)
   x_center: {min: -0.10, max: 0.10, num: 20}   # speculative lateral center sweep (m)
-  aperture: {width: 0.20, dx: 0.00025}        # assumed aperture span + sampling (m)
+  aperture: {width: 0.1125, dx: 0.00025}      # assumed aperture span + sampling (m)
   seed: 0                                      # one fixed GS seed for comparable residuals
   gs_overrides: {max_iters: 3000}             # cheaper GS during the sweep

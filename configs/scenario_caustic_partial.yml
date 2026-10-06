@@ -1,6 +1,7 @@
-# Test scenario: Caustic "partial" — TX aperture window fixed at [-0.132, 0.000]; the beam
-# trajectory (c=-0.043) is offset independently of the aperture, so the aperture captures an
-# off-centre slice of the beam rather than the whole transmitter moving together.
+# Test scenario: Caustic "partial" — the same big-arc beam (a=0.8) translated to c=-0.043, so
+# it lands straddling the RX window's right edge. TX aperture window [-0.115, -0.043] (width
+# 0.072 m) is exactly the caustic support for this trajectory. Verified (150 GHz):
+# beam_peak_x=+0.0219, FWHM=0.0295, rx_peak/global_peak=0.973, energy_frac_in_rx=0.439.
 # RX window: centered x=0, width 0.04 m. Dense 64x48 grid_search (3072 candidate spots).
 
 sim_scene:
@@ -11,8 +12,8 @@ sim_scene:
   spacing: 0.00025
 
 tx_aperture:
-  x_min: -0.132
-  x_max: 0.0
+  x_min: -0.115
+  x_max: -0.043
   z: 0.3
   dx: 0.00025
   beam:
@@ -53,6 +54,6 @@ output:
 grid_search:
   z:        {min: 0.15, max: 0.80, num: 64}
   x_center: {min: -0.15, max: 0.15, num: 48}
-  aperture: {width: 0.10, dx: 0.00025}
+  aperture: {width: 0.072, dx: 0.00025}
   seed: 0
   gs_overrides: {max_iters: 800}
