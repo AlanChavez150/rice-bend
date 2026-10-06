@@ -40,9 +40,11 @@ from rice_bend.grid_sweep import run_grid_search
 from rice_bend.plotting import add_wavelength_axis
 from rice_bend.residual_plots import snr_suffix, summary_from_manifest
 
-STUDY_SCHEMA_VERSION = 5   # v4: points[] gained ref_freq_hz (nullable)
+STUDY_SCHEMA_VERSION = 6   # v4: points[] gained ref_freq_hz (nullable)
 #                            v5: top-level noise {snr_db, seed} (null when noiseless);
 #                                points[] gained snr_db (nullable)
+#                            v6: noise gained swept (true: the series sets each point's
+#                                SNR, so the top-level snr_db is null; see points[])
 STUDY_NAME_FILE = "study.json"
 STUDY_DEFAULT_CONFIG = (Path(__file__).resolve().parents[2] / "configs"
                         / "scenario_caustic_hit_pm5.yml")
@@ -56,6 +58,11 @@ PM5_COMB_HZ = (142.5e9, 150.0e9, 157.5e9)
 # rigid TX translations (m): dense at small s where the captured energy falls
 # fastest; 0.115 reproduces configs/scenario_caustic_miss.yml exactly
 TX_SHIFTS_M = (0.0, 0.010, 0.020, 0.030, 0.045, 0.065, 0.090, 0.115, 0.130)
+# peak-referenced receiver SNRs (dB): every 5 dB from 0 through 40
+SNR_DBS = (0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0)
+# the fine series: every 1 dB from 0 through 30 (a separate table, so roots of
+# the 5 dB series still replot against the values they were solved with)
+SNR_DBS_FINE = tuple(float(s) for s in range(0, 31))
 
 
 def _apply_frequency(cfg: SimConfig, pct: float) -> SimConfig:
@@ -73,9 +80,10 @@ def _apply_frequency(cfg: SimConfig, pct: float) -> SimConfig:
 def _apply_tx_shift(cfg: SimConfig, s: float) -> SimConfig:
     """Rigid TX translation: the window AND the caustic trajectory's lateral
     offset move together (a plate is a physical object — the miss scenario is
-    exactly this with s = +0.115). Shifting only the window would sample dark
-    plate: the caustic's native support is narrower than the window and the
-    plate profile is zero-filled outside it."""
+    exactly this with s = +0.115). Shifting only the window would slide it off
+    the plate: the shipped window is exactly the caustic's native support, so
+    the window would cut off one end of the plate and sample dark (zero-filled)
+    plate at the other."""
     c = cfg.model_copy(deep=True)
     c.frequencies = list(PM5_COMB_HZ)   # fixed comb: energy is the only variable
     c.tx_aperture.x_min += s
@@ -83,6 +91,16 @@ def _apply_tx_shift(cfg: SimConfig, s: float) -> SimConfig:
     traj = list(c.tx_aperture.beam.trajectory)
     traj[2] += s
     c.tx_aperture.beam.trajectory = traj
+    return c
+
+
+def _apply_snr(cfg: SimConfig, snr_db: float) -> SimConfig:
+    """Receiver SNR only: the frequencies are whatever the base config lists and
+    the TX stays put. Rebuilt through NoiseConfig (not attribute assignment) so
+    validation runs; the seed is the base config's, which _resolve_noise_seed has
+    already fixed, so every point draws from the same seed."""
+    c = cfg.model_copy(deep=True)
+    c.noise = NoiseConfig(snr_db=snr_db, seed=cfg.noise.seed)
     return c
 
 
@@ -98,6 +116,10 @@ class StudyDef:
     tag: Callable[[float], str]
     plot_name: str
     plot_argmin: bool = True   # include the argmin series on the study plot
+    # apply() sets each point's noise: the base config's snr_db is overridden,
+    # so there is no single study-wide SNR to guard, suffix or put in the root name
+    sweeps_noise: bool = False
+    ticks_at_values: bool = False   # x ticks exactly on the swept values
 
 
 STUDIES = {
@@ -106,14 +128,27 @@ STUDIES = {
         x_axis="param_value", x_label="bandwidth (± % of 150 GHz)",
         values=BANDWIDTH_PCTS, apply=_apply_frequency,
         tag=lambda p: f"bw{int(round(p)):02d}pct",
-        plot_name="study_error_vs_bandwidth.png",
-        plot_argmin=False),   # argmin is grid-quantized noise on this axis
+        plot_name="study_error_vs_bandwidth.png"),
     "tx_shift": StudyDef(
         name="tx_shift", param_name="tx_shift_m", param_unit="m",
         x_axis="energy_pct", x_label="energy received in RX window (%, mean over comb)",
         values=TX_SHIFTS_M, apply=_apply_tx_shift,
         tag=lambda s: f"s{int(round(s * 1000)):03d}mm",
         plot_name="study_error_vs_energy.png"),
+    "snr": StudyDef(
+        name="snr", param_name="snr_db", param_unit="dB",
+        x_axis="param_value", x_label="SNR (dB, re peak RX-element power)",
+        values=SNR_DBS, apply=_apply_snr,
+        tag=lambda s: f"snr{int(round(s)):02d}dB",
+        plot_name="study_error_vs_snr.png",
+        sweeps_noise=True, ticks_at_values=True),
+    "snr_fine": StudyDef(
+        name="snr_fine", param_name="snr_db", param_unit="dB",
+        x_axis="param_value", x_label="SNR (dB, re peak RX-element power)",
+        values=SNR_DBS_FINE, apply=_apply_snr,
+        tag=lambda s: f"snr{int(round(s)):02d}dB",
+        plot_name="study_error_vs_snr.png",
+        sweeps_noise=True),   # 31 values: default ticks, not one per point
 }
 
 
@@ -187,11 +222,23 @@ def _warn_if_stale(study: StudyDef, base_cfg: SimConfig, value: float,
         log.warning(f"{point_dir.name}: could not cross-check the resumed run ({e})")
 
 
-def _noise_block(cfg: SimConfig) -> Optional[dict]:
-    """study.json's top-level noise record: what every point is solved with."""
+def _point_noise(cfg: SimConfig) -> Optional[dict]:
+    """The noise one point is solved with, in the manifest's {snr_db, seed} shape."""
     if cfg.noise.snr_db is None:
         return None
     return {"snr_db": cfg.noise.snr_db, "seed": cfg.noise.seed}
+
+
+def _noise_block(study: StudyDef, cfg: SimConfig) -> Optional[dict]:
+    """study.json's top-level noise record. A non-sweeping series solves every
+    point with the base config's noise; a sweeping one shares only the seed (the
+    per-point SNRs live in points[])."""
+    if study.sweeps_noise:
+        return {"snr_db": None, "seed": cfg.noise.seed, "swept": True}
+    nz = _point_noise(cfg)
+    if nz is not None:
+        nz["swept"] = False
+    return nz
 
 
 def _describe_noise(noise: Optional[dict]) -> str:
@@ -210,10 +257,12 @@ def _resolve_noise_seed(study: StudyDef, base_cfg: SimConfig, root: Path, log) -
     """Fix a null noise seed ONCE for the whole study. Every point deep-copies
     base_cfg, so left null each point would draw its own seed, and the
     configs/point_*.yml written before the solve would record null. A resume
-    adopts the seed the root's study.json recorded for the same SNR — otherwise
-    the pre-flight guard would refuse every re-run of a null-seed study."""
+    adopts the seed the root's study.json recorded for the same SNR (for a
+    series that sweeps the SNR: for the same series) — otherwise the pre-flight
+    guard would refuse every re-run of a null-seed study."""
     nz = base_cfg.noise
-    if nz.snr_db is None or nz.seed is not None:
+    # a sweeping series is noisy at every point even when the base snr_db is null
+    if nz.seed is not None or (nz.snr_db is None and not study.sweeps_noise):
         return
     seed = None
     marker = root / STUDY_NAME_FILE
@@ -224,8 +273,9 @@ def _resolve_noise_seed(study: StudyDef, base_cfg: SimConfig, root: Path, log) -
             saved = data.get("noise") if data.get("study") == study.name else None
         except (OSError, ValueError, AttributeError):
             saved = None
-        if (saved and _same_snr(saved.get("snr_db"), nz.snr_db)
-                and saved.get("seed") is not None):
+        same = (bool(saved) and (study.sweeps_noise
+                                 or _same_snr(saved.get("snr_db"), nz.snr_db)))
+        if same and saved.get("seed") is not None:
             seed = int(saved["seed"])
             log.info(f"noise.seed is null: adopting seed {seed} from {marker}")
     if seed is None:
@@ -239,13 +289,15 @@ def _check_resume_noise(study: StudyDef, base_cfg: SimConfig, root: Path, log) -
     noise. The resume cache key is only the point dir name, so without this a
     20 dB re-run over a 10 dB root would silently mix the two. Runs BEFORE
     study.json is rewritten and before any solve, so a refusal modifies nothing
-    (and stays out of _warn_if_stale, whose broad except would demote it)."""
-    want = _noise_block(base_cfg)
+    (and stays out of _warn_if_stale, whose broad except would demote it).
+    The expectation is per point — what apply() derives — since a sweeping
+    series gives every point its own SNR."""
     for i, value in enumerate(study.values):
         name = f"point_{i:02d}_{study.tag(value)}"
         manifest = root / name / "candidate_beams.json"
         if not manifest.exists():
             continue
+        want = _point_noise(study.apply(base_cfg, value))
         with open(manifest) as f:
             got = json.load(f).get("noise")         # absent (pre-noise) or null: off
         if want is None:
@@ -256,8 +308,9 @@ def _check_resume_noise(study: StudyDef, base_cfg: SimConfig, root: Path, log) -
         if not ok:
             log.error(f"{root / name} was solved with {_describe_noise(got)}, but this "
                       f"invocation asks for {_describe_noise(want)}; resuming would mix "
-                      "the two. Pass a different --out (or matching --snr-db/"
-                      "--noise-seed).")
+                      "the two. Pass a different --out (or matching "
+                      + ("--noise-seed)." if study.sweeps_noise
+                         else "--snr-db/--noise-seed)."))
             raise SystemExit(2)
 
 
@@ -357,10 +410,15 @@ def _write_study_json(root: Path, study: StudyDef, base_config, records: List[di
     })
 
 
-# the two plotted error series: record key, legend label, color, marker
+# the two plotted error series: record key, legend label, color, marker, then the
+# draw weight — line width, line-plot marker size (pt), scatter area (pt²), zorder.
+# The top-K mean is a slightly heavier UNDERLAY: where the top set has a single
+# member (n=1) its mean IS the argmin, and drawn at equal weight on top it hid the
+# argmin entirely. Beneath it, a shared point reads as a disc centred in a larger
+# square and a shared segment as a line with an edge on both sides.
 _ERROR_SERIES = (
-    ("error_mm", "argmin to true TX", "C0", "o"),
-    ("top_mean_dist_mm", "top candidates mean to true TX", "C1", "s"),
+    ("error_mm", "argmin to true TX", "C0", "o", 1.5, 6.0, 45, 3),
+    ("top_mean_dist_mm", "top candidates mean to true TX", "C1", "s", 3.0, 9.0, 100, 2),
 )
 
 
@@ -384,11 +442,12 @@ def _plot_study(study: StudyDef, records: List[dict], out_path: Path, log) -> No
     connect in SERIES order (= table order), which matters for the energy axis:
     x there is a measured quantity."""
     import matplotlib.pyplot as plt
+    from matplotlib import patheffects
 
     plotted = [r for r in records if r.get("x_value") is not None]
     fig, ax = plt.subplots(figsize=(9, 6), layout="constrained")
     drew = False
-    for key, label, color, marker in _ERROR_SERIES:
+    for key, label, color, marker, lw, ms, _area, zorder in _ERROR_SERIES:
         if key == "error_mm" and not study.plot_argmin:
             continue
         pts = [(r["x_value"], r[key], r) for r in plotted if r.get(key) is not None]
@@ -396,14 +455,18 @@ def _plot_study(study: StudyDef, records: List[dict], out_path: Path, log) -> No
             continue
         drew = True
         ax.plot([p[0] for p in pts], [p[1] for p in pts], marker=marker,
-                color=color, label=label)
+                color=color, label=label, lw=lw, ms=ms, zorder=zorder)
         if key == "top_mean_dist_mm":
-            # the adaptive set size is part of the signal — annotate it
+            # the adaptive set size is part of the signal — annotate it, offset
+            # clear of the underlay's larger square and haloed: a line through
+            # the label (its own heavier orange one included) would swallow it
+            halo = [patheffects.withStroke(linewidth=3, foreground="white")]
             for x, y, r in pts:
                 if r.get("n_top_candidates"):
                     ax.annotate(f"n={r['n_top_candidates']}", (x, y),
-                                textcoords="offset points", xytext=(6, -11),
-                                fontsize=7, alpha=0.8, color="C1")
+                                textcoords="offset points", xytext=(6, -12),
+                                fontsize=7, alpha=0.8, color="C1",
+                                path_effects=halo)
     if drew:
         if study.x_axis == "energy_pct":
             # x is measured, not the swept parameter — label each point with it
@@ -414,10 +477,18 @@ def _plot_study(study: StudyDef, records: List[dict], out_path: Path, log) -> No
                             (r["x_value"], r["error_mm"]),
                             textcoords="offset points", xytext=(6, 6), fontsize=8,
                             alpha=0.8)
-        ax.legend(framealpha=0.9)
+        # outside, below the x label: with both series drawn no corner of the
+        # axes is reliably empty, and an in-axes legend covered data
+        fig.legend(*ax.get_legend_handles_labels(), loc="outside lower center",
+                   ncol=2, framealpha=0.9)
     else:
         ax.text(0.5, 0.5, "no measurable points", ha="center", va="center",
                 transform=ax.transAxes)
+    # room right of the last point for its n= label: up to "n=1393" needs ~36 pt
+    # (offset + text + halo); the default 5 % margin leaves ~26 pt
+    ax.margins(x=0.09)
+    if study.ticks_at_values:
+        ax.set_xticks([float(v) for v in study.values])
     ax.set_xlabel(study.x_label)
     ax.set_ylabel("distance to true TX (mm)")
     add_wavelength_axis(ax, _records_ref_freq(records), axis="y", unit_m=1e-3)
@@ -438,13 +509,13 @@ def _plot_ndof(study: StudyDef, records: List[dict], out_path: Path, log) -> Non
     pts = [r for r in records if r.get("n_dof_total") is not None]
     fig, ax = plt.subplots(figsize=(9, 6), layout="constrained")
     drew = False
-    for key, label, color, marker in _ERROR_SERIES:
+    for key, label, color, marker, _lw, _ms, area, zorder in _ERROR_SERIES:
         keep = [(r["n_dof_total"], r[key], r) for r in pts if r.get(key) is not None]
         if not keep:
             continue
         drew = True
         ax.scatter([k[0] for k in keep], [k[1] for k in keep],
-                   s=45, color=color, marker=marker, zorder=3, label=label)
+                   s=area, color=color, marker=marker, zorder=zorder, label=label)
         if key == "error_mm":
             # one annotation per point (the series share their x positions)
             for x, y, r in keep:
@@ -452,7 +523,9 @@ def _plot_ndof(study: StudyDef, records: List[dict], out_path: Path, log) -> Non
                             textcoords="offset points", xytext=(6, 6),
                             fontsize=8, alpha=0.8)
     if drew:
-        ax.legend(framealpha=0.9)
+        # outside, below the x label, as on the study plot
+        fig.legend(*ax.get_legend_handles_labels(), loc="outside lower center",
+                   ncol=2, framealpha=0.9)
     else:
         ax.text(0.5, 0.5, "no n_dof-measurable points", ha="center", va="center",
                 transform=ax.transAxes)
@@ -506,7 +579,7 @@ def _parse_args():
     parser.add_argument("--out", type=Path, default=None,
                         help="Study root directory (default: "
                              "<output.output_dir>/study_<study>, plus _snr<DB>dB "
-                             "with noise on)")
+                             "with noise on, except for --study snr)")
     parser.add_argument("--jobs", "-j", type=int, default=None,
                         help="Worker processes per point (default: all cores)")
     parser.add_argument("--limit", type=int, default=None,
@@ -518,7 +591,8 @@ def _parse_args():
     parser.add_argument("--snr-db", type=parse_snr_db_arg, default=None, metavar="DB|off",
                         help="Peak-referenced SNR in dB of the complex AWGN added to the "
                              "simulated RX measurement at every point (overrides "
-                             "noise.snr_db); 'off' forces a noiseless study")
+                             "noise.snr_db); 'off' forces a noiseless study. Not "
+                             "with --study snr, which sets every point's SNR")
     parser.add_argument("--noise-seed", type=int, default=None,
                         help="Override noise.seed for a reproducible noise draw (one "
                              "seed for every point)")
@@ -547,17 +621,28 @@ def main():
         return
 
     study = STUDIES[args.study]
+    if study.sweeps_noise and args.snr_db is not None:
+        # refused before anything is loaded or written: the flag would be
+        # silently overridden at every point
+        log.error(f"--snr-db cannot be combined with --study {study.name}: the "
+                  f"series sets each point's SNR ({', '.join(f'{v:g}' for v in study.values)} "
+                  "dB). --noise-seed is allowed and applies to every point.")
+        raise SystemExit(2)
     base_cfg = load_config(args.config)
     if args.engine is not None:
         base_cfg.gerchberg_saxton.engine = args.engine
+    if study.sweeps_noise and base_cfg.noise.snr_db is not None:
+        log.info(f"{args.config} sets noise.snr_db={base_cfg.noise.snr_db:g}; the "
+                 f"{study.name} series overrides it at every point")
     try:
         apply_noise_overrides(base_cfg, args.snr_db, args.noise_seed)
     except ValidationError as e:
         log.error("invalid noise override: " + "; ".join(
             f"{'.'.join(str(p) for p in err['loc'])}: {err['msg']}" for err in e.errors()))
         raise SystemExit(2)
-    snr = base_cfg.noise.snr_db
+    snr = None if study.sweeps_noise else base_cfg.noise.snr_db
     # noisy and noiseless studies of the same series must not share a default root
+    # (a series sweeping the SNR has no one SNR to name it by)
     root = (Path(args.out) if args.out is not None
             else Path(base_cfg.output.output_dir)
             / (f"study_{study.name}" + (f"_snr{snr:g}dB" if snr is not None else "")))
@@ -568,8 +653,11 @@ def main():
     check_run_dir(root.parent, root.name, kind="study")
     _resolve_noise_seed(study, base_cfg, root, log)
     _check_resume_noise(study, base_cfg, root, log)
-    noise = _noise_block(base_cfg)
-    if noise is not None:
+    noise = _noise_block(study, base_cfg)
+    if study.sweeps_noise:
+        log.info(f"Each point is solved at its own SNR "
+                 f"({', '.join(f'{v:g}' for v in study.values)} dB), seed {noise['seed']}")
+    elif noise is not None:
         log.info(f"Every point is solved at {_describe_noise(noise)}")
     root.mkdir(parents=True, exist_ok=True)
     _write_study_json(root, study, args.config, [], status="running", noise=noise)

@@ -422,6 +422,16 @@ and a per-point `snr_db`. With `seed: null`, one seed is drawn for the whole stu
 recorded in `study.json`; resuming the same root at the same SNR adopts that recorded
 seed.
 
+The `snr` series sweeps the SNR itself: 0 to 40 dB in 5 dB steps, one grid search per
+value, all with the same seed. Nothing else changes, so it solves with whatever
+frequencies the base config lists. Its default root is `study_snr` (no suffix), and it
+plots error against SNR (`study_error_vs_snr.png`). `--snr-db` cannot be combined with
+it (exit 2) because the series sets every point's SNR, but `--noise-seed` can:
+
+```bash
+mgs-study --study snr --config configs/scenario_caustic_hit_1f_grid2l.yml   # 150 GHz, 164x76 grid
+```
+
 **Engines and data.** The noise is added in Python before the solver engine is called,
 so `--engine rust` needs nothing extra: both engines receive the identical noisy
 arrays. The experimental `.mat` path ignores `snr_db` with a warning, because a real
