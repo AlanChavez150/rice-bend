@@ -444,7 +444,8 @@ All code lives in `src/rice_bend/`:
 Numerics and geometry:
 
 - `rs.py` — Rayleigh-Sommerfeld propagation: the kernel, applying it, and whole-scene illumination
-- `caustic.py` — phase-plate design for parabolic beam trajectories
+- `beam_aperatures.py` — every TX beam generator (caustic phase plate for parabolic trajectories,
+  steered plane wave) and the `beam.type` dispatch
 - `sim_scene.py` — aperture and scene geometry
 - `noise.py` — receiver noise: peak-referenced complex AWGN on the simulated RX elements,
   one seeded stream per tone

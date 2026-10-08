@@ -27,7 +27,8 @@ class SimSceneConfig(BaseModel):
 
 
 class BeamConfig(BaseModel):
-    """The beam emitted by the TX aperture and its type-specific parameters.
+    """The beam emitted by the TX aperture and its type-specific parameters
+    (see rice_bend/beam_aperatures.py for the constructions).
 
     - `caustic`: an accelerating beam following x(d) = a*d^2 + b*d + c, where d is
       the distance travelled from the TX aperture along the beam. Requires

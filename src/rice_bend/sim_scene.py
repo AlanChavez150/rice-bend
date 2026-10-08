@@ -1,9 +1,8 @@
 """Aperture and scene geometry. No I/O, no plotting -- the .mat readers live in
-exp_data.py."""
+exp_data.py, and the beams an aperture emits are built in
+beam_aperatures.py."""
 
 import numpy as np
-
-from rice_bend import caustic, rs
 
 
 def sampled_axis(lo: float, hi: float, spacing: float) -> np.ndarray:
@@ -33,27 +32,6 @@ class SimAperature():
         self.aper_axis = sampled_axis(x_min, x_max, dx)
         self.num_points = len(self.aper_axis)
         self.aper_profile = np.zeros(len(self.aper_axis), dtype=np.complex128)
-
-    def make_caustic(self, freq: float, z_max: float, a: float, b: float, c: float):
-        self.aper_profile = caustic.generate_aperature(
-            freq,
-            self.aper_axis,
-            z_max,
-            self.num_points,
-            a,
-            b,
-            c
-        )
-
-    def make_steer(self, freq: float, theta_deg: float):
-        """
-        Implements -k * x * sin(theta).
-        Where theta trajectory of the beam, and k is the wavenumber
-        """
-        k = rs.wavenumber(freq)
-        theta_rad = theta_deg * (np.pi / 180)
-        phase = -1.0  * k * self.aper_axis * np.sin(theta_rad)
-        self.aper_profile = 1.0 * np.exp(1j * phase)
 
 class SimScene():
     """

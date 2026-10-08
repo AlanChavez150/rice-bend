@@ -8,7 +8,7 @@ from typing import List, Optional, Sequence
 import numpy as np
 from pydantic import ValidationError
 
-from rice_bend import rs
+from rice_bend import beam_aperatures, rs
 from rice_bend.cli import setup_logging
 from rice_bend.config import (DEFAULT_CONFIG, GerchbergSaxtonConfig, SimConfig,
                               apply_noise_overrides, center_freq_index, load_config,
@@ -529,7 +529,8 @@ class MGS():
 
         tx = SimAperature(x_min=tx_x_min + x_offset, x_max=tx_x_max + x_offset,
                           z=0, dx=dx)
-        tx.make_steer(freq, theta_deg=0)   # broadside plane wave: the solver's seed
+        # broadside plane wave: the solver's seed
+        tx.aper_profile = beam_aperatures.steered_profile(freq, tx.aper_axis, theta_deg=0)
         self.gs_tx = SimAperature(x_min=tx.x_min, x_max=tx.x_max, z=tx.z, dx=dx)
         # a single capture is inherently one frequency: the length-1 joint path
         self.freq_states = [FreqState(freq=self.freq, wavelength=self.wavelength,
@@ -573,9 +574,9 @@ class MGS():
         """The transmit aperture and the beam it emits at `freq`, defined
         independently of the scene grid. Sets self.beam_type and self.has_real_aper.
 
-        Both beam constructors bake the wavenumber into the PHASE only; the profile
-        amplitude is 1 by construction either way, so the aperture amplitude (the
-        solver's fixed constraint) is frequency-independent."""
+        The profile comes from beam_aperatures.py, whose generators all bake the
+        wavenumber into the PHASE only, so the aperture amplitude (the solver's
+        fixed constraint) is frequency-independent."""
         tx = SimAperature(x_min=tx_cfg.x_min, x_max=tx_cfg.x_max, z=tx_cfg.z, dx=tx_cfg.dx)
         assert tx.z > z_min, f"tx_aperture.z ({tx.z}) must be above the scene floor z_min ({z_min})"
 
@@ -584,16 +585,7 @@ class MGS():
         # a known real aperture exists (both simulated beams); false for the
         # experimental path, where the TX aperture is what we are trying to recover
         self.has_real_aper = True
-        if beam.type == "caustic":
-            # caustic beam x(d) = a*d^2 + b*d + c, d = distance travelled from the TX,
-            # so it is parameterised by the downstream propagation length
-            a, b, c = beam.trajectory
-            tx.make_caustic(freq, tx.z - z_min, a, b, c)
-        elif beam.type == "directional":
-            # steered plane wave at the configured angle
-            tx.make_steer(freq, theta_deg=beam.steer_angle_deg)
-        else:
-            raise ValueError(f"unknown beam type: {beam.type}")
+        tx.aper_profile = beam_aperatures.beam_profile(beam, freq, tx.aper_axis, tx.z - z_min)
         return tx
 
     def _log_geometry(self) -> None:
