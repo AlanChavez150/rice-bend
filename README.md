@@ -2,8 +2,8 @@
 
 Phase retrieval of mm-wave (150 GHz) beams using a modified Gerchberg-Saxton (MGS)
 algorithm. Given field measurements at a receiver plane, reconstruct the transmitter
-aperture's phase profile for a curved ("accelerating") caustic or a directional
-(steered) beam.
+aperture's phase profile for a curved ("accelerating") caustic, a directional
+(steered), a Bessel (axicon) or a focused (lens) beam.
 
 Supports both pure simulation and real experimental data captured from an oscilloscope.
 
@@ -32,6 +32,8 @@ Runs the phase-retrieval pipeline. With no data paths it runs a pure simulation:
 ```bash
 mgs                                              # pure simulation (default: caustic beam)
 mgs --config configs/directional_config.yml      # directional (steered) beam scene
+mgs --config configs/bessel_config.yml           # Bessel (axicon) beam scene
+mgs --config configs/focus_config.yml            # focused (lens) beam scene
 mgs --freq 150e9                                 # set carrier frequency (Hz)
 mgs --freq 140e9 150e9 160e9                     # ONE joint solve across several frequencies
 mgs --debug                                      # verbose logging
@@ -46,11 +48,31 @@ just the length-1 case of the same path. The scene panels render at the primary
 (first) frequency; `run.json` records the joint `final_loss` plus
 `final_loss_per_freq` and `gs_result.ref_freq_hz`.
 
-Two general configs ship in `configs/`: `caustic_config.yml` (an accelerating
-"caustic" beam — the `mgs` default) and `directional_config.yml` (a steered
-plane-wave beam). The emitted beam is selected by the `tx_aperture.beam.type`
-field (`caustic` requires `trajectory: [a, b, c]`; `directional` requires
-`steer_angle_deg`). The receive aperture is configured by the `rx_aperture` block
+Four general configs ship in `configs/`: `caustic_config.yml` (an accelerating
+"caustic" beam — the `mgs` default), `directional_config.yml` (a steered
+plane-wave beam), `bessel_config.yml` (an axicon) and `focus_config.yml` (a lens
+focused on the RX). The emitted beam is selected by the `tx_aperture.beam.type`
+field:
+
+| `type` | Parameters | Beam |
+| --- | --- | --- |
+| `caustic` | `trajectory: [a, b, c]` | accelerating beam following `x(d) = a·d² + b·d + c`, `d` the distance travelled from the TX |
+| `directional` | `steer_angle_deg` | plane wave steered off the −Z axis |
+| `bessel` | `cone_angle_deg`, optional `steer_angle_deg` | two plane-wave halves crossing at the cone angle about the aperture centre |
+| `focus` | `focal_length`, optional `steer_angle_deg` | lens converging on the point `focal_length` from the aperture centre |
+
+A positive `steer_angle_deg` steers toward **−x** for all three types that take one. It
+tilts the Bessel axis, and for `focus` it is the angle of the ray from the aperture
+centre to the focal point, which sits at `(x_c − F·sin θ, z_tx − F·cos θ)`. The `bessel`
+and `focus` beams are laid out about the centre of `[x_min, x_max]`, so they move with
+the TX window. An unknown key in the `beam` block is an error.
+
+The scene is 2D, so the `bessel` beam is the two-wave counterpart of J0: **equal-height
+fringes** of period `λ / (2·sin(cone))` rather than one dominant core. The two halves
+overlap down to `(W/2) / tan(cone)` below a plate of width `W`, and the overlap is
+widest (`W/2`) at half that range. The `focus` spot is about `λ·F / W` wide.
+
+The receive aperture is configured by the `rx_aperture` block
 (`x_center` + `width`); shrink `width` for a smaller receiver.
 
 Five **test scenarios** (`configs/scenario_*.yml`) exercise beam-vs-RX geometry,
@@ -235,8 +257,9 @@ RX field with its own TX beam phase (∝ wavenumber) and its own RX element coun
 The solver reconstructs a *plate with one shape*: the unknown ψ(x) is the aperture's
 delay/optical-path profile, expressed as phase at a reference frequency, and each
 frequency's phase is `(f / f_ref) · ψ(x)` — the way a real plate's phase scales with
-wavenumber. Both simulated beam types are exactly this kind of source (the caustic plate
-and the steered ramp both bake the wavenumber into their phase), so the true TX can fit
+wavenumber. Every simulated beam type is exactly this kind of source (the caustic plate,
+the steered ramp, the axicon and the lens all bake the wavenumber into their phase), so
+the true TX can fit
 every frequency simultaneously and extra bandwidth adds constraint. It also resolves the
 single-frequency 2π ambiguity: only the true delay is consistent with every frequency at
 once (the multi-wavelength interferometry effect). The reference frequency is the
@@ -445,7 +468,7 @@ Numerics and geometry:
 
 - `rs.py` — Rayleigh-Sommerfeld propagation: the kernel, applying it, and whole-scene illumination
 - `beam_aperatures.py` — every TX beam generator (caustic phase plate for parabolic trajectories,
-  steered plane wave) and the `beam.type` dispatch
+  steered plane wave, Bessel axicon, focusing lens) and the `beam.type` dispatch
 - `sim_scene.py` — aperture and scene geometry
 - `noise.py` — receiver noise: peak-referenced complex AWGN on the simulated RX elements,
   one seeded stream per tone

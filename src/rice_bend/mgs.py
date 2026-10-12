@@ -184,8 +184,8 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
     `orig_aper_amp` (defined on `x_axis`; its nonzero region is the support).
     psi is a PLATE's shape — the optical-path/delay profile expressed as phase at
     `ref_freq` — and each channel's phase is (f/ref_freq)·psi, the way a physical
-    plate's phase scales with wavenumber. This matches both simulated beam types
-    (caustic and steer bake the wavenumber into the phase).
+    plate's phase scales with wavenumber. This matches every simulated beam type
+    (each generator bakes the wavenumber into the phase).
 
     The loss is the UNWEIGHTED MEAN of the per-frequency losses. Each channel's
     error_weighting is normalized to its own measurement's peak (see MGS.measure),
@@ -399,13 +399,13 @@ class FreqState:
 
     The geometry of the apertures is frequency-independent (their axes come from
     config bounds + dx alone), but the RX element spacing is wavelength/20 when
-    the config leaves dx null, and both beam constructors bake the wavenumber
+    the config leaves dx null, and every beam constructor bakes the wavenumber
     into the emitted phase — so each frequency gets its own aperture objects.
     """
     freq: float
     wavelength: float
     rx_ap: SimAperature            # per-freq: dx = wavelength/20 when cfg dx is null
-    tx_ap: SimAperature            # per-freq beam profile (caustic/steer phase ∝ k)
+    tx_ap: SimAperature            # per-freq beam profile (every beam's phase ∝ k)
     rx_field: Optional[np.ndarray] = None        # set by measure(), on scene x_axis
     error_weighting: Optional[np.ndarray] = None  # set by measure(), on scene x_axis
     rx_plane_row: Optional[np.ndarray] = None    # full scene-axis field at the RX
@@ -582,7 +582,7 @@ class MGS():
 
         beam = tx_cfg.beam
         self.beam_type = beam.type
-        # a known real aperture exists (both simulated beams); false for the
+        # a known real aperture exists (every simulated beam); false for the
         # experimental path, where the TX aperture is what we are trying to recover
         self.has_real_aper = True
         tx.aper_profile = beam_aperatures.beam_profile(beam, freq, tx.aper_axis, tx.z - z_min)
@@ -807,7 +807,7 @@ class MGS():
         # constraint by 3.0-5.3% rel L2 with no error raised and no visibly broken plot.
         #
         # The PRIMARY frequency's profile serves as THE constraint for a joint
-        # solve: both beam constructors emit unit amplitude (only the phase depends
+        # solve: every beam constructor emits unit amplitude (only the phase depends
         # on the wavenumber), so the amplitude is frequency-independent by
         # construction and any freq_state's profile gives the same array.
         tx_ap = self.scene.tx_ap

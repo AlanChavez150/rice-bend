@@ -32,6 +32,19 @@ def beam_profile(beam: BeamConfig, freq: float, x_axis: np.ndarray,
     elif beam.type == "directional":
         # steered plane wave at the configured angle
         return steered_profile(freq, x_axis, theta_deg=beam.steer_angle_deg)
+
+    # The bessel and focus plates are laid out about the aperture centre, so the
+    # beam moves rigidly with the TX window. x_axis is a linspace over
+    # [x_min, x_max], so its end points give that centre exactly. Their steer angle
+    # is optional: null means the beam leaves straight down.
+    x_center = 0.5 * (x_axis[0] + x_axis[-1])
+    theta_deg = beam.steer_angle_deg or 0.0
+    if beam.type == "bessel":
+        # axicon: two plane-wave halves crossing at the cone angle
+        return bessel_profile(freq, x_axis, x_center, beam.cone_angle_deg, theta_deg)
+    elif beam.type == "focus":
+        # lens converging on the point focal_length away along the steer angle
+        return focused_profile(freq, x_axis, x_center, beam.focal_length, theta_deg)
     else:
         raise ValueError(f"unknown beam type: {beam.type}")
 
@@ -78,8 +91,59 @@ def steered_profile(freq: float, x_axis: np.ndarray, theta_deg: float) -> np.nda
     """
     Implements -k * x * sin(theta).
     Where theta trajectory of the beam, and k is the wavenumber
+
+    A positive theta steers toward -x. bessel_profile and focused_profile take
+    their steer angle in the same sense.
     """
     k = rs.wavenumber(freq)
     theta_rad = theta_deg * (np.pi / 180)
     phase = -1.0  * k * x_axis * np.sin(theta_rad)
+    return 1.0 * np.exp(1j * phase)
+
+
+def bessel_profile(freq: float, x_axis: np.ndarray, x_center: float, cone_deg: float,
+                   theta_deg: float = 0.0) -> np.ndarray:
+    """
+    Axicon phase plate, the 2D Bessel beam: -k * |x - x_center| * sin(cone).
+    The half of the plate either side of `x_center` emits a plane wave tilted
+    `cone_deg` toward the axis, and where the two cross they interfere into
+    cos(k * sin(cone) * (x - x_center)) fringes that do not spread.
+
+    In this 2D scene those are EQUAL-HEIGHT fringes of period
+    wavelength / (2 * sin(cone)), not one dominant core (that is J0, the radially
+    symmetric 3D case). The halves overlap down to (W / 2) / tan(cone) below a plate
+    of width W, and the overlap is widest, W / 2, at half that range.
+
+    `theta_deg` tilts the axis, with steered_profile's sign: the halves leave at
+    theta +/- cone, and a vanishing cone leaves the steered plane wave.
+    """
+    k = rs.wavenumber(freq)
+    cone_rad = cone_deg * (np.pi / 180)
+    theta_rad = theta_deg * (np.pi / 180)
+    u = x_axis - x_center
+    phase = -1.0 * k * u * np.where(u >= 0, np.sin(theta_rad + cone_rad),
+                                    np.sin(theta_rad - cone_rad))
+    return 1.0 * np.exp(1j * phase)
+
+
+def focused_profile(freq: float, x_axis: np.ndarray, x_center: float,
+                    focal_length: float, theta_deg: float = 0.0) -> np.ndarray:
+    """
+    Lens phase plate: -k * (r - focal_length), r the distance from each sample to
+    the focal point, so every sample arrives there in phase. The focal point sits
+    `focal_length` from `x_center` along the ray `theta_deg` off the -Z axis:
+    (x_center - focal_length * sin(theta), focal_length * cos(theta) below the plate).
+
+    The path length is exact, not the paraxial x^2 / (2 * focal_length): the shipped
+    apertures are a good fraction of their stand-off. `theta_deg` has
+    steered_profile's sign, and this is that plane wave as focal_length -> inf.
+    The focal spot is about wavelength * focal_length / W wide for a plate of
+    width W.
+    """
+    k = rs.wavenumber(freq)
+    theta_rad = theta_deg * (np.pi / 180)
+    u = x_axis - x_center
+    r = np.sqrt((u + focal_length * np.sin(theta_rad))**2
+                + (focal_length * np.cos(theta_rad))**2)
+    phase = -1.0 * k * (r - focal_length)
     return 1.0 * np.exp(1j * phase)

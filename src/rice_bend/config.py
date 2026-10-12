@@ -1,5 +1,6 @@
 """Pydantic models for the simulation configuration .yml.
-See configs/caustic_config.yml and configs/directional_config.yml."""
+See configs/caustic_config.yml, directional_config.yml, bessel_config.yml and
+focus_config.yml."""
 
 import argparse
 from pathlib import Path
@@ -34,12 +35,33 @@ class BeamConfig(BaseModel):
       the distance travelled from the TX aperture along the beam. Requires
       `trajectory = [a, b, c]`.
     - `directional`: a steered plane wave at `steer_angle_deg` off the -Z axis
-      (phase ramp -k*x*sin(theta)). Requires `steer_angle_deg`."""
-    type: Literal["caustic", "directional"] = "caustic"
+      (phase ramp -k*x*sin(theta)). Requires `steer_angle_deg`.
+    - `bessel`: an axicon, two plane-wave halves crossing at `cone_angle_deg` about
+      the aperture centre. They interfere into non-spreading fringes of period
+      wavelength/(2*sin(cone)) down to (width/2)/tan(cone) below the plate. Requires
+      `cone_angle_deg`; `steer_angle_deg` optionally tilts the axis.
+    - `focus`: a lens converging on the point `focal_length` from the aperture
+      centre, along the ray `steer_angle_deg` off the -Z axis. Requires
+      `focal_length`; `steer_angle_deg` is optional.
+
+    A positive `steer_angle_deg` steers toward -x for every type that takes one."""
+    # steer_angle_deg is optional for bessel and focus, so a typo (steer_angle) must
+    # not silently leave the beam pointing straight down
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["caustic", "directional", "bessel", "focus"] = "caustic"
     trajectory: Optional[List[float]] = Field(default=None,
         description="Caustic coefficients [a, b, c] for x(d)=a*d^2+b*d+c (caustic only)")
     steer_angle_deg: Optional[float] = Field(default=None,
-        description="Steering angle in degrees off the -Z axis (directional only)")
+        description="Steering angle in degrees off the -Z axis, positive toward -x "
+                    "(required for directional; optional for bessel and focus, "
+                    "null -> 0)")
+    cone_angle_deg: Optional[float] = Field(default=None, gt=0, lt=90,
+        description="Half-angle in degrees between the two crossing plane waves "
+                    "(bessel only)")
+    focal_length: Optional[float] = Field(default=None, gt=0,
+        description="Distance in meters from the aperture centre to the focal point "
+                    "(focus only)")
 
     @model_validator(mode="after")
     def _check(self) -> "BeamConfig":
@@ -50,6 +72,22 @@ class BeamConfig(BaseModel):
         elif self.type == "directional":
             if self.steer_angle_deg is None:
                 raise ValueError("directional beam requires steer_angle_deg")
+        elif self.type == "bessel":
+            if self.cone_angle_deg is None:
+                raise ValueError("bessel beam requires cone_angle_deg")
+            # both halves must still leave the plate downward
+            steer = abs(self.steer_angle_deg or 0.0)
+            if steer + self.cone_angle_deg >= 90:
+                raise ValueError(
+                    f"bessel beam requires |steer_angle_deg| + cone_angle_deg < 90, "
+                    f"got {steer} + {self.cone_angle_deg}")
+        elif self.type == "focus":
+            if self.focal_length is None:
+                raise ValueError("focus beam requires focal_length")
+            # the focal point must sit below the plate
+            if abs(self.steer_angle_deg or 0.0) >= 90:
+                raise ValueError(
+                    f"focus beam requires |steer_angle_deg| < 90, got {self.steer_angle_deg}")
         return self
 
 
@@ -59,13 +97,15 @@ class TxApertureConfig(BaseModel):
 
     The aperture sits at height `z` and projects toward -Z (down) onto the RX at
     z=0; move it around by editing `z` (height) and `x_min`/`x_max` (lateral span).
-    The emitted beam (caustic or directional) is configured in the `beam` block."""
+    The emitted beam (caustic, directional, bessel or focus) is configured in the
+    `beam` block."""
     x_min: float = -0.35
     x_max: float = 0.35
     z: float = Field(default=2.0, description="TX plane height (beam travels -Z to the RX at z=0)")
     dx: float = Field(default=0.25e-3, gt=0, description="Aperture sampling spacing in meters")
     beam: BeamConfig = Field(default_factory=BeamConfig,
-        description="The emitted beam (type: caustic | directional) and its parameters")
+        description="The emitted beam (type: caustic | directional | bessel | focus) "
+                    "and its parameters")
 
     @model_validator(mode="after")
     def _check(self) -> "TxApertureConfig":
