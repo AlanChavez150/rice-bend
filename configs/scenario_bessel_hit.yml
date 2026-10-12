@@ -1,0 +1,65 @@
+# Test scenario: Bessel (axicon) beam HITS the RX aperture (three fringes across the window)
+# Twin of scenario_caustic_hit.yml: same scene, TX window, RX window, frequencies, GS settings and
+# grid_search. The beam block is the only difference, so the axicon sits where the caustic plate does
+# (x_center=-0.101, z=0.3) and its axis is steered onto the RX.
+# RX window: centered x=0, width 0.04 m. RX at z=0; TX projects -Z. TX width 0.072 m, height z=0.3.
+# Verified (150 GHz): FWHM=0.0380 (< rx 0.04; for this beam it is the width of the fringe zone),
+# rx_peak/peak=1.000, energy_frac_in_rx=0.836 -> HIT. The fringes are near-equal, so the reported
+# beam_peak_x (-0.0126) is just whichever one is marginally tallest. Across the comb: 0.726 at
+# 100 GHz, 0.797 at 190 GHz.
+# Dense 64x48 grid_search (3072 candidate spots).
+
+sim_scene:
+  x_min: -0.3
+  x_max: 0.3
+  z_min: 0.0
+  z_max: 0.85
+  spacing: 0.00025
+
+tx_aperture:
+  x_min: -0.137
+  x_max: -0.065
+  z: 0.3
+  dx: 0.00025
+  beam:
+    type: bessel
+    cone_angle_deg: 5.0        # half-angle between the two crossing plane waves; three fringes across the RX window
+    steer_angle_deg: -18.61    # tilts the axis from the aperture centre (x=-0.101) onto the RX at x=0; negative steers toward +x
+
+rx_aperture:
+  x_center: 0.0
+  width: 0.04
+  dx: null
+
+plot_path: scenario_bessel_hit.png
+
+# Frequencies (Hz) the solvers run at. More than one means ONE JOINT solve: a single
+# shared aperture profile fitted against every frequency at once (one delay
+# plate whose phase scales with frequency; loss = mean of the per-frequency
+# losses), written to one flat results/<run_name>/ with joint + per-frequency plots.
+frequencies: [100.0e9, 110.0e9, 120.0e9, 130.0e9, 140.0e9, 150.0e9, 160.0e9, 170.0e9, 180.0e9, 190.0e9]
+
+gerchberg_saxton:
+  max_iters: 800
+  convergence_count: 10
+  convergence_threshold: -1.0e-8
+  lr0: 0.05
+  bt_shrink: 0.5
+  bt_tries: 8
+  seed: 0
+  history_stride: 50
+
+output:
+  output_dir: results
+  run_name: scenario_bessel_hit
+  save_run: true
+  save_scene_fields: false
+  save_gs_history: false
+
+# Speculative TX-location sweep for grid-search-mgs (ignored by plain mgs).
+grid_search:
+  z:        {min: 0.15, max: 0.80, num: 64}
+  x_center: {min: -0.15, max: 0.15, num: 48}
+  aperture: {width: 0.072, dx: 0.00025}
+  seed: 0
+  gs_overrides: {max_iters: 800}

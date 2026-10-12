@@ -75,8 +75,9 @@ widest (`W/2`) at half that range. The `focus` spot is about `λ·F / W` wide.
 The receive aperture is configured by the `rx_aperture` block
 (`x_center` + `width`); shrink `width` for a smaller receiver.
 
-Five **test scenarios** (`configs/scenario_*.yml`) exercise beam-vs-RX geometry,
-each with a bare-minimum TX aperture and a 6.5 cm RX window, all sharing one
+Seven **test scenarios** (`configs/scenario_*.yml`) exercise beam-vs-RX geometry,
+each with a bare-minimum TX aperture and a small RX window (6.5 cm for the
+directional scenarios, 4 cm for the caustic, bessel and focus ones), all sharing one
 symmetric scene (`x[-0.3,0.3] z[0,0.85]`; `rs.rs` convolves a centered kernel, so
 an off-center scene would shift the beam):
 
@@ -87,6 +88,8 @@ an off-center scene would shift the beam):
 | `scenario_directional_smaller_hit` | directional, short stand-off | hits RX, beam **smaller** than RX |
 | `scenario_caustic_miss` | caustic (same beam as hit, TX moved right) | misses RX to the right |
 | `scenario_caustic_hit` | caustic | hits RX |
+| `scenario_bessel_hit` | bessel (the caustic hit's TX window, axis steered onto the RX) | hits RX, three fringes across the window |
+| `scenario_focus_hit` | focus (the caustic hit's TX window, focal point on the RX) | hits RX, focal spot **smaller** than RX |
 
 `scripts/verify_scenario.py CONFIG.yml [--expect-hit|--expect-miss] [--expect-size
 larger|smaller]` simulates a scene and reports where/how the beam lands on the RX
