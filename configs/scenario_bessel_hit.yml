@@ -1,7 +1,9 @@
 # Test scenario: Bessel (axicon) beam HITS the RX aperture (three fringes across the window)
-# Twin of scenario_caustic_hit.yml: same scene, TX window, RX window, frequencies, GS settings and
-# grid_search. The beam block is the only difference, so the axicon sits where the caustic plate does
-# (x_center=-0.101, z=0.3) and its axis is steered onto the RX.
+# Twin of scenario_caustic_hit.yml: same scene, TX window, RX window, frequencies and grid_search,
+# so the axicon sits where the caustic plate does (x_center=-0.101, z=0.3) and its axis is steered
+# onto the RX. Two things differ: the beam block, and gerchberg_saxton.max_iters (5000 against 800;
+# the single 150 GHz solve converges after 1193 iterations). The sweep keeps its own 800 cap
+# (gs_overrides).
 # RX window: centered x=0, width 0.04 m. RX at z=0; TX projects -Z. TX width 0.072 m, height z=0.3.
 # Verified (150 GHz): FWHM=0.0380 (< rx 0.04; for this beam it is the width of the fringe zone),
 # rx_peak/peak=1.000, energy_frac_in_rx=0.836 -> HIT. The fringes are near-equal, so the reported
@@ -40,7 +42,7 @@ plot_path: scenario_bessel_hit.png
 frequencies: [100.0e9, 110.0e9, 120.0e9, 130.0e9, 140.0e9, 150.0e9, 160.0e9, 170.0e9, 180.0e9, 190.0e9]
 
 gerchberg_saxton:
-  max_iters: 800
+  max_iters: 5000
   convergence_count: 10
   convergence_threshold: -1.0e-8
   lr0: 0.05
