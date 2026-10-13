@@ -16,7 +16,6 @@ import scipy.integrate
 
 from rice_bend import rs
 from rice_bend.config import BeamConfig
-from rice_bend.interp import interp_amp_phase
 
 
 def beam_profile(beam: BeamConfig, freq: float, x_axis: np.ndarray,
@@ -60,12 +59,14 @@ def caustic_profile(
     '''
     Generates a phase plate that will create a beam with trajectory
     x(d) = a*d^2 + b*d + c, d the distance travelled from the plate, designed over
-    0 <= d <= prop_len. The plate only exists on [c - a*prop_len^2, c]; the rest of
-    `x_axis` is zero-filled.
+    0 <= d <= prop_len. The plate only exists between c - a*prop_len^2 and c; the
+    rest of `x_axis` is exactly zero.
 
-    Assumes a > 0. The np.flip below lines phi up with x_caustic only when x_caustic
-    comes out descending, which is the a > 0 case; a < 0 passes the config's
-    validation but does not produce the mirrored beam.
+    The sign of a picks the side: a > 0 puts the plate on the -x side of c and
+    bends the beam toward +x. Negating a and b gives the mirror image about x = c
+    (plate on the +x side, bending toward -x), up to a constant phase offset that no
+    intensity sees: the phase is integrated from the plate's -x end either way,
+    which is the far edge for a > 0 and the c edge for a < 0.
     '''
     z = np.linspace(0, prop_len, len(x_axis))
     wave_number = rs.wavenumber(freq)
@@ -75,16 +76,29 @@ def caustic_profile(
     x_caustic = caustic - z * d_caustic
 
     dphi_dy = (wave_number * d_caustic) / np.sqrt(1 + d_caustic**2)
+    # x_caustic comes out of the trajectory, not a grid: it runs from c to the far
+    # edge, so it is descending for a > 0. Sort it once and stay on the sorted axis
     sort_idx = np.argsort(x_caustic)
     x_sorted = x_caustic[sort_idx]
     dphi_dy_sorted = dphi_dy[sort_idx]
 
-    phi = np.flip(scipy.integrate.cumulative_trapezoid(dphi_dy_sorted, x_sorted, initial=0))
-    aper = 1.0 * np.exp(1j * phi)
+    phi_sorted = scipy.integrate.cumulative_trapezoid(dphi_dy_sorted, x_sorted, initial=0)
 
-    # interpolate from caustic x axis to provided x axis. x_caustic is not sorted
-    # (it comes out of the trajectory, not a grid), hence assume_sorted=False.
-    return interp_amp_phase(x_caustic, aper, x_axis, assume_sorted=False)
+    # Resample the UNWRAPPED phase, and only then take exp(1j * phi). The caustic
+    # samples are quadratic in d and do not line up with `x_axis`, so interpolating
+    # the wrapped phase instead (or |aper| and angle(aper)) averages through the
+    # +/-pi branch cut wherever an `x_axis` sample lands in an interval that holds a
+    # wrap, and leaves it at full amplitude with an arbitrary phase.
+    phi = np.interp(x_axis, x_sorted, phi_sorted)
+
+    # The plate's far edge c - a*prop_len^2 and the aperture edge cut to it (x_min
+    # for a > 0) are the same number computed two ways and can land an ULP apart,
+    # which would drop the edge sample of a window cut exactly to the support
+    # (scenario_caustic_miss, scenario_caustic_partial, any shifted plate). 1e-9 m
+    # is far below any dx and far above that rounding. np.interp clamps to the end
+    # values, so a sample let in by the tolerance takes the edge phase.
+    inside = (x_axis >= x_sorted[0] - 1e-9) & (x_axis <= x_sorted[-1] + 1e-9)
+    return np.where(inside, np.exp(1j * phi), 0j)
 
 
 def steered_profile(freq: float, x_axis: np.ndarray, theta_deg: float) -> np.ndarray:
