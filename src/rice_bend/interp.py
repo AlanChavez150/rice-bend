@@ -23,10 +23,20 @@ samples of different phase cuts inside the arc, so it dips wherever the phase tu
 between source samples.
 
 Which to use, as the code now stands:
-  interp_real_imag  — every FIELD: the RX measurement, and the converged aperture on
-                      both the single-shot and grid paths
+  interp_real_imag  — every FIELD that changes axis: the TX plate onto the scene
+                      grid, the RX measurement of an interpolated receiver
+                      (rx_aperture.dx) both ways — the RX-plane row onto the
+                      elements, the element samples back onto the scene grid — and
+                      the converged aperture on both the single-shot and grid paths
   interp_amplitude  — the solver's fixed amplitude constraint and support mask, and
                       the scene plot's amplitude panel. Magnitudes, not fields
+  neither           — the RX measurement of an ON-GRID receiver
+                      (rx_aperture.grid_stride). Its elements are scene x samples,
+                      so MGS reads the field at them and scores the solver at them
+                      by index. No convention can make the alternative exact: a
+                      linear fill between elements a large phase turn apart is the
+                      chord-inside-the-arc dip described above, about 60 degrees per
+                      element for a lambda/2 array, and the solver fits the dip
 
 Deliberately NOT absorbed here: the two np.interp sites that resample a complex
 field (candidate_scenes' `_reilluminate` and animate's

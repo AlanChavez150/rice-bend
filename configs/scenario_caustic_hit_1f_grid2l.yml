@@ -1,16 +1,19 @@
 # SINGLE frequency (300 GHz, the design center) on the HIGH-RESOLUTION grid: a copy
-# of scenario_caustic_hit_1f.yml with two changes — the 327x151 grid_search (49,377
+# of scenario_caustic_hit_1f.yml with three changes — the 327x151 grid_search (49,377
 # candidate spots, the grid of scenario_caustic_hit_pm5.yml; ~2λ cells at 300 GHz:
-# z step 1.99 mm, x step 2.00 mm) and gerchberg_saxton.max_iters (5000 against 800:
-# the single solve at the true TX converges after 834 iterations; the sweep keeps
-# its own 800 cap through gs_overrides). The base config for the high-resolution
-# SNR study (mgs-study --study snr); scenario_caustic_hit_1f_grid2l_lambda20.yml is
-# its dense-RX control.
+# z step 1.99 mm, x step 2.00 mm), gerchberg_saxton.max_iters (5000 against 800:
+# the single solve at the true TX converges after 1488 iterations; the sweep keeps
+# its own 800 cap through gs_overrides) and the receiver: the lambda/2 array sits ON
+# the solver grid (rx_aperture.grid_stride: 2) instead of being interpolated onto it
+# (rx_aperture.dx), so the solver's target is the field the elements sampled and
+# nothing else. The base config for the high-resolution SNR study (mgs-study --study
+# snr); scenario_caustic_hit_1f_grid2l_lambda20.yml is its dense-RX control.
 #
 # Scenario: caustic beam HITS the RX aperture (big arc curves into the window).
 # RX window: centered x=0, width 0.04 m. RX at z=0; TX projects -Z. TX width 0.072 m
-# (the caustic support), height z=0.3. RX array at lambda/2 (80 elements); TX plate
-# sampled at lambda/20 (1440 samples); 30 dB receiver noise. Verified (300 GHz): big-arc
+# (the caustic support), height z=0.3. RX array at lambda/2 on the solver grid (80
+# elements, every 2nd scene x sample in the window); TX plate sampled at lambda/20
+# (1440 samples); 30 dB receiver noise. Verified (300 GHz): big-arc
 # caustic (a=0.8): launches ~-0.10, curves into the RX. beam_peak_x=+0.0031, FWHM=0.0178,
 # rx_peak/peak=1.000, energy_frac_in_rx=0.840 -> HIT (the peak is not centred in the
 # ±0.02 m RX window: it sits 3.9 mm short of the geometric caustic at +0.0070)
@@ -34,9 +37,12 @@ tx_aperture:
 rx_aperture:
   x_center: 0.0
   width: 0.04
-  dx: 0.000499654          # lambda/2 at 300 GHz (lambda = 0.999308 mm), a FIXED pitch in metres: one
-                           # physical array for every tone. sampled_axis turns the nominal pitch
-                           # into int(width/dx) = 80 elements across the window (realized 0.506 mm)
+  grid_stride: 2           # elements ON the solver grid: every 2nd scene x sample in the window, 80
+                           # elements at 0.5002 mm pitch (lambda/2 at 300 GHz to 0.1 %; lambda =
+                           # 0.999308 mm), one physical array for every tone. The field is sampled at
+                           # those points directly and the loss is scored only there. `dx` instead
+                           # would put the elements on their own axis and interpolate them onto the
+                           # 0.25 mm grid, leaving the solver's target about -18 dB off the true field
 
 plot_path: scenario_caustic_hit_1f_grid2l.png
 

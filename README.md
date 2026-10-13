@@ -79,6 +79,10 @@ LANDING note: positions carry the propagator's +dx/2 lateral offset (...); outsi
 - `match` compares the two inside the RX window (`corr`, `rel-L2 vs true`,
   `power ratio`), and the reconstruction with what the solver was actually given to fit
   (`rel-L2 vs target`: the measurement as the RX elements sampled it, noise included).
+  With an on-grid receiver (`rx_aperture.grid_stride`, below) the target exists at the
+  element samples only, so `rel-L2 vs target` is taken there; the comparison with the
+  true field still runs over every grid point in the window, which also covers the
+  points between elements, where nothing constrained the fit.
 - `loss` sets the solver's final loss against two references evaluated with the same
   expression: `true_plate`, what the real plate's phase scores under the solver's
   model, and `zero_model`, what radiating nothing scores. `ratio` is
@@ -86,7 +90,16 @@ LANDING note: positions carry the propagator's +dx/2 lateral offset (...); outsi
   field as the RX elements sampled (and noised) it; with a sparse or noisy receiver a
   ratio below 1 is the ordinary case. A ratio well above 1 means the solve stopped
   short of the true plate: cut off by `max_iters` (`stop` says so), or converged in
-  another basin (see Initialization, under "Multiple frequencies").
+  another basin (see Initialization, under "Multiple frequencies"). An on-grid
+  receiver changes the reference: its target is the true field at the elements, so on
+  a **noiseless** run the true plate scores almost nothing, far below the loss at
+  which the solver's convergence test stops, and the ratio is large for a solve that
+  sits in the right basin. Read it next to the match figures there. With receiver
+  noise the true plate's loss is the noise it cannot fit, and a **single-tone** solve
+  reaches that floor: the ratio is about 1 (0.99 to 1.04 at 30 dB on the three
+  `_hit_1f_grid2l` base configs). That does not carry over to several tones: at 30 dB
+  the joint solve at the true TX of the caustic config comes out at 1.09 to 1.66 over
+  the `frequency` study's three-tone combs.
 
 The block is logged, not written to `run.json`; `grid-search-mgs --true-mgs` logs the
 same block for its baseline solve. The numbers come from `src/rice_bend/landing.py`.
@@ -116,11 +129,31 @@ overlap down to `(W/2) / tan(cone)` below a plate of width `W`, and the overlap 
 widest (`W/2`) at half that range. The `focus` spot is about `λ·F / W` wide.
 
 The receive aperture is configured by the `rx_aperture` block
-(`x_center` + `width`); shrink `width` for a smaller receiver. `rx_aperture.dx` is the
-element pitch in metres: a number is one fixed physical array, the same for every
-tone, while `null` means λ/20 of each tone at runtime. The four general configs list
-no `frequencies` (so they run at the 300 GHz default), keep `rx_aperture.dx: null` and
-`tx_aperture.dx: 0.00025`, and add no noise.
+(`x_center` + `width`); shrink `width` for a smaller receiver. Where the elements sit
+inside the window is set by one of two fields. They are mutually exclusive: setting
+both is a config error, and so is an unknown key in the block.
+
+- `rx_aperture.dx` is the element pitch in metres, on an axis of the receiver's own: a
+  number is one fixed physical array, the same for every tone, while `null` means λ/20
+  of each tone at runtime. The elements do not line up with the solver grid, so the
+  RX-plane field is linearly interpolated onto them, and their samples are linearly
+  interpolated back onto the grid, where the solver's loss is scored at every grid
+  point in the window.
+- `rx_aperture.grid_stride` puts the elements **on** the solver grid: every
+  `grid_stride`-th scene x sample inside the window, centred in it, the same set for
+  every tone. It is an integer of at least 1 and has to be written as one: `true`, `2.0`
+  and `"2"` are config errors. The field is read at those samples and the loss is scored
+  at those samples alone; the weighting is zero at every other grid point, including the
+  ones inside the window that carry no element. Nothing is interpolated. The pitch is
+  `grid_stride` scene x steps, so it follows `sim_scene.spacing` rather than a number in
+  metres. Each element stands for `grid_stride` grid samples, and its weight carries a
+  factor `√grid_stride` so that the loss stays the same sum over the window that a dense
+  receiver gives: residuals remain comparable between the two receivers, and
+  `convergence_threshold` keeps its meaning.
+
+With both left `null` the receiver is the `dx` one at λ/20. The four general configs
+list no `frequencies` (so they run at the 300 GHz default), keep `rx_aperture.dx: null`
+and `tx_aperture.dx: 0.00025`, and add no noise.
 
 Eight **test scenarios** (`configs/scenario_*.yml`) exercise beam-vs-RX geometry,
 each with a bare-minimum TX aperture and a small RX window (6.5 cm for the
@@ -148,19 +181,60 @@ configs do not follow it):
   It is the same physical array for every tone, so it is λ/3 at 200 GHz and 0.63 λ at
   380 GHz. `sampled_axis` turns the nominal pitch into `int(width / dx)` elements: 80
   across the 0.04 m window, at a realized 0.506 mm (130 across the directional
-  scenarios' 0.065 m window).
+  scenarios' 0.065 m window). The three `scenario_{caustic,bessel,focus}_hit_1f_grid2l`
+  base configs are the exception: they set `rx_aperture.grid_stride: 2` instead, which
+  puts the λ/2 array on the solver grid. That is every second one of the 160 grid
+  samples in the window: 80 elements again, at a 0.5002 mm pitch (λ/2 at 300 GHz to
+  0.1 %).
 - **TX.** The plate is sampled at λ/20: `tx_aperture.dx: 0.0000499654` m, 1440 samples
   across the 0.072 m plate of the caustic, bessel and focus scenarios.
 - **Solver grid.** `sim_scene.spacing` is 0.25 mm, λ/4 at 300 GHz.
 - **Noise.** `noise: {snr_db: 30.0, seed: 0}`; `--snr-db off` gives the noiseless run
   (see "Receiver noise (SNR)").
 
-Known limitation, as measured so far (not a final result): with the λ/2 array the
-solver's target, the element samples linearly interpolated onto the 0.25 mm grid, is
-about −18 dB off the true RX-plane field at 300 GHz (relative error power inside the RX
-window, noiseless; −45 dB with the λ/20 control below). That is above the 30 dB noise
-floor, and it grows with frequency across the comb: −24.6 dB at 200 GHz, −13.8 dB at
-380 GHz on `scenario_caustic_hit`.
+Known limitation of the interpolated (`dx`) receiver, as measured so far (not a final
+result): with the λ/2 array the measurement passes through two linear interpolations
+of a complex field. First the RX-plane field on the 0.25 mm grid is interpolated onto
+the elements, which fall between grid points; the element samples come out about
+−31 dB off the true field at 300 GHz. Then the 80 samples are interpolated back onto
+the grid, and the loss is scored at all 160 grid points in the window. The field's
+phase turns about 60° from one element to the next, so the straight-line fill between
+elements dips. The solver's target ends up about −18 dB off the true RX-plane field at
+300 GHz (relative error power inside the RX window, noiseless; about −42 to −51 dB
+with the λ/20 controls below, depending on the beam: caustic −45.0, bessel −41.7,
+focus −51.1) and carries about 20 % less power. That is above the 30 dB noise floor,
+and it grows with frequency across the comb: −24.6 dB at 200 GHz, −13.8 dB at 380 GHz
+on `scenario_caustic_hit`.
+
+`rx_aperture.grid_stride` is the receiver with neither interpolation: the elements are
+grid samples, read directly and scored alone, so the solver's target is the field the
+elements sampled (plus the receiver noise) and nothing else. The three
+`scenario_{caustic,bessel,focus}_hit_1f_grid2l` base configs now use `grid_stride: 2`.
+Every other λ/2 scenario config still uses the interpolated path, and the limitation
+above applies to it unchanged.
+
+What that does to localisation has been measured on the full 327×151 grid, for a
+single tone at 300 GHz (the pilot runs `results/r300_grid_<beam>_1f_*`, sweep cap 800
+iterations). Each cell is the top candidate's distance from the true TX (mm) / the
+mean distance of the top candidates (mm) / the size of that tied set, which is the
+lowest-loss cell's connected cluster of cells within 1.5× its loss (`analysis.json`):
+
+| Receiver | caustic | bessel | focus |
+| --- | --- | --- | --- |
+| 30 dB, interpolated λ/2 (`dx`) | 4.6 / 22.9 / 230 | 50.6 / 54.6 / 250 | 21.0 / 45.0 / 223 |
+| 30 dB, on-grid λ/2 (`grid_stride: 2`) | 2.65 / 13.3 / 66 | 2.65 / 21.5 / 43 | 2.65 / 9.6 / 18 |
+| 30 dB, λ/20 control (`dx: null`) | 2.65 / 9.6 / 38 | 2.65 / 23.7 / 43 | 2.65 / 10.2 / 23 |
+| noiseless, on-grid λ/2 | 2.65 / 2.65 / 1 | 2.65 / 3.6 / 2 | 2.65 / 2.65 / 1 |
+
+At 30 dB the on-grid λ/2 array lands on the same top candidate as the λ/20 control for
+all three beams, where the interpolated λ/2 array was 4.6 to 50.6 mm off. Two things
+qualify these figures. The on-grid measurement is produced by the solver's own forward
+model on the solver's own grid, so noise is the only mismatch left between the
+measurement and what the solver can represent; that makes them somewhat optimistic for
+a real array. And the sweep's 800-iteration cap is below what the on-grid solve at the
+true TX needs (1488 / 1765 / 1424 iterations at 30 dB for caustic / bessel / focus),
+which a later change addresses. These are single-tone runs; they say nothing about
+multi-tone localisation.
 
 The hit scenarios also ship in variants, which differ in their tones, RX sampling and
 candidate grid:
@@ -174,16 +248,18 @@ candidate grid:
 | `scenario_caustic_hit_pm10` | 270, 300, 330 (±10 %) | λ/2 array | 64×48 |
 | `scenario_caustic_hit_lambda2` | ten-tone comb | λ/2 array | 327×151 |
 | `scenario_caustic_hit_lambda4` | ten-tone comb | λ/4 array (`dx: 0.000249827`, 160 elements) | 64×48 |
-| `scenario_{caustic,bessel,focus}_hit_1f_grid2l` | 300 | λ/2 array | 327×151 |
+| `scenario_{caustic,bessel,focus}_hit_1f_grid2l` | 300 | λ/2 array **on the solver grid** (`grid_stride: 2`, 80 elements at 0.5002 mm) | 327×151 |
 | `scenario_{caustic,bessel,focus}_hit_1f_grid2l_lambda20` | 300 | `dx: null`, λ/20 at runtime (800 elements) | 327×151 |
 
 The 327×151 grid (49,377 candidates) has ≈ 2 mm ≈ 2λ cells at 300 GHz (z step
 1.99 mm, x step 2.00 mm). It is a nested refinement of the 164×76 grid the fine
 configs used before the retarget: every second point in each axis. The three
 `_lambda20` configs are the dense-RX control for their `_1f_grid2l` twins: the same
-file with `rx_aperture.dx: null`, so running the pair separates the effect of the
-array pitch from the effect of the noise. They share the nominal SNR and the noise
-seed but not the realization, because the draw is per RX element.
+file with `rx_aperture.dx: null` in place of `grid_stride: 2`, so running the pair
+separates the effect of the array pitch from the effect of the noise. The control is
+the interpolated receiver, which at λ/20 is denser than the solver grid (the −42 to
+−51 dB figures above). They share the nominal SNR and the noise seed but not the
+realization, because the draw is per RX element.
 
 `scripts/verify_scenario.py CONFIG.yml [--freq HZ] [--expect-hit|--expect-miss]
 [--expect-size larger|smaller]` propagates the real beam to the RX plane and reports
@@ -378,7 +454,7 @@ residual the solver minimizes — and the plots rank by — is the **mean of the
 losses**. The measurement set is still per-frequency: each frequency synthesizes its own
 RX field with its own TX beam phase (∝ wavenumber) and, when `rx_aperture.dx` is null
 (λ/20 of each tone), its own RX element count. The scenario configs set a fixed pitch
-instead, so there every tone is sampled by the same array.
+or a `grid_stride` instead, so there every tone is sampled by the same array.
 
 ##### The physical model
 
@@ -578,11 +654,12 @@ sigma^2 = P_pk / 10^(snr_db / 10)                               (same for all f,
 n_f[n]  ~ CN(0, sigma^2), independent per (frequency, antenna)
 ```
 
-The noise is added on the RX **element** axis, before the interpolation onto the solver
-grid, and the error weighting is built from the noisy measurement. Noise is **off**
-unless a config or a flag asks for it: with `snr_db: null` (or no `noise:` block) no
-random number is drawn and every result is identical to a run made before this option
-existed. `--snr-db off` does the same over a config that enables it.
+The noise is added on the RX **element** axis, before the element samples are put on
+the solver grid (interpolated onto it, or placed at their own grid points for an
+on-grid receiver), and the error weighting is built from the noisy measurement. Noise
+is **off** unless a config or a flag asks for it: with `snr_db: null` (or no `noise:`
+block) no random number is drawn and every result is identical to a run made before
+this option existed. `--snr-db off` does the same over a config that enables it.
 
 Set it in the config's `noise:` block, or on the command line of `mgs`,
 `grid-search-mgs` and `mgs-study` (the flags override the config):
@@ -617,6 +694,11 @@ What "SNR" means here, and three things to know before reading results:
    compensated. Both figures are logged and recorded per frequency (`mean_snr_db`,
    `effective_snr_db`). They count noise only: with the λ/2 array, the sampling error
    of the interpolated target is larger (see the scenario setup under `mgs`).
+   With an on-grid receiver (`rx_aperture.grid_stride`) nothing is interpolated, so
+   nothing is averaged: `effective_snr_db` is then the realized per-element SNR of the
+   draw, the same quantity as `mean_snr_db` taken against the noise actually drawn
+   instead of the nominal `sigma^2` (25.1 and 25.5 dB on
+   `scenario_caustic_hit_1f_grid2l`, seed 0).
 2. **The floor tracks the beam.** The peak is taken over the RX antennas, so a beam that
    walks off the window lowers the absolute noise floor with it. Every run sits at the
    configured SNR, but the absolute noise is not constant across geometries.
@@ -677,7 +759,8 @@ Numerics and geometry:
 - `beam_aperatures.py` — every TX beam generator (caustic phase plate for parabolic trajectories,
   steered plane wave, Bessel axicon, focusing lens) and the `beam.type` dispatch. The caustic
   plate resamples its **unwrapped** phase and only then takes `exp(1j·phase)`
-- `sim_scene.py` — aperture and scene geometry
+- `sim_scene.py` — aperture and scene geometry, including which scene samples an on-grid
+  receiver's elements are (`grid_element_indices`)
 - `noise.py` — receiver noise: peak-referenced complex AWGN on the simulated RX elements,
   one seeded stream per tone
 - `landing.py` — where a beam lands on the RX plane, as numbers (peak, centroid, the 5–95 %
@@ -739,6 +822,8 @@ The expected values are generated, never transcribed — hand-typed float litera
 the moment nobody re-blesses them. After a change that is meant to move the numbers
 (the 300 GHz retarget is one), the digest has to be regenerated with `--bless` before
 a diff means anything. The run took ~25 s before the retarget and has not been re-timed
-since. It pins the python engine only. The Rust engine has its own gates
-(`cd rust && cargo test`, `rust/python/parity.py`, which runs its slices noiseless and
-again at 20 and 10 dB); see `rust/README.md`.
+since. It pins the python engine only, and the interpolated receiver only: no check
+runs a `grid_stride` config. The Rust engine has its own gates
+(`cd rust && cargo test`, `rust/python/parity.py`, which runs its slices noiseless,
+again at 20 and 10 dB, and once on the on-grid receiver of
+`scenario_caustic_hit_1f_grid2l.yml` at that config's 30 dB); see `rust/README.md`.

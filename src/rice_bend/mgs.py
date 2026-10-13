@@ -20,7 +20,7 @@ from rice_bend.noise import add_awgn
 from rice_bend.plotting import draw_line_panel, draw_scene
 from rice_bend.data_store import GSHistory, check_run_dir, make_run_dir, save_run
 from rice_bend.exp_data import parse_oscope_heatmap_data, parse_oscope_rx_data
-from rice_bend.sim_scene import SimAperature, SimScene
+from rice_bend.sim_scene import SimAperature, SimScene, sampled_axis
 
 
 # One frequency's contribution to a joint solve: its measurement (on the scene
@@ -413,23 +413,44 @@ class FreqState:
 
     The geometry of the apertures is frequency-independent (their axes come from
     config bounds + dx alone), but the RX element spacing is wavelength/20 when
-    the config leaves dx null, and every beam constructor bakes the wavenumber
-    into the emitted phase — so each frequency gets its own aperture objects.
+    the config leaves both dx and grid_stride null, and every beam constructor
+    bakes the wavenumber into the emitted phase — so each frequency gets its own
+    aperture objects. A fixed dx and an on-grid receiver (grid_stride) are one
+    physical array: every frequency's rx_ap then has the same element axis, and
+    only the profiles differ.
     """
     freq: float
     wavelength: float
-    rx_ap: SimAperature            # per-freq: dx = wavelength/20 when cfg dx is null
+    rx_ap: SimAperature            # per-freq: dx = wavelength/20 when cfg dx and
+    #   grid_stride are null. On-grid (rx_ap.grid_idx is not None) the elements are
+    #   scene x samples, the same ones for every frequency.
     tx_ap: SimAperature            # per-freq beam profile (every beam's phase ∝ k)
-    rx_field: Optional[np.ndarray] = None        # set by measure(), on scene x_axis
-    error_weighting: Optional[np.ndarray] = None  # set by measure(), on scene x_axis
+    rx_field: Optional[np.ndarray] = None        # set by measure(), on scene x_axis:
+    #   the element samples interpolated onto it, or, on-grid, placed at grid_idx
+    #   with zero at every other sample
+    error_weighting: Optional[np.ndarray] = None  # set by measure(), on scene x_axis:
+    #   zero outside the RX window and, on-grid, at every sample that is not an element
     rx_plane_row: Optional[np.ndarray] = None    # full scene-axis field at the RX
-    #   plane, BEFORE the RX-element interpolation (set by _synthesize_rx; None on
-    #   the experimental path). analysis.py's energy metric needs the un-windowed
-    #   field — rx_field is zero-filled outside the window.
+    #   plane, BEFORE the RX elements sample it — by interpolation, or on-grid by
+    #   indexing (set by _synthesize_rx; None on the experimental path). analysis.py's
+    #   energy metric needs the un-windowed field — rx_field is zero-filled outside
+    #   the window.
     rx_aper_profile_clean: Optional[np.ndarray] = None  # the NOISELESS RX element
     #   profile when measure() added noise (rx_ap.aper_profile then holds the noisy
     #   one); None when noiseless or on the experimental path. rx_plane_row stays
     #   noiseless either way — noise is a receiver property, added at the elements.
+
+
+def _place_on_grid(profile: np.ndarray, grid_idx: np.ndarray, size: int) -> np.ndarray:
+    """An on-grid receiver's element `profile` as a field on the scene x-axis: each
+    sample at its own grid point (`grid_idx`), zero at every other one of the `size`
+    samples. Nothing is interpolated, so the values at `grid_idx` are the element
+    samples to the last bit. The zeros between elements are NOT a measurement of
+    zero field: measure() gives those samples zero weight, so the solver never
+    reads them."""
+    out = np.zeros(size, dtype=np.complex128)
+    out[grid_idx] = profile
+    return out
 
 
 def _db_or_none(num, den) -> Optional[float]:
@@ -516,11 +537,16 @@ class MGS():
         # x_min/x_max (lateral).
         scene_cfg = config.sim_scene
         self.tx_cfg = config.tx_aperture
+        # The apertures are built before the SimScene, which takes them as arguments,
+        # but an on-grid receiver (rx_aperture.grid_stride) takes its elements FROM
+        # the scene x-axis. So the axis is laid out here first, with the exact call
+        # SimScene makes; the assert below holds the two to the same floats.
+        scene_x_axis = sampled_axis(scene_cfg.x_min, scene_cfg.x_max, scene_cfg.spacing)
         for freq in self.freqs:
             wl = rs.wavelength(freq)
             self.freq_states.append(FreqState(
                 freq=freq, wavelength=wl,
-                rx_ap=self._build_rx(config.rx_aperture, wl),
+                rx_ap=self._build_rx(config.rx_aperture, wl, scene_x_axis),
                 tx_ap=self._build_tx(config.tx_aperture, scene_cfg.z_min, freq),
             ))
         # the scene holds the PRIMARY frequency's apertures as its views; geometry
@@ -533,6 +559,14 @@ class MGS():
             z_min=scene_cfg.z_min, z_max=scene_cfg.z_max,
             spacing=scene_cfg.spacing, rx_ap=primary.rx_ap, tx_ap=tx,
         )
+        # an on-grid receiver's elements must BE samples of the axis the solver
+        # runs on, to the last bit: measure() reads and scores the field by index,
+        # and an index into any other axis would be a silently shifted array
+        for fs in self.freq_states:
+            rx = fs.rx_ap
+            if rx.grid_idx is not None:
+                assert np.array_equal(self.scene.x_axis[rx.grid_idx], rx.aper_axis), \
+                    "on-grid RX elements are not samples of the scene x-axis"
         self._log_geometry()
 
     def _init_common(self, freqs, config: SimConfig) -> None:
@@ -633,12 +667,30 @@ class MGS():
         self._log_geometry()
         return self
 
-    def _build_rx(self, rx_cfg, wavelength: float) -> SimAperature:
+    def _build_rx(self, rx_cfg, wavelength: float,
+                  scene_x_axis: np.ndarray) -> SimAperature:
         """The receive aperture at `wavelength`: a window of `width` centred at
-        `x_center`, at the scene origin (z=0). `dx` defaults to wavelength/20 when
-        left null -- so the element count is per-frequency -- and is what sets the
-        receiver element count, the independent variable in the
-        scenario_caustic_hit_lambda2/lambda4 experiments."""
+        `x_center`, at the scene origin (z=0).
+
+        With `grid_stride` set the elements sit ON the solver grid: every
+        grid_stride-th sample of `scene_x_axis` inside the window
+        (SimAperature.on_grid). The wavelength plays no part, so every frequency
+        gets the same element set -- one physical array -- and measure() reads and
+        scores the field at those samples without interpolating.
+
+        Otherwise the elements sit on an axis of their own at pitch `dx`, which
+        defaults to wavelength/20 when left null -- so the element count is
+        per-frequency -- and is what sets the receiver element count, the
+        independent variable in the scenario_caustic_hit_lambda2/lambda4
+        experiments. `scene_x_axis` is not used on this path."""
+        if rx_cfg.grid_stride is not None:
+            return SimAperature.on_grid(
+                x_min=rx_cfg.x_center - rx_cfg.width / 2.0,
+                x_max=rx_cfg.x_center + rx_cfg.width / 2.0,
+                z=0,
+                scene_x_axis=scene_x_axis,
+                stride=rx_cfg.grid_stride,
+            )
         # written as a multiply by 1/20, not a divide by 20: 0.05 is not exactly 1/20
         # in binary, so the two disagree by an ulp (measured on 28 config x frequency
         # combinations, though none of them moved num_points)
@@ -677,6 +729,11 @@ class MGS():
         rx_wl_ratio = scene.rx_ap.dx / self.wavelength
         rx_width = scene.rx_ap.x_max - scene.rx_ap.x_min
         self.log.info(f" - X axis: {scene.rx_ap.x_min:0.3f} {scene.rx_ap.x_max:0.3f} (width {rx_width:0.3f} m, dx {rx_wl_ratio:0.3f} wavelength)")
+        if scene.rx_ap.grid_idx is not None:
+            self.log.info(f" - Elements: {scene.rx_ap.num_points} on the solver grid "
+                          f"(grid_stride {scene.rx_ap.grid_stride}, pitch "
+                          f"{scene.rx_ap.dx * 1e3:0.4f} mm), read and scored without "
+                          "interpolation")
         self.log.info(f" - Z: {scene.rx_ap.z:0.3f}")
         self.log.info(f"TX aperature ({self.beam_type} beam)")
         tx_wl_ratio = scene.tx_ap.dx / self.wavelength
@@ -714,7 +771,7 @@ class MGS():
     # ----------------------------------------------------------- measurement ---
     def _synthesize_rx(self, fs: FreqState) -> np.ndarray:
         """Propagate the real TX aperture to the RX measurement plane at this
-        frequency and sample it onto the RX element axis. Returns the complex RX
+        frequency and sample it at the RX elements. Returns the complex RX
         aperture profile.
 
         Propagates directly to rx_ap.z -- the plane gs_reconstruct actually models.
@@ -733,7 +790,17 @@ class MGS():
 
         The round trip through rx_ap.aper_axis is kept deliberately -- it models the
         receiver element spacing (lambda/2 vs lambda/20), which is the whole point of
-        scenario_caustic_hit_lambda2.yml.
+        scenario_caustic_hit_lambda2.yml. It is also a LINEAR interpolation of a
+        field whose phase turns between scene samples: the elements of an array on
+        its own axis fall between grid points, so what they are handed is the
+        chord, not the field (about -31 dB off it for the 80-element lambda/2 array
+        at 300 GHz).
+
+        An on-grid receiver (rx_ap.grid_idx, from rx_aperture.grid_stride) has no
+        round trip to make: its elements are scene x samples, so the row is read at
+        them by index and the profile is the propagated field itself, bit for bit
+        (upcast from the propagator's complex64 to the complex128 every element
+        profile is held in).
         """
         scene = self.scene
         tx_ap = fs.tx_ap
@@ -741,10 +808,12 @@ class MGS():
         row = rs.rs(scene.x_axis, np.array([fs.rx_ap.z]), u0, fs.wavelength,
                     z_src=tx_ap.z, forward_dir=-1.0)[0]
         fs.rx_plane_row = row   # kept for the energy metric (analysis.py)
+        if fs.rx_ap.grid_idx is not None:
+            return np.asarray(row[fs.rx_ap.grid_idx], dtype=np.complex128)
         return interp_real_imag(scene.x_axis, row, fs.rx_ap.aper_axis)
 
     def measure(self) -> None:
-        """Sample the measured RX field onto the scene grid and build the error
+        """Put the measured RX field on the scene grid and build the error
         weighting used by phase retrieval, once per frequency. Idempotent.
 
         On the simulated path each frequency's measurement is synthesized here, by
@@ -758,18 +827,36 @@ class MGS():
         a joint solve's mean loss weights frequencies equally regardless of their
         absolute RX power.
 
+        How the element samples reach the scene grid depends on the receiver:
+
+        - Interpolated (rx_aperture.dx, and the experimental path): the elements
+          sit on an axis of their own, so their samples are linearly interpolated
+          onto the scene grid and the loss is scored at EVERY grid point inside the
+          RX window. Harmless when the elements are denser than the grid
+          (wavelength/20). With a sparser array the fill between elements is a
+          straight line through a field whose phase keeps turning — about 60
+          degrees per element at lambda/2 — so it dips: the target the solver is
+          handed sits about -18 dB off the true field at 300 GHz and carries about
+          20 % less power, and most of the points it is scored at are that fill,
+          not measurements.
+        - On-grid (rx_aperture.grid_stride): the elements ARE scene samples. Their
+          profile is placed at rx_ap.grid_idx and the weighting is non-zero at
+          those samples only, so the solver is held to what was measured and to
+          nothing else. The weighting carries a sqrt(grid_stride) factor that keeps
+          the loss on the dense receiver's scale (see the comment at the branch).
+
         With noise.snr_db set, the simulated path adds complex AWGN to every tone's
-        RX ELEMENT profile before it is interpolated onto the scene grid — where a
-        real receiver adds it (rice_bend/noise.py has the model). The floor is
+        RX ELEMENT profile before it is put on the scene grid — where a real
+        receiver adds it (rice_bend/noise.py has the model). The floor is
         referenced to the peak over every tone, so all clean profiles are
-        synthesized first, then noised, then interpolated. The weighting is built
-        from the NOISY measurement, as it would be from a capture. The clean profile
-        is kept on FreqState.rx_aper_profile_clean and the realized SNRs in
-        self.noise_report. Idempotency holds with noise too: the clean field is
-        re-synthesized from the TX and each tone's stream rebuilt from (seed,
-        frequency), and a null seed is drawn once and written back to the config.
-        On the experimental path noise.snr_db is ignored (with a warning): the
-        capture carries its own receiver noise.
+        synthesized first, then noised, then interpolated or placed. The weighting
+        is built from the NOISY measurement, as it would be from a capture. The
+        clean profile is kept on FreqState.rx_aper_profile_clean and the realized
+        SNRs in self.noise_report. Idempotency holds with noise too: the clean
+        field is re-synthesized from the TX and each tone's stream rebuilt from
+        (seed, frequency), and a null seed is drawn once and written back to the
+        config. On the experimental path noise.snr_db is ignored (with a warning):
+        the capture carries its own receiver noise.
         """
         # Fail fast, naming EVERY undersampled frequency at once — rs() would raise
         # on only the first it meets, and the highest frequency binds, so "which
@@ -818,23 +905,55 @@ class MGS():
         per_freq = []
         for fs in self.freq_states:
             rx_ap = fs.rx_ap
-            # A FIELD, so cartesian: interpolating its phase through the ±π branch cut
-            # corrupted the measurement by 20.8% rel L2 on scenario_caustic_hit and 55%
-            # on the lambda/2-spaced variant, and the solver then fitted the corruption
-            # at full weight.
-            orig_prop_f = interp_real_imag(rx_ap.aper_axis, rx_ap.aper_profile, x_axis)
-            # error computations are weighted to favor higher amplitude data, and ignore things outside the recieve aperature
-            error_weighting = (np.abs(orig_prop_f) / np.abs(orig_prop_f).max()) + 0.25
-            error_weighting[(x_axis < rx_ap.x_min) | (x_axis > rx_ap.x_max)] = 0.0
+            on_grid = rx_ap.grid_idx is not None
+            if on_grid:
+                # The elements ARE scene samples: place the (possibly noisy) profile
+                # at them and score the solver there and nowhere else. Every other
+                # sample gets zero weight — outside the window as before, and also
+                # INSIDE it wherever no element sits, where the receiver measured
+                # nothing and the interpolated path would have scored its own fill.
+                orig_prop_f = _place_on_grid(rx_ap.aper_profile, rx_ap.grid_idx,
+                                             len(x_axis))
+                # Same amplitude weighting as below, normalized to the peak ELEMENT,
+                # times sqrt(grid_stride). The factor is deliberate. The loss is
+                # 0.5 * mean over the WHOLE scene axis of |w * r|^2, and each
+                # element stands for grid_stride grid samples, so squaring the
+                # weight puts grid_stride back: the sum over the elements stays the
+                # Riemann sum over the window that a dense receiver's every-sample
+                # sum is. Without it the same fit would score 1/grid_stride of the
+                # loss, residuals would not compare across receivers, and the
+                # absolute convergence_threshold would mean a different thing for
+                # every stride.
+                elem_amp = np.abs(rx_ap.aper_profile)
+                error_weighting = np.zeros(len(x_axis), dtype=np.float64)
+                error_weighting[rx_ap.grid_idx] = np.sqrt(rx_ap.grid_stride) * (
+                    (elem_amp / elem_amp.max()) + 0.25)
+            else:
+                # A FIELD, so cartesian: interpolating its phase through the ±π branch cut
+                # corrupted the measurement by 20.8% rel L2 on scenario_caustic_hit and 55%
+                # on the lambda/2-spaced variant, and the solver then fitted the corruption
+                # at full weight.
+                orig_prop_f = interp_real_imag(rx_ap.aper_axis, rx_ap.aper_profile, x_axis)
+                # error computations are weighted to favor higher amplitude data, and ignore things outside the recieve aperature
+                error_weighting = (np.abs(orig_prop_f) / np.abs(orig_prop_f).max()) + 0.25
+                error_weighting[(x_axis < rx_ap.x_min) | (x_axis > rx_ap.x_max)] = 0.0
             fs.rx_field = orig_prop_f
             fs.error_weighting = error_weighting
             if noise_on:
                 # what the solver actually sees: the interpolation onto the scene
                 # grid averages the element noise, so this sits above the per-antenna
                 # figure. Measured inside the RX window only (the weighting zeroes
-                # the rest).
-                clean_interp = interp_real_imag(rx_ap.aper_axis, fs.rx_aper_profile_clean,
-                                                x_axis)
+                # the rest). On-grid nothing is interpolated, so nothing is averaged:
+                # the clean profile is placed the way the noisy one was, the two
+                # differ at the elements alone, and the ratio is the REALIZED
+                # per-element SNR of this draw (mean_snr_db is the same quantity
+                # against the nominal sigma^2).
+                if on_grid:
+                    clean_on_scene = _place_on_grid(fs.rx_aper_profile_clean,
+                                                    rx_ap.grid_idx, len(x_axis))
+                else:
+                    clean_on_scene = interp_real_imag(rx_ap.aper_axis,
+                                                      fs.rx_aper_profile_clean, x_axis)
                 in_win = (x_axis >= rx_ap.x_min) & (x_axis <= rx_ap.x_max)
                 per_freq.append({
                     "freq_hz": float(fs.freq),
@@ -842,8 +961,8 @@ class MGS():
                     "mean_snr_db": _db_or_none(
                         np.mean(np.abs(fs.rx_aper_profile_clean) ** 2), sigma2),
                     "effective_snr_db": _db_or_none(
-                        np.sum(np.abs(clean_interp[in_win]) ** 2),
-                        np.sum(np.abs(orig_prop_f[in_win] - clean_interp[in_win]) ** 2)),
+                        np.sum(np.abs(clean_on_scene[in_win]) ** 2),
+                        np.sum(np.abs(orig_prop_f[in_win] - clean_on_scene[in_win]) ** 2)),
                 })
 
         if not noise_on:
@@ -957,7 +1076,9 @@ class MGS():
                             "true":          landing_metrics(true row)
                             "reconstructed": landing_metrics(reconstructed row)
                             "match_true":    field_match(true row, reconstructed row)
-                            "match_target":  field_match(rx_field, reconstructed row)},
+                            "match_target":  field_match(rx_field, reconstructed row),
+                                             at the element samples alone when the
+                                             receiver is on-grid},
                            ...]                                  self.freqs order
              "loss": {"solver", "true_plate", "zero_model", "ratio", "n_iters",
                       "stop_reason"}}
@@ -976,7 +1097,14 @@ class MGS():
         the real beam's does); match_target is what the solver was actually given
         to fit: the measurement as the RX elements sampled it, noise included. The
         two differ by the receiver, not by the solver — a sparse array's
-        interpolated target carries less power than the field it samples.
+        interpolated target carries less power than the field it samples. With an
+        on-grid receiver (rx_aperture.grid_stride) match_target is taken at the
+        ELEMENT samples only: rx_field is zero at the in-window samples that carry
+        no element, which is the absence of a measurement and not a target, and
+        comparing there would charge the reconstruction for the field it rightly
+        puts between elements. match_true stays over every window sample either
+        way, so it also says how well the fit holds BETWEEN the elements, where
+        nothing constrained it.
 
         `loss` sets the solver's final loss against two references evaluated with
         the same expression: `true_plate`, the loss of the REAL plate's phase under
@@ -990,6 +1118,22 @@ class MGS():
         solve stopped short of the true plate: cut off by max_iters (stop_reason
         says so), or converged in another basin, which a multi-tone solve does when
         the warm start's phase unwrap slips by 2π.
+
+        An on-grid receiver changes what the ratio is read against. Its target IS
+        the true field at the elements, so the sampling term is gone and, noiseless,
+        the true plate scores almost nothing: all that is left is the gap between
+        the solver's amplitude constraint (interp_amplitude) and the magnitude of
+        the plate's cartesian resampling, 4.6e-8 to 6.6e-8 on the three
+        scenario_*_hit_1f_grid2l configs (and exactly 0 with that magnitude as the
+        amplitude). The flatness test stops the descent well above that, at 4e-6 to
+        1e-5 there, so the ratio comes out at 90 to 170 on solves that match the
+        true field to 1-2 % rel-L2: stopped short, but in the right basin. With
+        receiver noise the true plate's loss is the noise it cannot fit. A SINGLE
+        tone reaches that floor and the ratio is back at about 1 (0.99 to 1.04 at
+        30 dB on those configs, which solve one tone). Several tones do not get
+        there: at 30 dB the joint solve at the true TX of the caustic config comes
+        out at 1.09 to 1.66 over the frequency study's three-tone combs (±1 % to
+        ±20 %), higher for the wider ones.
 
         Positions are read off the scene grid and carry the propagator's lateral
         offset, reported as `dx_bias_m`: landing.propagator_offset, which is +dx/2
@@ -1026,12 +1170,22 @@ class MGS():
             true_u0 = interp_real_imag(fs.tx_ap.aper_axis, fs.tx_ap.aper_profile, x_axis)
             true_plate_rows.append(
                 rs.rs_apply(amp * np.exp(1j * np.angle(true_u0)), h_fwd, dx))
+            # the target against the reconstruction where the target EXISTS: every
+            # window sample for an interpolated receiver, the element samples alone
+            # for an on-grid one (rx_field is zero between its elements, and that
+            # zero is "not measured", not a field to match)
+            idx = fs.rx_ap.grid_idx
+            if idx is None:
+                match_target = field_match(fs.rx_field, rec_row, x_axis, rx_lo, rx_hi)
+            else:
+                match_target = field_match(fs.rx_field[idx], rec_row[idx], x_axis[idx],
+                                           rx_lo, rx_hi)
             per_freq.append({
                 "freq_hz": float(fs.freq),
                 "true": landing_metrics(x_axis, fs.rx_plane_row, rx_lo, rx_hi),
                 "reconstructed": landing_metrics(x_axis, rec_row, rx_lo, rx_hi),
                 "match_true": field_match(fs.rx_plane_row, rec_row, x_axis, rx_lo, rx_hi),
-                "match_target": field_match(fs.rx_field, rec_row, x_axis, rx_lo, rx_hi),
+                "match_target": match_target,
             })
 
         solver_loss = float(result.final_loss)

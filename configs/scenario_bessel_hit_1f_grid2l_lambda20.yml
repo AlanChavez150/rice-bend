@@ -1,11 +1,16 @@
-# DENSE-RX CONTROL for scenario_bessel_hit_1f_grid2l.yml: the same file with ONE
-# difference, rx_aperture.dx: null, so the RX window is sampled at lambda/20 at runtime
-# (800 elements across it at 300 GHz) instead of by the lambda/2 array (80 elements).
+# DENSE-RX CONTROL for scenario_bessel_hit_1f_grid2l.yml: the same file except for
+# the RECEIVER. Here rx_aperture.dx: null samples the RX window at lambda/20 at runtime
+# (800 elements across it at 300 GHz) on an axis of the receiver's own, and those
+# samples are interpolated onto the solver grid. The base config's lambda/2 array (80
+# elements) sits ON the solver grid instead (rx_aperture.grid_stride: 2) and is read
+# and scored there without interpolation. So the pair differs in the element pitch
+# and in how the samples reach the solver; at lambda/20 the interpolation costs
+# little (the target is -41.7 dB off the true field for this beam, noiseless).
 # Beam, TX plate, 327x151 grid_search, seeds and the nominal 30 dB receiver noise are
-# the base config's, so running the pair separates the effect of the array pitch from
+# the base config's, so running the pair separates the effect of the receiver from
 # the effect of the noise. (Same SNR and noise seed, not the same realization: the draw
 # is per RX element, and 800 elements draw differently from 80.) The single solve at
-# the true TX converges after 1296 iterations here (611 on the base config), inside
+# the true TX converges after 1296 iterations here (1765 on the base config), inside
 # max_iters 5000; the sweep keeps its own 800 cap through gs_overrides.
 #
 # Scenario: bessel (axicon) beam HITS the RX aperture: the axicon sits where the caustic

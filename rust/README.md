@@ -32,9 +32,14 @@ engines receive the identical noisy `rx_field` / `error_weighting` arrays. The
 golden vectors stay noiseless. `python/parity.py` runs its two slices a second
 time on a noisy measurement (20 dB and 10 dB) under the same bar, and
 `python/compare_runs.py` refuses two runs whose `(snr_db, seed)` differ. The
-scenario configs now carry a 30 dB noise block of their own, so the noiseless
-slices force the noise off explicitly (`SNR_OFF`, what `--snr-db off` passes)
-rather than inherit it.
+on-grid receiver (`rx_aperture.grid_stride`) is built there too: the element
+samples placed on the scene axis and a weighting that is zero at every sample
+without an element are still just an `rx_field` and an `error_weighting`, so
+the engine does not know about it either. `python/parity.py` has a fifth slice
+for it, `scenario_caustic_hit_1f_grid2l.yml` at 300 GHz under that config's own
+30 dB noise block. The scenario configs now carry a 30 dB noise block of their
+own, so the noiseless slices force the noise off explicitly (`SNR_OFF`, what
+`--snr-db off` passes) rather than inherit it.
 
 ## Build / dev loop
 
@@ -108,7 +113,8 @@ the source of truth. The load-bearing traps, in one place:
 > `--freq 300e9` for the single-tone workloads and `--freq 285e9 300e9 315e9` for
 > the pm5 comb. `python/bench.py` now times exactly those on the 327×151 grid,
 > with the noise forced off; `python/parity.py` runs `tiny_check.yml` at
-> 280/300 GHz and `scenario_caustic_hit_sparse.yml` at 300 GHz.
+> 280/300 GHz, `scenario_caustic_hit_sparse.yml` at 300 GHz and (the on-grid
+> receiver) `scenario_caustic_hit_1f_grid2l.yml` at 300 GHz.
 
 ## Baseline timings (M0, this machine, 2026-09-19, python engine)
 

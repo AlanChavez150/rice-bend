@@ -14,9 +14,14 @@ not the TX), so `snr_db` is what the brightest antenna sees; the mean per-antenn
 SNR is lower by the beam's peak-to-average ratio, and MGS.measure() logs and records
 it rather than compensating.
 
-Noise lands on the RX ELEMENT axis, before the interpolation onto the solver grid,
-because that is where a real receiver adds it — the interpolation then averages it
-exactly as it would average a real capture.
+Noise lands on the RX ELEMENT axis, before the element samples are put on the
+solver grid, because that is where a real receiver adds it. What the solver then
+sees of it depends on the receiver (MGS.measure()). An interpolated receiver
+(rx_aperture.dx) interpolates the noisy samples onto the grid, which averages the
+noise exactly as it would average a real capture, so the effective solver-grid SNR
+sits above the per-element one. An on-grid receiver (rx_aperture.grid_stride)
+places each sample at its own grid point: nothing is interpolated, so nothing is
+averaged, and the effective figure is the realized per-element SNR of the draw.
 
 Each tone's stream is keyed by its frequency VALUE, not its position in the list:
 candidate_scenes rotates the frequency list for --scene-freq, and a replay must give

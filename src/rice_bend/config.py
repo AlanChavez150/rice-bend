@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import List, Literal, Optional, Union
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
 
 class SimSceneConfig(BaseModel):
@@ -118,12 +118,55 @@ class RxApertureConfig(BaseModel):
     """RX aperture geometry: a window of the given lateral `width` centered at
     `x_center`, sitting at the scene origin (z=0). All units in meters.
 
-    Shrink `width` to model a smaller receiver. `dx` defaults to wavelength/20 at
-    runtime when left null (matching the historical RX sampling)."""
+    Shrink `width` to model a smaller receiver. Where the elements sit inside the
+    window is one of two receivers, and the two are mutually exclusive:
+
+    - `dx` (the default path): elements at a pitch in metres, on an axis of their
+      own that does not line up with the solver grid. The RX-plane field is linearly
+      interpolated onto the elements, and the element samples are interpolated back
+      onto the solver grid, where the loss is scored at every grid point in the
+      window. `dx: null` means wavelength/20 at runtime (the historical RX
+      sampling), which on the shipped scenes is denser than the grid, so the round
+      trip costs little (the target is about -42 to -51 dB off the true field at
+      300 GHz, depending on the beam); at a pitch coarser than the grid it costs a
+      lot (about -18 dB at lambda/2), because the field's phase turns between
+      elements and the straight-line fill between them dips.
+    - `grid_stride`: elements ON the solver grid, every `grid_stride`-th scene x
+      sample inside the window (see sim_scene.grid_element_indices). Nothing is
+      interpolated: the field is read at those samples and the loss is scored at
+      those samples alone. The pitch is `grid_stride` scene x steps, so it is set by
+      `sim_scene.spacing` rather than typed in metres.
+
+    Leaving both null is the `dx` path at wavelength/20."""
+    # grid_stride and dx are both optional, so a typo (grid_strid) must not silently
+    # run the interpolated receiver
+    model_config = ConfigDict(extra="forbid")
+
     x_center: float = Field(default=0.0, description="Lateral center of the RX window (m)")
     width: float = Field(default=0.05, gt=0, description="Lateral span of the RX window (m)")
     dx: Optional[float] = Field(default=None, gt=0,
-        description="RX sampling spacing (m); null -> wavelength/20 at runtime")
+        description="RX sampling spacing (m) of the interpolated receiver; null -> "
+                    "wavelength/20 at runtime (unless grid_stride is set)")
+    # StrictInt, not int: pydantic's lax int takes a YAML boolean, so
+    # `grid_stride: true` would load as stride 1 -- a different receiver from the one
+    # the file appears to ask for, with no error -- and it rounds 2.0 and parses "2"
+    # the same quiet way. A stride is a count of grid samples: only an integer is one.
+    grid_stride: Optional[StrictInt] = Field(default=None, ge=1,
+        description="Put the RX elements ON the solver grid: every grid_stride-th "
+                    "scene x sample inside the window, read directly and scored only "
+                    "there (no interpolation). An integer >= 1, written as one (true, "
+                    "2.0 and \"2\" are rejected). Mutually exclusive with dx; null -> "
+                    "the interpolated receiver")
+
+    @model_validator(mode="after")
+    def _check(self) -> "RxApertureConfig":
+        if self.dx is not None and self.grid_stride is not None:
+            raise ValueError(
+                f"rx_aperture.dx ({self.dx}) and rx_aperture.grid_stride "
+                f"({self.grid_stride}) are mutually exclusive: dx is the pitch of the "
+                "interpolated receiver, grid_stride puts the elements on the solver "
+                "grid. Set one and leave the other null")
+        return self
 
 
 class GerchbergSaxtonConfig(BaseModel):

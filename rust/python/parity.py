@@ -11,14 +11,23 @@ Run from the repo root:
 
     .venv/bin/python rust/python/parity.py
 
-Four slices: the two noiseless ones (tiny_check joint F=2 at 280/300 GHz; the
-characterize caustic_hit_sparse F=1 slice at 300 GHz) and the same two with receiver
-noise on the measurement (noise.snr_db 20 / 10 dB). The noiseless slices force the
-noise OFF (SNR_OFF, what the CLI's `--snr-db off` passes): the scenario configs
-carry a 30 dB noise block of their own, which a slice would otherwise inherit.
-Noise is added in python by MGS.measure() before the engine boundary, so both
-engines get the identical noisy arrays — the noisy slices check the solver on a
-measurement that is no longer an exact field.
+Five slices: the two noiseless ones (tiny_check joint F=2 at 280/300 GHz; the
+characterize caustic_hit_sparse F=1 slice at 300 GHz), the same two with receiver
+noise on the measurement (noise.snr_db 20 / 10 dB), and one on the ON-GRID receiver
+(caustic_hit_1f_grid2l, F=1 at 300 GHz, rx_aperture.grid_stride: 2) under that
+config's own 30 dB noise block. The noiseless slices force the noise OFF (SNR_OFF,
+what the CLI's `--snr-db off` passes): the scenario configs carry a 30 dB noise
+block of their own, which a slice would otherwise inherit — as the on-grid slice
+deliberately does. Noise is added in python by MGS.measure() before the engine
+boundary, so both engines get the identical noisy arrays — the noisy slices check
+the solver on a measurement that is no longer an exact field.
+
+The on-grid slice covers the other shape a measurement can take. The interpolated
+receiver (rx_aperture.dx) hands the engines a target and a weighting that are dense
+across the RX window; the on-grid one hands them a comb — the element samples at
+every grid_stride-th scene sample, the weighting zero at every sample between and
+sqrt(grid_stride) higher at the elements. That is built in MGS.measure() too, so the
+engine boundary and the bar are the same.
 
 Pass criteria (the settled parity bar — python stays the golden reference), per slice:
   - every candidate's final_loss within rtol 1e-3;
@@ -162,6 +171,13 @@ def main():
     ok &= run_slice("caustic_hit_sparse limit-6, 10 dB",
                     REPO / "configs" / "scenario_caustic_hit_sparse.yml",
                     [300e9], limit=6, snr_db=10.0, noise_seed=0)
+    # the ON-GRID receiver (rx_aperture.grid_stride: 2): the target and the weighting
+    # are non-zero at the 80 element samples only, not across the whole RX window.
+    # snr_db=None keeps the config's OWN noise block (30 dB, seed 0), so this is the
+    # measurement the campaign base config actually solves against
+    ok &= run_slice("caustic_hit_1f_grid2l limit-6, on-grid RX",
+                    REPO / "configs" / "scenario_caustic_hit_1f_grid2l.yml",
+                    [300e9], limit=6)
     print(f"\nPARITY: {'PASS' if ok else 'FAIL'} (rtol {RTOL}, argmin exact)")
     sys.exit(0 if ok else 1)
 

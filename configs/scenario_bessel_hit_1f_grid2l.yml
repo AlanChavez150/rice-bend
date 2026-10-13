@@ -4,14 +4,15 @@
 # 327x151 grid_search (49,377 candidate spots; ~2λ cells at 300 GHz: z step 1.99 mm,
 # x step 2.00 mm), so the true TX location and the candidate grid match the caustic
 # base config and the residual maps compare like for like. gerchberg_saxton.max_iters
-# is 5000 there and here: the single solve at the true TX converges after 611
+# is 5000 there and here: the single solve at the true TX converges after 1765
 # iterations; the sweep keeps its own 800 cap through gs_overrides.
 # scenario_bessel_hit_1f_grid2l_lambda20.yml is its dense-RX control.
 #
 # Scenario: bessel (axicon) beam HITS the RX aperture: the axicon sits where the caustic
 # plate does (x_center=-0.101, z=0.3) and its axis is steered onto the RX.
 # RX window: centered x=0, width 0.04 m. RX at z=0; TX projects -Z. TX width 0.072 m,
-# height z=0.3. RX array at lambda/2 (80 elements); TX plate sampled at
+# height z=0.3. RX array at lambda/2 on the solver grid (80 elements, every 2nd scene
+# x sample in the window: rx_aperture.grid_stride: 2); TX plate sampled at
 # lambda/20 (1440 samples); 30 dB receiver noise. Verified (300 GHz): FWHM=0.0445
 # (> rx 0.04: for this beam it is the width of the fringe zone, which is wider than the
 # window), rx_peak/peak=1.000, energy_frac_in_rx=0.796 -> HIT. Five bright fringes
@@ -37,9 +38,12 @@ tx_aperture:
 rx_aperture:
   x_center: 0.0
   width: 0.04
-  dx: 0.000499654          # lambda/2 at 300 GHz (lambda = 0.999308 mm), a FIXED pitch in metres: one
-                           # physical array for every tone. sampled_axis turns the nominal pitch
-                           # into int(width/dx) = 80 elements across the window (realized 0.506 mm)
+  grid_stride: 2           # elements ON the solver grid: every 2nd scene x sample in the window, 80
+                           # elements at 0.5002 mm pitch (lambda/2 at 300 GHz to 0.1 %; lambda =
+                           # 0.999308 mm), one physical array for every tone. The field is sampled at
+                           # those points directly and the loss is scored only there. `dx` instead
+                           # would put the elements on their own axis and interpolate them onto the
+                           # 0.25 mm grid, leaving the solver's target about -18 dB off the true field
 
 plot_path: scenario_bessel_hit_1f_grid2l.png
 
