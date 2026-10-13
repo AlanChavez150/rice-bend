@@ -3,8 +3,9 @@ varying one parameter, measure each point's localization error via analysis.json
 and plot error against the study's x-axis.
 
 The base config still says what the underlying experiment IS (scene, beam, RX,
-grid, GS); a study is a code-defined SERIES over it — each point a programmatic
-derivation (a comb formula; a rigid TX translation touching three coupled
+grid, GS, and the carrier: the centre of its frequency list); a study is a
+code-defined SERIES over it — each point a programmatic derivation (a comb
+formula about that centre; a rigid TX translation touching three coupled
 fields), with the x-axis semantics and plotting in code. The series tables below
 are versioned next to the code that interprets them rather than in a
 one-consumer yaml DSL.
@@ -14,8 +15,11 @@ after every point, so an interrupted study resumes), configs/point_*.yml (the
 materialized effective config per point — passing it to persistence makes each
 point dir's config_source.yml reconstruct the derived experiment, not the base),
 one ordinary grid run dir per point, and the study plot. A point whose
-candidate_beams.json already exists skips its solve on re-run — so a root whose
-saved points were solved with different noise is refused up front, not reused.
+candidate_beams.json already exists skips its solve on re-run, and its directory
+name is all that keys it — so a root is refused up front, not reused, when it
+holds another study or a saved point that is not the one this invocation would
+solve: a different experiment (tones, scene, TX and beam, RX, candidate grid,
+solver settings), a different --limit, or different noise.
 """
 
 import argparse
@@ -33,28 +37,33 @@ from pydantic import ValidationError
 from rice_bend.analysis import analysis_from_manifest, write_analysis
 from rice_bend.cli import setup_logging
 from rice_bend.config import (NoiseConfig, SimConfig, apply_noise_overrides,
-                              load_config, parse_snr_db_arg, resolve_frequencies)
+                              center_freq_index, load_config, parse_snr_db_arg,
+                              resolve_frequencies)
 from rice_bend.data_store import check_run_dir, make_run_dir, write_json
 from rice_bend.grid_search import persist_and_plot
 from rice_bend.grid_sweep import run_grid_search
 from rice_bend.plotting import add_wavelength_axis
 from rice_bend.residual_plots import snr_suffix, summary_from_manifest
 
-STUDY_SCHEMA_VERSION = 6   # v4: points[] gained ref_freq_hz (nullable)
+STUDY_SCHEMA_VERSION = 7   # v4: points[] gained ref_freq_hz (nullable)
 #                            v5: top-level noise {snr_db, seed} (null when noiseless);
 #                                points[] gained snr_db (nullable)
 #                            v6: noise gained swept (true: the series sets each point's
 #                                SNR, so the top-level snr_db is null; see points[])
+#                            v7: top-level beam (the base config's tx_aperture.beam) and
+#                                center_freq_hz, both nullable; x_label is stored with
+#                                its centre filled in
 STUDY_NAME_FILE = "study.json"
 STUDY_DEFAULT_CONFIG = (Path(__file__).resolve().parents[2] / "configs"
                         / "scenario_caustic_hit_pm5.yml")
 
-FREQ_CENTER_HZ = 150e9
-# bandwidth half-widths (+/- % of the center) — dense at the small end where the
-# error curve moves fastest; 0 is the no-diversity anchor (a single tone)
+# bandwidth half-widths (+/- % of the base config's centre frequency) — dense at
+# the small end where the error curve moves fastest; 0 is the no-diversity
+# anchor (a single tone)
 BANDWIDTH_PCTS = (0.0, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 13.0, 16.0, 20.0)
-# the fixed comb the tx_shift study solves with (the pm5 comparison comb)
-PM5_COMB_HZ = (142.5e9, 150.0e9, 157.5e9)
+# half-width (+/- %) of the fixed comb the tx_shift study solves with (the pm5
+# comparison comb), about the same centre
+TX_SHIFT_COMB_PCT = 5.0
 # rigid TX translations (m): dense at small s where the captured energy falls
 # fastest; 0.115 reproduces configs/scenario_caustic_miss.yml exactly
 TX_SHIFTS_M = (0.0, 0.010, 0.020, 0.030, 0.045, 0.065, 0.090, 0.115, 0.130)
@@ -65,15 +74,29 @@ SNR_DBS = (0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0)
 SNR_DBS_FINE = tuple(float(s) for s in range(0, 31))
 
 
-def _apply_frequency(cfg: SimConfig, pct: float) -> SimConfig:
-    c = cfg.model_copy(deep=True)
+def base_center_freq(cfg: SimConfig) -> float:
+    """The carrier a study is centred on: the centre-by-value tone of the base
+    config's resolved frequency list. Same convention as the solver's reference
+    frequency (config.center_freq_index), and every comb below keeps this tone
+    as its own centre — so each point's ref_freq_hz comes out as this value."""
+    freqs = resolve_frequencies(cfg, None)
+    return freqs[center_freq_index(freqs)]
+
+
+def comb(center_hz: float, pct: float) -> List[float]:
+    """The tones of a ±pct % comb about center_hz: both edges and the centre."""
     if pct == 0:
         # single tone, not three copies of the center (the config layer
         # rejects duplicate frequencies): the 1f anchor of the sweep
-        c.frequencies = [FREQ_CENTER_HZ]
-    else:
-        c.frequencies = [FREQ_CENTER_HZ * (1 - pct / 100.0), FREQ_CENTER_HZ,
-                         FREQ_CENTER_HZ * (1 + pct / 100.0)]
+        return [center_hz]
+    return [center_hz * (1 - pct / 100.0), center_hz, center_hz * (1 + pct / 100.0)]
+
+
+def _apply_frequency(cfg: SimConfig, pct: float) -> SimConfig:
+    """Bandwidth only: the comb replaces whatever tones the base config lists,
+    but stays centred where they are."""
+    c = cfg.model_copy(deep=True)
+    c.frequencies = comb(base_center_freq(cfg), pct)
     return c
 
 
@@ -85,7 +108,8 @@ def _apply_tx_shift(cfg: SimConfig, s: float) -> SimConfig:
     the window would cut off one end of the plate and sample dark (zero-filled)
     plate at the other."""
     c = cfg.model_copy(deep=True)
-    c.frequencies = list(PM5_COMB_HZ)   # fixed comb: energy is the only variable
+    # fixed comb: energy is the only variable
+    c.frequencies = comb(base_center_freq(cfg), TX_SHIFT_COMB_PCT)
     c.tx_aperture.x_min += s
     c.tx_aperture.x_max += s
     traj = list(c.tx_aperture.beam.trajectory)
@@ -110,7 +134,7 @@ class StudyDef:
     param_name: str
     param_unit: str
     x_axis: str                # 'param_value' | 'energy_pct'
-    x_label: str
+    x_label: str               # may carry a {center} placeholder: see _x_label
     values: Tuple[float, ...]
     apply: Callable[[SimConfig, float], SimConfig]
     tag: Callable[[float], str]
@@ -125,7 +149,7 @@ class StudyDef:
 STUDIES = {
     "frequency": StudyDef(
         name="frequency", param_name="bandwidth_pct", param_unit="%",
-        x_axis="param_value", x_label="bandwidth (± % of 150 GHz)",
+        x_axis="param_value", x_label="bandwidth (± % of {center})",
         values=BANDWIDTH_PCTS, apply=_apply_frequency,
         tag=lambda p: f"bw{int(round(p)):02d}pct",
         plot_name="study_error_vs_bandwidth.png"),
@@ -196,32 +220,6 @@ def _recompute_analysis(point_dir: Path,
     return analysis, summary.ref_freq_hz, summary.noise
 
 
-def _warn_if_stale(study: StudyDef, base_cfg: SimConfig, value: float,
-                   point_dir: Path, log) -> None:
-    """A resumed point must match the study table's current value — warn when a
-    table edit between runs would silently pair an old run with a new label."""
-    try:
-        expected = study.apply(base_cfg, value)
-        with open(point_dir / "candidate_beams.json") as f:
-            m = json.load(f)
-        got = [e["freq_hz"] for e in m.get("frequencies", [])]
-        want = [float(fq) for fq in expected.frequencies]
-        if len(got) != len(want) or not np.allclose(got, want):
-            log.warning(f"{point_dir.name}: resumed run's frequencies {got} != the "
-                        f"study table's {want} — was the series edited?")
-        snap = point_dir / "config_snapshot.json"
-        if snap.exists():
-            with open(snap) as f:
-                s = json.load(f)
-            gx = s.get("tx_aperture", {}).get("x_min")
-            if gx is not None and abs(gx - expected.tx_aperture.x_min) > 1e-9:
-                log.warning(f"{point_dir.name}: resumed run's tx_aperture.x_min {gx} "
-                            f"!= expected {expected.tx_aperture.x_min} — was the "
-                            "series edited?")
-    except Exception as e:                                  # cross-check only
-        log.warning(f"{point_dir.name}: could not cross-check the resumed run ({e})")
-
-
 def _point_noise(cfg: SimConfig) -> Optional[dict]:
     """The noise one point is solved with, in the manifest's {snr_db, seed} shape."""
     if cfg.noise.snr_db is None:
@@ -288,8 +286,9 @@ def _check_resume_noise(study: StudyDef, base_cfg: SimConfig, root: Path, log) -
     """Pre-flight: refuse a root whose saved points were solved with different
     noise. The resume cache key is only the point dir name, so without this a
     20 dB re-run over a 10 dB root would silently mix the two. Runs BEFORE
-    study.json is rewritten and before any solve, so a refusal modifies nothing
-    (and stays out of _warn_if_stale, whose broad except would demote it).
+    study.json is rewritten and before any solve, so a refusal modifies nothing.
+    Noise only: the rest of what identifies a saved point is
+    _check_resume_identity's, whose fingerprint leaves the noise block out.
     The expectation is per point — what apply() derives — since a sweeping
     series gives every point its own SNR."""
     for i, value in enumerate(study.values):
@@ -312,6 +311,179 @@ def _check_resume_noise(study: StudyDef, base_cfg: SimConfig, root: Path, log) -
                       + ("--noise-seed)." if study.sweeps_noise
                          else "--snr-db/--noise-seed)."))
             raise SystemExit(2)
+
+
+# the gerchberg_saxton fields that decide what a solve produces. Left out:
+# engine (python and rust are parity-checked implementations of one solver) and
+# history_stride (it only thins what a capturing solve records)
+_GS_IDENTITY_FIELDS = ("init", "max_iters", "seed", "convergence_count",
+                       "convergence_threshold", "lr0", "bt_shrink", "bt_tries")
+# floats are matched, not compared: a tone is the product center * (1 ± pct/100)
+# (338999999999.99994 Hz for +13 % of 300 GHz), so a value that reaches the two
+# sides by different arithmetic can differ in its last bit
+_IDENTITY_REL_TOL = 1e-12
+_IDENTITY_DIFFS_SHOWN = 6    # fields named in a refusal; the rest are counted
+
+
+def _apply_sweep_overrides(cfg: SimConfig) -> None:
+    """Write the sweep's effective max_iters and seed onto cfg.gerchberg_saxton,
+    exactly as step 2 of grid_sweep.run_grid_search does before save_grid_run
+    snapshots the config. config_snapshot.json therefore holds the effective
+    values, and a config has to be brought to the same form before it is
+    compared with one. That logic is inline there, not a helper — this mirrors
+    it, and the two must change together."""
+    grid, gs = cfg.grid_search, cfg.gerchberg_saxton
+    if grid is None:
+        return
+    if grid.gs_overrides.max_iters is not None:
+        gs.max_iters = grid.gs_overrides.max_iters
+    if grid.seed is not None:
+        gs.seed = grid.seed
+
+
+def _fingerprint(cfg: dict, freqs: List[float]) -> dict:
+    """What identifies a point's solve, cut from a config dump (the shape of
+    config_snapshot.json) and the tones `freqs` it resolves to: everything that
+    shapes the measurement or the candidates' solves.
+
+    Left out on purpose: output and plot_path (where results land), experimental
+    (the .mat path only), noise (_check_resume_noise guards it),
+    gerchberg_saxton.engine and history_stride (see _GS_IDENTITY_FIELDS),
+    grid_search.aperture.dx (provenance only), and grid_search.seed /
+    gs_overrides, which gerchberg_saxton already carries in effective form (see
+    _apply_sweep_overrides)."""
+    grid = cfg.get("grid_search") or {}
+    gs = cfg.get("gerchberg_saxton") or {}
+    return {
+        "frequencies": freqs,
+        "sim_scene": cfg.get("sim_scene"),
+        "tx_aperture": cfg.get("tx_aperture"),      # the whole beam block included
+        "rx_aperture": cfg.get("rx_aperture"),
+        "grid_search": {
+            "z": grid.get("z"), "x_center": grid.get("x_center"),
+            "aperture": {"width": (grid.get("aperture") or {}).get("width")}},
+        "gerchberg_saxton": {k: gs.get(k) for k in _GS_IDENTITY_FIELDS},
+    }
+
+
+def _is_number(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _load_json_object(path: Path) -> dict:
+    with open(path) as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError(f"{path.name} is not a JSON object")
+    return data
+
+
+def _identity_diffs(saved, expected, path: str = "") -> List[Tuple[str, object, object]]:
+    """(dotted path, saved, expected) for every field on which two fingerprints
+    disagree. A key missing on either side counts as null: a snapshot written
+    before a config field existed (cone_angle_deg and focal_length in the beam
+    block, say) must match a config that leaves the field at its null default,
+    while one whose default is not null still shows up as a difference. Numbers
+    match within _IDENTITY_REL_TOL; a list is one field, reported whole."""
+    blocks = [v for v in (saved, expected) if v is not None]
+    if blocks and all(isinstance(v, dict) for v in blocks):
+        s, e = saved or {}, expected or {}
+        out: List[Tuple[str, object, object]] = []
+        for key in list(e) + [k for k in s if k not in e]:
+            out += _identity_diffs(s.get(key), e.get(key),
+                                   f"{path}.{key}" if path else key)
+        return out
+    if (isinstance(saved, list) and isinstance(expected, list)
+            and len(saved) == len(expected)):
+        same = not any(_identity_diffs(a, b) for a, b in zip(saved, expected))
+    elif _is_number(saved) and _is_number(expected):
+        same = math.isclose(saved, expected, rel_tol=_IDENTITY_REL_TOL, abs_tol=0.0)
+    else:
+        same = saved == expected
+    return [] if same else [(path, saved, expected)]
+
+
+def _check_resume_identity(study: StudyDef, base_cfg: SimConfig, root: Path, args,
+                           log) -> None:
+    """Pre-flight: refuse a root whose saved points are not the ones this
+    invocation would solve. The resume cache key is only the point dir name, and
+    every base config resolves to the same default root — so without this a
+    study of another beam or carrier pointed at an existing root would skip
+    every solve and file the old runs under the new study's labels. Like
+    _check_resume_noise, it runs before anything is written.
+
+    Per saved point, the fingerprint (see _fingerprint) of its
+    config_snapshot.json is compared with that of the config this invocation
+    would hand run_grid_search; then the number of candidates it solved is
+    compared with what this invocation's --limit would solve, so a --limit
+    smoke root is not resumed as a finished study (nor the reverse)."""
+    def refuse(why: str, fix: str = "Pass a different --out.") -> None:
+        log.error(f"{why} {fix}")
+        raise SystemExit(2)
+
+    marker = root / STUDY_NAME_FILE
+    if marker.exists():
+        try:
+            with open(marker) as f:
+                saved_study = json.load(f).get("study")
+        except (OSError, ValueError, AttributeError):
+            # an interrupted write of the marker must not make the root
+            # unresumable; the per-point check below does not depend on it
+            saved_study = None
+        if saved_study is not None and saved_study != study.name:
+            refuse(f"{root} holds the '{saved_study}' study, but this invocation runs "
+                   f"'{study.name}'; the two would share one study.json and one set "
+                   "of plots.")
+
+    for i, value in enumerate(study.values):
+        name = f"point_{i:02d}_{study.tag(value)}"
+        point_dir = root / name
+        if not (point_dir / "candidate_beams.json").exists():
+            continue
+        try:
+            manifest = _load_json_object(point_dir / "candidate_beams.json")
+            snapshot = _load_json_object(point_dir / "config_snapshot.json")
+        except (OSError, ValueError) as e:
+            refuse(f"{point_dir} cannot be checked against this invocation ({e}), "
+                   "so resuming could reuse a run of a different experiment.")
+
+        expected = study.apply(base_cfg, value)     # a deep copy: safe to mutate
+        _apply_sweep_overrides(expected)
+        # the snapshot stores the config's own list, which is null when the run
+        # fell back to the code's default carrier — a value the snapshot does
+        # not record, but the manifest's solved tones do
+        solved = [entry.get("freq_hz") for entry in manifest.get("frequencies") or []]
+        diffs = _identity_diffs(
+            _fingerprint(snapshot, snapshot.get("frequencies") or solved),
+            _fingerprint(expected.model_dump(mode="json"),
+                         resolve_frequencies(expected, None)))
+        if diffs:
+            shown = "; ".join(f"{path}: saved {json.dumps(got)}, expected {json.dumps(want)}"
+                              for path, got, want in diffs[:_IDENTITY_DIFFS_SHOWN])
+            more = len(diffs) - _IDENTITY_DIFFS_SHOWN
+            count = "1 field differs" if len(diffs) == 1 else f"{len(diffs)} fields differ"
+            refuse(f"{point_dir} was solved from a different experiment than this "
+                   f"invocation describes — {count}: {shown}"
+                   + (f" (+{more} more)" if more > 0 else "")
+                   + ". Resuming would file the saved run under this study's labels.")
+
+        # the experiments match, so this invocation would enumerate the same
+        # usable set — of which run_grid_search solves usable[:limit]
+        counts = manifest.get("counts") or {}
+        ran, usable = counts.get("ran"), counts.get("usable")
+        if not isinstance(ran, int) or not isinstance(usable, int):
+            refuse(f"{point_dir}: candidate_beams.json does not record how many "
+                   "candidates were solved (counts.ran / counts.usable), so a "
+                   "--limit run cannot be told from a full one.")
+        want_ran = usable if args.limit is None else len(range(usable)[:args.limit])
+        if ran != want_ran:
+            asked = "no --limit" if args.limit is None else f"--limit {args.limit}"
+            match = f"pass --limit {ran}" if ran < usable else "drop --limit"
+            refuse(f"{point_dir} holds {ran} of its {usable} usable candidates, but "
+                   f"this invocation ({asked}) would solve {want_ran} — counts.ran: "
+                   f"saved {ran}, expected {want_ran}. Resuming would pass one "
+                   "run off as the other.",
+                   fix=f"Pass a different --out (or {match}).")
 
 
 def _repair_partial(point_dir: Path, log) -> None:
@@ -365,7 +537,6 @@ def _run_point(study: StudyDef, i: int, value: float, base_cfg: SimConfig,
     if (point_dir / "candidate_beams.json").exists():
         log.info(f"[{i + 1}/{n}] {name}: candidate_beams.json present — "
                  "skipping the solve")
-        _warn_if_stale(study, base_cfg, value, point_dir, log)
         analysis, ref, noise = _recompute_analysis(point_dir, log)
         return _record(study, value, name, analysis, resumed=True, ref_freq_hz=ref,
                        noise=noise)
@@ -393,18 +564,43 @@ def _run_point(study: StudyDef, i: int, value: float, base_cfg: SimConfig,
                    ref_freq_hz=run.ref_freq, noise=run.noise)
 
 
+def _x_label(study: StudyDef, center_hz: Optional[float]) -> str:
+    """The study's x-axis label with its {center} placeholder (if it has one)
+    filled from the study's centre frequency; a study whose centre is unknown
+    still gets a readable label."""
+    center = (f"{center_hz / 1e9:g} GHz" if center_hz is not None
+              else "the centre frequency")
+    return study.x_label.format(center=center)
+
+
+def _title(study: StudyDef, beam: Optional[dict], center_hz: Optional[float]) -> str:
+    """The head of both plot titles: the study, then which beam and carrier it
+    was run for — the same series is run from several base configs, and their
+    plots are otherwise indistinguishable. Either part is dropped when unknown
+    (a replot of a root that recorded neither)."""
+    parts = []
+    if beam and beam.get("type"):
+        parts.append(f"{beam['type']} beam")
+    if center_hz is not None:
+        parts.append(f"{center_hz / 1e9:g} GHz")
+    return f"{study.name} study" + (" — " + ", ".join(parts) if parts else "")
+
+
 def _write_study_json(root: Path, study: StudyDef, base_config, records: List[dict],
-                      status: str, noise: Optional[dict]) -> None:
+                      status: str, noise: Optional[dict], beam: Optional[dict],
+                      center_freq_hz: Optional[float]) -> None:
     write_json(root / STUDY_NAME_FILE, {
         "schema_version": STUDY_SCHEMA_VERSION,
         "study": study.name,
         "status": status,
         "base_config": str(base_config),
+        "beam": beam,
+        "center_freq_hz": float(center_freq_hz) if center_freq_hz is not None else None,
         "noise": noise,
         "param_name": study.param_name,
         "param_unit": study.param_unit,
         "x_axis": study.x_axis,
-        "x_label": study.x_label,
+        "x_label": _x_label(study, center_freq_hz),
         "values": [float(v) for v in study.values],
         "points": records,
     })
@@ -424,8 +620,9 @@ _ERROR_SERIES = (
 
 def _records_ref_freq(records: List[dict]) -> Optional[float]:
     """The one centre frequency shared by every point, or None (no λ axis).
-    Today's study tables agree bit-exactly (150 GHz everywhere); a series that
-    varied the centre would have no single wavelength to offer."""
+    Every series today keeps the base config's centre at each point, so the
+    points agree bit-exactly; a series that varied the centre would have no
+    single wavelength to offer."""
     refs = {r.get("ref_freq_hz") for r in records} - {None}
     return refs.pop() if len(refs) == 1 else None
 
@@ -437,10 +634,13 @@ def _records_snr(records: List[dict]) -> Optional[float]:
     return snrs.pop() if len(snrs) == 1 else None
 
 
-def _plot_study(study: StudyDef, records: List[dict], out_path: Path, log) -> None:
+def _plot_study(study: StudyDef, records: List[dict], out_path: Path, log,
+                beam: Optional[dict] = None,
+                center_hz: Optional[float] = None) -> None:
     """Argmin error and top-K mean distance vs the study's x-axis. Points
     connect in SERIES order (= table order), which matters for the energy axis:
-    x there is a measured quantity."""
+    x there is a measured quantity. `beam` and `center_hz` only name the study
+    in the title and the x label (see _title, _x_label)."""
     import matplotlib.pyplot as plt
     from matplotlib import patheffects
 
@@ -489,17 +689,20 @@ def _plot_study(study: StudyDef, records: List[dict], out_path: Path, log) -> No
     ax.margins(x=0.09)
     if study.ticks_at_values:
         ax.set_xticks([float(v) for v in study.values])
-    ax.set_xlabel(study.x_label)
+    ax.set_xlabel(_x_label(study, center_hz))
     ax.set_ylabel("distance to true TX (mm)")
     add_wavelength_axis(ax, _records_ref_freq(records), axis="y", unit_m=1e-3)
-    ax.set_title(f"{study.name} study" + snr_suffix({"snr_db": _records_snr(records)}))
+    ax.set_title(_title(study, beam, center_hz)
+                 + snr_suffix({"snr_db": _records_snr(records)}))
     ax.grid(True, alpha=0.3)
     fig.savefig(out_path, dpi=120)
     plt.close(fig)
     log.info(f"Wrote study plot to {out_path}")
 
 
-def _plot_ndof(study: StudyDef, records: List[dict], out_path: Path, log) -> None:
+def _plot_ndof(study: StudyDef, records: List[dict], out_path: Path, log,
+               beam: Optional[dict] = None,
+               center_hz: Optional[float] = None) -> None:
     """N_E(eps) on the x-axis against the two localization errors (argmin and
     top-K mean distance). This is the information-metric view (see
     docs/information_metric.md): whatever knob the study turned, points with the
@@ -533,12 +736,28 @@ def _plot_ndof(study: StudyDef, records: List[dict], out_path: Path, log) -> Non
     ax.set_ylabel("distance to true TX (mm)")
     add_wavelength_axis(ax, _records_ref_freq(records), axis="y", unit_m=1e-3)
     ax.grid(True, alpha=0.3)
-    fig.suptitle(f"{study.name} study — information metric view "
+    # on one line the view's text already spans most of the figure, so a head
+    # that names the beam or the carrier takes a line of its own
+    head = _title(study, beam, center_hz)
+    sep = " — " if head == _title(study, None, None) else "\n"
+    fig.suptitle(f"{head}{sep}information metric view "
                  f"(points labelled by {study.param_name})"
                  + snr_suffix({"snr_db": _records_snr(records)}))
     fig.savefig(out_path, dpi=120)
     plt.close(fig)
     log.info(f"Wrote n_dof plot to {out_path}")
+
+
+def _snapshot_beam(root: Path, records: List[dict]) -> Optional[dict]:
+    """The tx_aperture.beam block the first saved point was solved with, or None
+    when there is no point or its config snapshot cannot be read."""
+    if not records:
+        return None
+    try:
+        with open(root / records[0]["run_dir"] / "config_snapshot.json") as f:
+            return json.load(f)["tx_aperture"]["beam"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
 
 
 def _replot_study(root: Path, args, log) -> None:
@@ -559,12 +778,24 @@ def _replot_study(root: Path, args, log) -> None:
         analysis, ref, noise = _recompute_analysis(pdir, log)
         records.append(_record(study, value, name, analysis,
                                resumed=True, ref_freq_hz=ref, noise=noise))
-    # no config here: carry the saved noise block through, or a replot drops it
+    # no config here (base configs get edited in place, so the one study.json
+    # names may no longer be the one that was solved): carry the saved noise
+    # block through, or a replot drops it — and take the beam and the centre
+    # from what the root itself recorded, falling back for a root saved before
+    # study.json had them to the first point's snapshot and the points' shared
+    # reference frequency
+    beam = data.get("beam")
+    if beam is None:
+        beam = _snapshot_beam(root, records)
+    center_hz = data.get("center_freq_hz")
+    if center_hz is None:
+        center_hz = _records_ref_freq(records)
     _write_study_json(root, study, data.get("base_config", "?"), records,
                       status="complete" if complete else "partial",
-                      noise=data.get("noise"))
-    _plot_study(study, records, root / study.plot_name, log)
-    _plot_ndof(study, records, root / "study_metrics_vs_ndof.png", log)
+                      noise=data.get("noise"), beam=beam, center_freq_hz=center_hz)
+    _plot_study(study, records, root / study.plot_name, log, beam, center_hz)
+    _plot_ndof(study, records, root / "study_metrics_vs_ndof.png", log, beam,
+               center_hz)
 
 
 def _parse_args():
@@ -649,30 +880,35 @@ def main():
 
     # marker-first initialization: study.json lands before any other content, so
     # an interrupt at any point leaves a resumable root, never a refused one. The
-    # seed and the resume guard come first: both read the root as it was left.
+    # seed and the resume guards come first: they read the root as it was left.
     check_run_dir(root.parent, root.name, kind="study")
     _resolve_noise_seed(study, base_cfg, root, log)
     _check_resume_noise(study, base_cfg, root, log)
+    _check_resume_identity(study, base_cfg, root, args, log)
     noise = _noise_block(study, base_cfg)
+    beam = base_cfg.tx_aperture.beam.model_dump(mode="json")
+    center_hz = base_center_freq(base_cfg)
     if study.sweeps_noise:
         log.info(f"Each point is solved at its own SNR "
                  f"({', '.join(f'{v:g}' for v in study.values)} dB), seed {noise['seed']}")
     elif noise is not None:
         log.info(f"Every point is solved at {_describe_noise(noise)}")
     root.mkdir(parents=True, exist_ok=True)
-    _write_study_json(root, study, args.config, [], status="running", noise=noise)
+    _write_study_json(root, study, args.config, [], status="running", noise=noise,
+                      beam=beam, center_freq_hz=center_hz)
     (root / "configs").mkdir(exist_ok=True)
 
     records: List[dict] = []
     for i, value in enumerate(study.values):
         records.append(_run_point(study, i, value, base_cfg, root, args, log))
         _write_study_json(root, study, args.config, records, status="running",
-                          noise=noise)
+                          noise=noise, beam=beam, center_freq_hz=center_hz)
 
     _write_study_json(root, study, args.config, records, status="complete",
-                      noise=noise)
-    _plot_study(study, records, root / study.plot_name, log)
-    _plot_ndof(study, records, root / "study_metrics_vs_ndof.png", log)
+                      noise=noise, beam=beam, center_freq_hz=center_hz)
+    _plot_study(study, records, root / study.plot_name, log, beam, center_hz)
+    _plot_ndof(study, records, root / "study_metrics_vs_ndof.png", log, beam,
+               center_hz)
     n_ok = sum(1 for r in records if r.get("error_mm") is not None)
     log.info(f"Study '{study.name}' complete: {n_ok}/{len(records)} measurable "
              f"point(s) -> {root}")
