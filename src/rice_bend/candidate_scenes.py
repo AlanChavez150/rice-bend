@@ -143,6 +143,7 @@ def make_true_mgs_plot(run_dir: Path, log: Optional[logging.Logger] = None,
     mgs = MGS(freqs, config)
     mgs.illuminate_real()             # illuminate the real scene
     mgs.run_gerch_sax()               # MGS solve at the true TX plane
+    mgs.log_landing()                 # the LANDING block `mgs` logs, for this baseline
     mgs.illuminate_reconstructed()    # re-illuminate with the reconstructed aperture
     mgs.plot_scene(save_path=out_path, show=False)
     log.info(f"Wrote true MGS scene to {out_path}")

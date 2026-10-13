@@ -10,10 +10,12 @@ from pydantic import ValidationError
 
 from rice_bend import beam_aperatures, rs
 from rice_bend.cli import setup_logging
-from rice_bend.config import (DEFAULT_CONFIG, GerchbergSaxtonConfig, SimConfig,
-                              apply_noise_overrides, center_freq_index, load_config,
-                              parse_snr_db_arg, resolve_frequencies)
+from rice_bend.config import (DEFAULT_CONFIG, DEFAULT_FREQ_HZ, GerchbergSaxtonConfig,
+                              SimConfig, apply_noise_overrides, center_freq_index,
+                              load_config, parse_snr_db_arg, resolve_frequencies)
 from rice_bend.interp import interp_amplitude, interp_real_imag
+from rice_bend.landing import (beam_target, field_match, landing_metrics,
+                               propagator_offset)
 from rice_bend.noise import add_awgn
 from rice_bend.plotting import draw_line_panel, draw_scene
 from rice_bend.data_store import GSHistory, check_run_dir, make_run_dir, save_run
@@ -124,10 +126,20 @@ def _warm_start_phase(tx_z, orig_aper_amp, x_axis, rx_z, channels, params, seed,
 # capture=True, else None. `final_loss`/`loss_full` are the joint
 # (mean-over-frequency) numbers; the `*_per_freq` twins carry each frequency's
 # component, aligned with `frequencies` (the input channel order).
+#
+# `psi` is the solved unknown itself — the delay profile as phase at `ref_freq`, on
+# the scene x-axis, zero off the support — and it is NOT recoverable from
+# `curr_aper_f`: that is exp(1j*psi), which keeps psi only modulo 2π, while tone f's
+# phase is (f/ref_freq)·psi and needs the absolute value. Set only when
+# capture=True on the python engine (the single-shot path, where
+# MGS.landing_report rebuilds every tone's field from it); None on the grid path
+# and the rust engine, where nothing reads it and a sweep would carry one extra
+# scene-length float array per candidate.
 GSResult = namedtuple(
     "GSResult",
     "curr_aper_f final_loss final_loss_per_freq n_iters_run stop_reason seed "
-    "loss_full loss_full_per_freq frequencies ref_freq history",
+    "loss_full loss_full_per_freq frequencies ref_freq history psi",
+    defaults=(None,),
 )
 
 
@@ -202,9 +214,10 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
     Pure given its arguments — arrays, scalars and a picklable config model — so
     this runs unchanged in a worker process.
 
-    With `capture=True` a GSHistory is built and per-iteration state recorded (the
-    single-shot `mgs` path, used by animation); with `capture=False` only the dense loss
-    curves + final aperture are produced (the grid-search path). The math is identical
+    With `capture=True` a GSHistory is built and per-iteration state recorded, and
+    the result carries the final psi (the single-shot `mgs` path, used by animation
+    and the landing report); with `capture=False` only the dense loss curves + final
+    aperture are produced (the grid-search path). The math is identical
     either way, so results do not depend on `capture`. `log` (optional) receives the
     per-iteration progress lines; workers pass None to stay quiet.
 
@@ -390,7 +403,8 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
                     loss_full=loss_full, loss_full_per_freq=loss_full_per_freq,
                     frequencies=tuple(float(ch.freq) for ch in channels),
                     ref_freq=float(ref_freq),
-                    history=history)
+                    history=history,
+                    psi=curr_aper_phase.copy() if capture else None)
 
 
 @dataclass
@@ -430,6 +444,68 @@ def _fmt_db(v: Optional[float]) -> str:
     return "n/a" if v is None else f"{v:.1f} dB"
 
 
+def _fmt_mm(v: Optional[float]) -> str:
+    """A position in metres as signed millimetres: +3.13."""
+    return "n/a" if v is None else f"{v * 1e3:+.2f}"
+
+
+def _fmt_num(v: Optional[float], spec: str) -> str:
+    return "n/a" if v is None else format(v, spec)
+
+
+def landing_lines(report: dict) -> List[str]:
+    """MGS.landing_report() as the LANDING log block, one string per line.
+
+    The layout is fixed, so the block reads the same in every log that carries it
+    (`mgs`, the --true-mgs extras of a grid run): positions in mm with sign and two
+    decimals, fractions with four, losses as %.3e, and a `<f> GHz` tag on every
+    per-tone line (a true / reconstructed / match triple per tone, in the run's
+    frequency order).
+    """
+    lines = []
+    target = report["target"]
+    if target is None:
+        lines.append("LANDING target: none")
+    else:
+        lines.append(f"LANDING target: {target['kind']} x={_fmt_mm(target['x_m'])} mm "
+                     f"({target['note']})")
+    for rec in report["per_freq"]:
+        ghz = f"{rec['freq_hz'] / 1e9:g} GHz"
+        for label in ("true", "reconstructed"):
+            m = rec[label]
+            if m is None:
+                lines.append(f"LANDING {label:<13} {ghz}: no power at the RX plane")
+                continue
+            lines.append(
+                f"LANDING {label:<13} {ghz}: peak {_fmt_mm(m['peak_x_m'])} mm, "
+                f"centroid {_fmt_mm(m['centroid_x_m'])} mm, "
+                f"5-95% [{_fmt_mm(m['e05_x_m'])}, {_fmt_mm(m['e95_x_m'])}] mm, "
+                f"in-window {m['frac_in_window']:.4f} | "
+                f"in-window peak {_fmt_mm(m['peak_x_in_window_m'])} mm, "
+                f"centroid {_fmt_mm(m['centroid_x_in_window_m'])} mm")
+        vs_true, vs_target = rec["match_true"], rec["match_target"]
+        lines.append(
+            f"LANDING {'match':<13} {ghz}: corr {_fmt_num(vs_true['corr'], '.4f')}, "
+            f"rel-L2 vs true {_fmt_num(vs_true['rel_l2'], '.3f')}, "
+            f"power ratio {_fmt_num(vs_true['power_ratio'], '.3f')}, "
+            f"rel-L2 vs target {_fmt_num(vs_target['rel_l2'], '.3f')}")
+    loss = report["loss"]
+    lines.append(
+        f"LANDING loss solver={loss['solver']:.3e} true_plate={loss['true_plate']:.3e} "
+        f"zero_model={loss['zero_model']:.3e} ratio={_fmt_num(loss['ratio'], '.3f')} "
+        f"iters={loss['n_iters']} stop={loss['stop_reason']}")
+    bias, dx = report["dx_bias_m"], report["scene_dx_m"]
+    if abs(bias - 0.5 * dx) <= 1e-6 * dx:
+        offset = f"+dx/2 lateral offset ({bias * 1e3:+.3f} mm)"
+    else:
+        # not one of the shipped scene axes: see landing.propagator_offset
+        offset = (f"lateral offset ({bias * 1e3:+.3f} mm; not +dx/2: the scene x-axis "
+                  "is not an even-length axis centred on x = 0)")
+    lines.append(f"LANDING note: positions carry the propagator's {offset}; outside "
+                 "the RX window the reconstruction is unconstrained")
+    return lines
+
+
 class MGS():
     def __init__(self, freqs, config: SimConfig):
         self._init_common(freqs, config)
@@ -439,6 +515,7 @@ class MGS():
         # travels *down* to the RX. Move the TX by changing tx.z (height) and its
         # x_min/x_max (lateral).
         scene_cfg = config.sim_scene
+        self.tx_cfg = config.tx_aperture
         for freq in self.freqs:
             wl = rs.wavelength(freq)
             self.freq_states.append(FreqState(
@@ -480,6 +557,9 @@ class MGS():
         self.noise_cfg = config.noise
         self.noise_report = None       # set by measure() when noise is on
         self.output_cfg = config.output
+        self.tx_cfg = None             # the simulated constructor sets it: the beam's
+        #   geometric landing target (landing_report) is read from the TX config, and
+        #   an experimental capture has no configured beam to aim
         self.gs_history = None
         self.gs_result = None
         self.freq_states: List[FreqState] = []   # filled by the constructor path
@@ -803,8 +883,11 @@ class MGS():
         self.log.info(f"Running modified Gerchberg-saxton algorithm")
         self.measure()
         # amplitude-only ON PURPOSE: this is the solver's fixed amplitude constraint
-        # and its support mask, not a field. Forcing it cartesian changes the
-        # constraint by 3.0-5.3% rel L2 with no error raised and no visibly broken plot.
+        # and its support mask, not a field. Forcing it cartesian (|interp_real_imag|)
+        # is a different array: the straight line between two samples of different
+        # phase cuts inside the arc, so it dips wherever the plate's phase turns
+        # between aperture samples -- by an amount that depends on the beam and on
+        # tx_aperture.dx, with no error raised and no visibly broken plot.
         #
         # The PRIMARY frequency's profile serves as THE constraint for a joint
         # solve: every beam constructor emits unit amplitude (only the phase depends
@@ -849,6 +932,134 @@ class MGS():
         out_aper.aper_profile = interp_real_imag(
             self.scene.x_axis, result.curr_aper_f, out_aper.aper_axis)
         return result
+
+    # --------------------------------------------------------------- landing ---
+    def _joint_loss(self, rx_rows: Sequence[np.ndarray]) -> float:
+        """The solver's joint loss for one RX-plane field per tone (self.freqs
+        order): the mean over tones of 0.5*mean(|w*(row - rx_field)|^2), the
+        expression gs_reconstruct descends, so the result compares directly with
+        gs_result.final_loss."""
+        return float(np.mean([
+            0.5 * np.mean(np.abs(fs.error_weighting * (row - fs.rx_field)) ** 2)
+            for fs, row in zip(self.freq_states, rx_rows)]))
+
+    def landing_report(self) -> dict:
+        """Where the energy lands on the RX plane — the real beam against the
+        solver's reconstruction, per tone — and the final loss in context.
+        Simulated path only; run_gerch_sax() must have run.
+
+            {"target":    landing.beam_target(...): the beam's geometric aim, or None
+             "rx_window": {"x_min", "x_max"}
+             "dx_bias_m": the propagator's lateral offset; half the scene x step
+                          on every shipped scene (see the last paragraph)
+             "scene_dx_m": the scene x step
+             "per_freq":  [{"freq_hz",
+                            "true":          landing_metrics(true row)
+                            "reconstructed": landing_metrics(reconstructed row)
+                            "match_true":    field_match(true row, reconstructed row)
+                            "match_target":  field_match(rx_field, reconstructed row)},
+                           ...]                                  self.freqs order
+             "loss": {"solver", "true_plate", "zero_model", "ratio", "n_iters",
+                      "stop_reason"}}
+
+        The true row is FreqState.rx_plane_row: the clean field of the real plate at
+        the RX plane, before the RX elements sample it and before any noise. The
+        reconstructed row is the solver's OWN model propagated the solver's own way
+        — amp * exp(1j * (f/ref_freq) * psi) on the scene axis, through the same
+        kernel — so the joint loss of these rows IS gs_result.final_loss. It is
+        deliberately not gs_rec_data[0]: that is gs_tx re-illuminated, which has
+        been resampled scene -> aperture -> scene on the way, and on a multi-tone
+        run it is the reference-frequency field propagated at the first-listed
+        frequency.
+
+        match_true answers the question being asked (does the energy land where
+        the real beam's does); match_target is what the solver was actually given
+        to fit: the measurement as the RX elements sampled it, noise included. The
+        two differ by the receiver, not by the solver — a sparse array's
+        interpolated target carries less power than the field it samples.
+
+        `loss` sets the solver's final loss against two references evaluated with
+        the same expression: `true_plate`, the loss of the REAL plate's phase under
+        the solver's model (the solver's amplitude constraint times
+        exp(1j*angle(true profile on the scene axis)), per tone), and `zero_model`,
+        the loss of radiating nothing. `ratio` = solver / true_plate. The true plate
+        does not score zero: the target is the field as the RX elements sampled it
+        (and noised it), which the true plate does not reproduce — so with a sparse
+        or noisy receiver the solver gets BELOW the true plate, and a ratio under 1
+        is the ordinary case, not a suspicious one. A ratio well above 1 means the
+        solve stopped short of the true plate: cut off by max_iters (stop_reason
+        says so), or converged in another basin, which a multi-tone solve does when
+        the warm start's phase unwrap slips by 2π.
+
+        Positions are read off the scene grid and carry the propagator's lateral
+        offset, reported as `dx_bias_m`: landing.propagator_offset, which is +dx/2
+        on the even-length, origin-centred x-axis of every shipped scene (and is
+        reported as whatever it is on any other). Outside the RX window the
+        weighting is zero and the reconstruction is unconstrained, so its full-row
+        numbers (peak, centroid, 5-95 % span) say where the fitted plate happens to
+        throw its energy; only the in-window ones are held to the measurement.
+        """
+        result, hist = self.gs_result, self.gs_history
+        if not self.has_real_aper:
+            raise RuntimeError("landing_report needs the real TX aperture; the "
+                               "experimental path has none to compare against")
+        if result is None or hist is None or result.psi is None:
+            raise RuntimeError("landing_report needs a solved run; call "
+                               "run_gerch_sax() first")
+        scene = self.scene
+        x_axis = scene.x_axis
+        dx = x_axis[1] - x_axis[0]
+        rx_lo, rx_hi = scene.rx_ap.x_min, scene.rx_ap.x_max
+        # the fixed amplitude constraint exactly as the solver held it
+        amp = np.abs(hist.orig_aper_amp)
+
+        per_freq, rec_rows, true_plate_rows = [], [], []
+        for fs in self.freq_states:
+            # gs_reconstruct's forward kernel and field construction, term for term
+            h_fwd = rs.rs_kernel(x_axis, fs.wavelength,
+                                 -1.0 * (scene.rx_ap.z - scene.tx_ap.z))
+            rho = fs.freq / result.ref_freq
+            rec_row = rs.rs_apply(amp * np.exp(1j * (rho * result.psi)), h_fwd, dx)
+            rec_rows.append(rec_row)
+            # the real plate as the solver could represent it: its own phase on the
+            # scene axis, under the solver's amplitude
+            true_u0 = interp_real_imag(fs.tx_ap.aper_axis, fs.tx_ap.aper_profile, x_axis)
+            true_plate_rows.append(
+                rs.rs_apply(amp * np.exp(1j * np.angle(true_u0)), h_fwd, dx))
+            per_freq.append({
+                "freq_hz": float(fs.freq),
+                "true": landing_metrics(x_axis, fs.rx_plane_row, rx_lo, rx_hi),
+                "reconstructed": landing_metrics(x_axis, rec_row, rx_lo, rx_hi),
+                "match_true": field_match(fs.rx_plane_row, rec_row, x_axis, rx_lo, rx_hi),
+                "match_target": field_match(fs.rx_field, rec_row, x_axis, rx_lo, rx_hi),
+            })
+
+        solver_loss = float(result.final_loss)
+        true_plate_loss = self._joint_loss(true_plate_rows)
+        dark = np.zeros(len(x_axis), dtype=np.complex64)
+        return {
+            "target": beam_target(self.tx_cfg, rx_z=scene.rx_ap.z),
+            "rx_window": {"x_min": float(rx_lo), "x_max": float(rx_hi)},
+            "dx_bias_m": propagator_offset(x_axis),
+            "scene_dx_m": float(dx),
+            "per_freq": per_freq,
+            "loss": {
+                "solver": solver_loss,
+                "true_plate": true_plate_loss,
+                "zero_model": self._joint_loss([dark] * len(self.freq_states)),
+                "ratio": solver_loss / true_plate_loss if true_plate_loss > 0 else None,
+                "n_iters": int(result.n_iters_run),
+                "stop_reason": str(result.stop_reason),
+            },
+        }
+
+    def log_landing(self) -> dict:
+        """Log landing_report() as the LANDING block (landing_lines has the layout)
+        and return the report."""
+        report = self.landing_report()
+        for line in landing_lines(report):
+            self.log.info(line)
+        return report
 
     def plot_scene(self, save_path=None, show=True):
         """Save the 4-panel scene plot (real vs MGS-reconstructed scene + TX aperture
@@ -918,6 +1129,32 @@ class MGS():
                 plt.show()
             plt.close(fig)
 
+
+def resolve_run_frequencies(config: SimConfig, cli_freqs: Optional[List[float]],
+                            experimental: bool, log=None) -> List[float]:
+    """The frequencies one `mgs` invocation runs at.
+
+    The simulated path is config.resolve_frequencies as it stands: --freq, else
+    the config's `frequencies`, else DEFAULT_FREQ_HZ. The experimental path shares
+    the first two and NOT the fallback. A capture's carrier is a property of the
+    bench, not of the project default, and exp_data reads the carrier out of the
+    FFT bin at freq - lo_freq*trx_n: a carrier the rig did not transmit points
+    that read at a bin the signal is not in. So with neither --freq nor
+    `frequencies`, a capture is read at the carrier the receive chain's multiplied
+    LO sits on, experimental.lo_freq * experimental.trx_n (150 GHz for the default
+    bench constants, 25 GHz x 6).
+    """
+    if experimental and not cli_freqs and not config.frequencies:
+        exp = config.experimental
+        freq = float(exp.lo_freq * exp.trx_n)
+        if log is not None:
+            log.info(f"Experimental path with no --freq and no config frequencies: "
+                     f"using the bench carrier experimental.lo_freq * "
+                     f"experimental.trx_n = {freq / 1e9:g} GHz")
+        return [freq]
+    return resolve_frequencies(config, cli_freqs)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Program to simulate phase retrieval using a modified gerchberg-saxton algorithm"
@@ -932,7 +1169,9 @@ def main():
         "--freq", "-f",
         help="One or more frequencies in Hz (overrides config `frequencies`). "
              "Multiple values run ONE joint solve for a single phase mask across "
-             "all of them. Default: config `frequencies`, else 150e9.",
+             "all of them. Default: config `frequencies`, else "
+             f"{DEFAULT_FREQ_HZ / 1e9:g}e9 (with --rx-path/--heatmap-path: else "
+             "experimental.lo_freq * experimental.trx_n).",
         type=float,
         nargs="+",
         default=None
@@ -989,7 +1228,7 @@ def main():
         default=None
     )
     args = parser.parse_args()
-    setup_logging(args.debug)
+    log = setup_logging(args.debug)
 
     config = load_config(args.config)
 
@@ -1009,9 +1248,10 @@ def main():
     if config.output.save_run:
         check_run_dir(config.output.output_dir, config.output.run_name, kind="mgs")
 
-    freqs = resolve_frequencies(config, args.freq)
+    is_exp = args.rx_path is not None and not args.heatmap_path is None
+    freqs = resolve_run_frequencies(config, args.freq, experimental=is_exp, log=log)
 
-    if args.rx_path is not None and not args.heatmap_path is None:
+    if is_exp:
         if len(freqs) != 1:
             parser.error("the experimental path (--rx-path/--heatmap-path) is a "
                          "single-frequency capture; pass exactly one --freq")
@@ -1021,14 +1261,16 @@ def main():
         mgs.run_gerch_sax()
         mgs.illuminate_reconstructed()
         mgs.plot_scene()
-        is_exp = True
     else:
         mgs = MGS(freqs, config)
         mgs.illuminate_real()
         mgs.run_gerch_sax()
+        # Logged HERE, ahead of the re-illumination and the plot: where the energy
+        # landed is the answer a single run exists to give, and plot_scene can block
+        # on an interactive window (or fail) with the numbers still unprinted.
+        mgs.log_landing()
         mgs.illuminate_reconstructed()
         mgs.plot_scene()
-        is_exp = False
 
     # Deferred to here on purpose: make_run_dir clears the target, so a crashed (or
     # plt.show()-blocked) solve must not have destroyed the previous run already.
