@@ -11,11 +11,18 @@ note the commit recorded in tests/data/meta.json.
 Cases produced (names are pinned by rust/tests/conv_parity.rs / solve_parity.rs):
   conv_n{7,8,2399,2401}   random complex pairs — odd/even "same"-slice centering
   conv_n2400              a real RS kernel + box-aperture field at the flagship size
-  solve_single            one F=1 candidate solve, tiny_check geometry (N=400)
-  solve_joint             the same candidate at F=2 with the full warm start,
-                          including the stage-2/3 intermediates (psi0, delta)
+  solve_single            one F=1 candidate solve at 300 GHz, tiny_check geometry
+                          (N=800)
+  solve_joint             the same candidate at F=2 (280/300 GHz) with the full warm
+                          start, including the stage-2/3 intermediates (psi0, delta)
   numerics                np.add.reduce (f64/f32), the f32 convergence-window
                           mean, and np.unwrap — gates src/npmath.rs bit-exactly
+
+The frequencies and sizes above are what a regeneration produces NOW, from the
+retargeted configs (300 GHz carrier, tiny_check.yml at 0.75 mm scene spacing). The
+vectors committed under tests/data/ predate the retarget — 150 GHz, 140/150 GHz and
+N=400, at the commit meta.json records — and stay valid: they pin the solver's
+arithmetic, which does not care which carrier produced its inputs.
 """
 import json
 import subprocess
@@ -83,10 +90,10 @@ def gen_conv_cases():
         conv_case(f"conv_n{n}", u0, h, 0.00025)
 
     # the flagship size, with physically-shaped data: a real forward RS kernel
-    # (TX 0.3 m above the RX plane at 150 GHz) and a box aperture random-phase field
+    # (TX 0.3 m above the RX plane at 300 GHz) and a box aperture random-phase field
     n = 2400
     x_axis = np.linspace(-0.3, 0.3, n)
-    h = rs.rs_kernel(x_axis, rs.wavelength(150e9), 0.3)
+    h = rs.rs_kernel(x_axis, rs.wavelength(300e9), 0.3)
     rng = np.random.default_rng(2400)
     amp = np.where(np.abs(x_axis) <= 0.05, 1.0, 0.0)
     u0 = amp * np.exp(1j * 2 * np.pi * rng.random(n))
@@ -167,8 +174,8 @@ def _result_outputs(result):
 
 
 def gen_solve_single():
-    x_axis, point, _support, amp, channels, params, _ref, rx_z = _candidate_setup([150e9])
-    ref_freq = 150e9
+    x_axis, point, _support, amp, channels, params, _ref, rx_z = _candidate_setup([300e9])
+    ref_freq = 300e9
     result = gs_reconstruct(tx_z=point.z, orig_aper_amp=amp, x_axis=x_axis, rx_z=rx_z,
                             channels=channels, params=params, ref_freq=ref_freq,
                             capture=False, log=None)
@@ -180,7 +187,7 @@ def gen_solve_single():
 
 
 def gen_solve_joint():
-    freqs = [140e9, 150e9]
+    freqs = [280e9, 300e9]
     x_axis, point, support, amp, channels, params, ref_freq, rx_z = _candidate_setup(freqs)
     assert params.init == "warm_start", "solve_joint must exercise the warm start"
 

@@ -1,7 +1,10 @@
 # Test scenario: Directional beam SMALLER than the RX aperture, HITS it (short stand-off)
 # RX window: centered x=0, width 0.065 m. RX at z=0; TX projects -Z. Shared symmetric
-# scene across all scenarios. TX width 0.030 m, height z=0.2. Verified (150 GHz):
-# beam_peak_x=+0.000, FWHM=0.019 (< rx 0.065), rx_peak/peak=1.00 -> HIT
+# scene across all scenarios. TX width 0.030 m, height z=0.2.
+# 300 GHz centre (ten-tone comb, 200-380 GHz); RX array at lambda/2 (130 elements, one fixed pitch
+# for every tone); TX plate sampled at lambda/20 (600 samples); 30 dB receiver noise.
+# Verified (300 GHz): beam_peak_x=+0.0001, FWHM=0.0240 (< rx 0.065), rx_peak/peak=1.000,
+# energy_frac_in_rx=0.978 -> HIT
 
 sim_scene:
   x_min: -0.3
@@ -14,7 +17,7 @@ tx_aperture:
   x_min: -0.015
   x_max: 0.015
   z: 0.2
-  dx: 0.00025
+  dx: 0.0000499654         # lambda/20 at 300 GHz: int(width/dx) = 600 samples across the plate
   beam:
     type: directional
     steer_angle_deg: 0
@@ -22,7 +25,9 @@ tx_aperture:
 rx_aperture:
   x_center: 0.0
   width: 0.065
-  dx: null
+  dx: 0.000499654          # lambda/2 at 300 GHz (lambda = 0.999308 mm), a FIXED pitch in metres: one
+                           # physical array for every tone. sampled_axis turns the nominal pitch
+                           # into int(width/dx) = 130 elements across the window (realized 0.504 mm)
 
 plot_path: scenario_directional_smaller_hit.png
 
@@ -30,7 +35,7 @@ plot_path: scenario_directional_smaller_hit.png
 # shared aperture profile fitted against every frequency at once (one delay
 # plate whose phase scales with frequency; loss = mean of the per-frequency
 # losses), written to one flat results/<run_name>/ with joint + per-frequency plots.
-frequencies: [100.0e9, 110.0e9, 120.0e9, 130.0e9, 140.0e9, 150.0e9, 160.0e9, 170.0e9, 180.0e9, 190.0e9]
+frequencies: [200.0e9, 220.0e9, 240.0e9, 260.0e9, 280.0e9, 300.0e9, 320.0e9, 340.0e9, 360.0e9, 380.0e9]
 
 gerchberg_saxton:
   max_iters: 800
@@ -48,6 +53,12 @@ output:
   save_run: true
   save_scene_fields: false
   save_gs_history: false
+
+# Receiver noise on the simulated RX measurement (complex AWGN per RX element, one
+# floor for all antennas and tones). Override with --snr-db DB|off / --noise-seed.
+noise:
+  snr_db: 30.0                     # peak-referenced receiver SNR (dB); null -> noiseless
+  seed: 0
 
 # Speculative TX-location sweep for grid-search-mgs (ignored by plain mgs).
 grid_search:

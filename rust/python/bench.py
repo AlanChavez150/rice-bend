@@ -11,8 +11,12 @@ timing includes the python-side kernel build and marshaling.
 
 Workloads:
   A  configs/scenario_caustic_hit_pm5.yml — the study's default: 3-tone comb
-     (142.5/150/157.5 GHz), warm start, N=2400, max_iters 800, 164x76 grid
-  B  the same candidates at 150 GHz alone (the 1-frequency anchor, random init)
+     (285/300/315 GHz), warm start, N=2400, max_iters 800, 327x151 grid
+  B  the same candidates at 300 GHz alone (the 1-frequency anchor, random init)
+
+Both are timed on a NOISELESS measurement, as they always were: the config's 30 dB
+noise block is forced off (SNR_OFF, what the CLI's `--snr-db off` passes), so the
+iteration counts being timed do not depend on a noise draw.
 """
 import os
 
@@ -31,13 +35,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from parity import REPO, rust_solve, sweep_setup  # noqa: E402
 
 from rice_bend import rs  # noqa: E402
+from rice_bend.config import SNR_OFF  # noqa: E402
 from rice_bend.mgs import gs_reconstruct  # noqa: E402
 
 PM5 = REPO / "configs" / "scenario_caustic_hit_pm5.yml"
 
 
 def run_workload(tag, freqs, n_cand):
-    x_axis, rx_z, channels, params, ref_freq, points = sweep_setup(PM5, freqs)
+    x_axis, rx_z, channels, params, ref_freq, points = sweep_setup(
+        PM5, freqs, snr_db=SNR_OFF)   # noiseless: see the module docstring
     usable = [p for p in points if p.ok]
     picks = [usable[i] for i in np.linspace(0, len(usable) - 1, n_cand).astype(int)]
 
@@ -96,7 +102,7 @@ def run_workload(tag, freqs, n_cand):
 def primitive_bench():
     n = 2400
     x_axis = np.linspace(-0.3, 0.3, n)
-    h = rs.rs_kernel(x_axis, rs.wavelength(150e9), 0.3)
+    h = rs.rs_kernel(x_axis, rs.wavelength(300e9), 0.3)
     rng = np.random.default_rng(0)
     u0 = np.where(np.abs(x_axis) <= 0.05, 1.0, 0.0) * np.exp(1j * 2 * np.pi * rng.random(n))
     dx = float(x_axis[1] - x_axis[0])
@@ -111,9 +117,9 @@ def main():
     args = ap.parse_args()
 
     results = [
-        run_workload("A: pm5 study point (3-tone, warm start)", [142.5e9, 150e9, 157.5e9],
+        run_workload("A: pm5 study point (3-tone, warm start)", [285e9, 300e9, 315e9],
                      args.candidates),
-        run_workload("B: 1-frequency anchor (150 GHz)", [150e9], args.candidates),
+        run_workload("B: 1-frequency anchor (300 GHz)", [300e9], args.candidates),
     ]
     t_prim = primitive_bench()
 

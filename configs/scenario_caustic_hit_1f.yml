@@ -1,13 +1,16 @@
-# Frequency-comparison case 1 of 3: SINGLE frequency (150 GHz, the design center).
+# Frequency-comparison case 1 of 3: SINGLE frequency (300 GHz, the design center).
 # Baseline for scenario_caustic_hit_pm5.yml (±5%) and scenario_caustic_hit_pm10.yml
-# (±10%): identical scene, grid, seed and GS settings — the frequency list is the
-# only variable across the three cases.
+# (±10%): identical scene, seed and GS settings — the frequency list is the only
+# variable across the three cases (pm5 also runs the fine 327x151 grid; this file
+# and pm10 keep the 64x48 one).
 #
 # Scenario: caustic beam HITS the RX aperture (big arc curves into the window).
 # RX window: centered x=0, width 0.04 m. RX at z=0; TX projects -Z. TX width 0.072 m
-# (the caustic support), height z=0.3. Verified (150 GHz): big-arc caustic (a=0.8):
-# launches ~-0.10, curves into the RX. beam_peak_x=-0.0001, FWHM=0.0295 -> HIT
-# (centred in the ±0.02 m RX window)
+# (the caustic support), height z=0.3. RX array at lambda/2 (80 elements); TX plate
+# sampled at lambda/20 (1440 samples); 30 dB receiver noise. Verified (300 GHz): big-arc
+# caustic (a=0.8): launches ~-0.10, curves into the RX. beam_peak_x=+0.0031, FWHM=0.0178,
+# rx_peak/peak=1.000, energy_frac_in_rx=0.840 -> HIT (the peak is not centred in the
+# ±0.02 m RX window: it sits 3.9 mm short of the geometric caustic at +0.0070)
 # Dense 64x48 grid_search (3072 candidate spots).
 
 sim_scene:
@@ -21,7 +24,7 @@ tx_aperture:
   x_min: -0.137
   x_max: -0.065
   z: 0.3
-  dx: 0.00025
+  dx: 0.0000499654         # lambda/20 at 300 GHz: int(width/dx) = 1440 samples across the plate
   beam:
     type: caustic
     trajectory: [0.8, 0.0, -0.065]   # x(d)=a*d^2+b*d+c; c offsets the beam laterally
@@ -29,12 +32,14 @@ tx_aperture:
 rx_aperture:
   x_center: 0.0
   width: 0.04
-  dx: null
+  dx: 0.000499654          # lambda/2 at 300 GHz (lambda = 0.999308 mm), a FIXED pitch in metres: one
+                           # physical array for every tone. sampled_axis turns the nominal pitch
+                           # into int(width/dx) = 80 elements across the window (realized 0.506 mm)
 
 plot_path: scenario_caustic_hit_1f.png
 
 # Single frequency: the joint solve reduces to the plain single-frequency MGS.
-frequencies: [150.0e9]
+frequencies: [300.0e9]
 
 gerchberg_saxton:
   max_iters: 800
@@ -52,6 +57,12 @@ output:
   save_run: true
   save_scene_fields: false
   save_gs_history: false
+
+# Receiver noise on the simulated RX measurement (complex AWGN per RX element, one
+# floor for all antennas and tones). Override with --snr-db DB|off / --noise-seed.
+noise:
+  snr_db: 30.0                     # peak-referenced receiver SNR (dB); null -> noiseless
+  seed: 0
 
 # Speculative TX-location sweep for grid-search-mgs (ignored by plain mgs).
 grid_search:

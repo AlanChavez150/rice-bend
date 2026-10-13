@@ -1,7 +1,13 @@
 # Test scenario: Caustic "partial" — the same big-arc beam (a=0.8) translated to c=-0.043, so
 # it lands straddling the RX window's right edge. TX aperture window [-0.115, -0.043] (width
-# 0.072 m) is exactly the caustic support for this trajectory. Verified (150 GHz):
-# beam_peak_x=+0.0219, FWHM=0.0295, rx_peak/global_peak=0.973, energy_frac_in_rx=0.439.
+# 0.072 m) is exactly the caustic support for this trajectory. 300 GHz centre (ten-tone comb,
+# 200-380 GHz); RX array at lambda/2 (80 elements, one fixed pitch for every tone); TX plate
+# sampled at lambda/20 (1440 samples); 30 dB receiver noise. Verified (300 GHz):
+# beam_peak_x=+0.0251, FWHM=0.0178, rx_peak/global_peak=0.618, energy_frac_in_rx=0.387.
+# The half-amplitude zone [+0.0136, +0.0314] straddles the edge at +0.0200, but the peak itself
+# lands 5.1 mm OUTSIDE the window (geometric caustic at +0.0290): the tallest thing inside the
+# window is the first side lobe at +0.0154, 0.618 of the peak. verify_scenario.py still calls
+# it a HIT (rx_peak/global_peak >= 0.5), but not by much.
 # RX window: centered x=0, width 0.04 m. Dense 64x48 grid_search (3072 candidate spots).
 
 sim_scene:
@@ -15,7 +21,7 @@ tx_aperture:
   x_min: -0.115
   x_max: -0.043
   z: 0.3
-  dx: 0.00025
+  dx: 0.0000499654         # lambda/20 at 300 GHz: int(width/dx) = 1440 samples across the plate
   beam:
     type: caustic
     trajectory: [0.8, 0.0, -0.043]   # x(d)=a*d^2+b*d+c; c offsets the beam laterally
@@ -23,7 +29,9 @@ tx_aperture:
 rx_aperture:
   x_center: 0.0
   width: 0.04
-  dx: null
+  dx: 0.000499654          # lambda/2 at 300 GHz (lambda = 0.999308 mm), a FIXED pitch in metres: one
+                           # physical array for every tone. sampled_axis turns the nominal pitch
+                           # into int(width/dx) = 80 elements across the window (realized 0.506 mm)
 
 plot_path: scenario_caustic_partial.png
 
@@ -31,7 +39,7 @@ plot_path: scenario_caustic_partial.png
 # shared aperture profile fitted against every frequency at once (one delay
 # plate whose phase scales with frequency; loss = mean of the per-frequency
 # losses), written to one flat results/<run_name>/ with joint + per-frequency plots.
-frequencies: [100.0e9, 110.0e9, 120.0e9, 130.0e9, 140.0e9, 150.0e9, 160.0e9, 170.0e9, 180.0e9, 190.0e9]
+frequencies: [200.0e9, 220.0e9, 240.0e9, 260.0e9, 280.0e9, 300.0e9, 320.0e9, 340.0e9, 360.0e9, 380.0e9]
 
 gerchberg_saxton:
   max_iters: 800
@@ -49,6 +57,12 @@ output:
   save_run: true
   save_scene_fields: false
   save_gs_history: false
+
+# Receiver noise on the simulated RX measurement (complex AWGN per RX element, one
+# floor for all antennas and tones). Override with --snr-db DB|off / --noise-seed.
+noise:
+  snr_db: 30.0                     # peak-referenced receiver SNR (dB); null -> noiseless
+  seed: 0
 
 # Speculative TX-location sweep for grid-search-mgs (ignored by plain mgs).
 grid_search:

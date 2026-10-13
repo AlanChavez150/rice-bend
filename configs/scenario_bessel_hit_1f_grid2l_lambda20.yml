@@ -1,0 +1,77 @@
+# DENSE-RX CONTROL for scenario_bessel_hit_1f_grid2l.yml: the same file with ONE
+# difference, rx_aperture.dx: null, so the RX window is sampled at lambda/20 at runtime
+# (800 elements across it at 300 GHz) instead of by the lambda/2 array (80 elements).
+# Beam, TX plate, 327x151 grid_search, seeds and the nominal 30 dB receiver noise are
+# the base config's, so running the pair separates the effect of the array pitch from
+# the effect of the noise. (Same SNR and noise seed, not the same realization: the draw
+# is per RX element, and 800 elements draw differently from 80.) The single solve at
+# the true TX converges after 1296 iterations here (611 on the base config), inside
+# max_iters 5000; the sweep keeps its own 800 cap through gs_overrides.
+#
+# Scenario: bessel (axicon) beam HITS the RX aperture: the axicon sits where the caustic
+# plate does (x_center=-0.101, z=0.3) and its axis is steered onto the RX.
+# RX window: centered x=0, width 0.04 m. RX at z=0; TX projects -Z. TX width 0.072 m,
+# height z=0.3. RX window sampled at lambda/20 (800 elements); TX plate sampled at
+# lambda/20 (1440 samples); 30 dB receiver noise. Verified (300 GHz): FWHM=0.0445
+# (> rx 0.04: for this beam it is the width of the fringe zone, which is wider than the
+# window), rx_peak/peak=1.000, energy_frac_in_rx=0.796 -> HIT. Five bright fringes
+# inside the window, 6.0-6.3 mm apart; beam_peak_x=+0.0001 is the one on the axis.
+
+sim_scene:
+  x_min: -0.3
+  x_max: 0.3
+  z_min: 0.0
+  z_max: 0.85
+  spacing: 0.00025
+
+tx_aperture:
+  x_min: -0.137
+  x_max: -0.065
+  z: 0.3
+  dx: 0.0000499654         # lambda/20 at 300 GHz: int(width/dx) = 1440 samples across the plate
+  beam:
+    type: bessel
+    cone_angle_deg: 5.0        # half-angle between the two crossing plane waves; fringe period 5.73 mm at 300 GHz
+    steer_angle_deg: -18.61    # tilts the axis from the aperture centre (x=-0.101) onto the RX at x=0; negative steers toward +x
+
+rx_aperture:
+  x_center: 0.0
+  width: 0.04
+  dx: null                 # null -> lambda/20 at runtime: int(width/dx) = 800 elements across the
+                           # window at 300 GHz (the dense-RX control; the base config's array has 80)
+
+plot_path: scenario_bessel_hit_1f_grid2l_lambda20.png
+
+# Single frequency: the joint solve reduces to the plain single-frequency MGS.
+frequencies: [300.0e9]
+
+gerchberg_saxton:
+  max_iters: 5000
+  convergence_count: 10
+  convergence_threshold: -1.0e-8
+  lr0: 0.05
+  bt_shrink: 0.5
+  bt_tries: 8
+  seed: 0
+  history_stride: 50
+
+output:
+  output_dir: results
+  run_name: scenario_bessel_hit_1f_grid2l_lambda20
+  save_run: true
+  save_scene_fields: false
+  save_gs_history: false
+
+# Receiver noise on the simulated RX measurement (complex AWGN per RX element, one
+# floor for all antennas and tones). Override with --snr-db DB|off / --noise-seed.
+noise:
+  snr_db: 30.0                     # peak-referenced receiver SNR (dB); null -> noiseless
+  seed: 0
+
+# Speculative TX-location sweep for grid-search-mgs (ignored by plain mgs).
+grid_search:
+  z:        {min: 0.15, max: 0.80, num: 327}
+  x_center: {min: -0.15, max: 0.15, num: 151}
+  aperture: {width: 0.072, dx: 0.00025}
+  seed: 0
+  gs_overrides: {max_iters: 800}

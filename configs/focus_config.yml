@@ -2,8 +2,9 @@
 # FOCUS (lens) beam converging on the centre of the RX aperture.
 # Run with: `mgs --config configs/focus_config.yml`.
 #
-# Verified with scripts/verify_scenario.py (150 GHz): beam_peak_x=+0.0001,
-# FWHM=0.0090 (< rx 0.065), rx_peak/peak=1.000, energy_frac_in_rx=0.977 -> HIT
+# Verified with scripts/verify_scenario.py (300 GHz, the project default carrier: this
+# config lists no `frequencies`): beam_peak_x=+0.0001, FWHM=0.0045 (< rx 0.065),
+# rx_peak/peak=1.000, energy_frac_in_rx=0.989 -> HIT
 
 # Bounds and sampling of the 2D (x, z) simulation grid. All units in meters.
 sim_scene:

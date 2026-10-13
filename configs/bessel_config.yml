@@ -2,10 +2,11 @@
 # BESSEL (axicon) beam whose non-spreading fringes cover the RX aperture.
 # Run with: `mgs --config configs/bessel_config.yml`.
 #
-# Verified with scripts/verify_scenario.py (150 GHz): FWHM=0.1890 (> rx 0.065; for
-# this beam it is the width of the fringe zone at the RX plane),
-# rx_peak/peak=0.958, energy_frac_in_rx=0.324 -> HIT. The fringes are equal-height,
-# so the reported beam_peak_x (-0.0714) is just whichever one is marginally tallest.
+# Verified with scripts/verify_scenario.py (300 GHz, the project default carrier: this
+# config lists no `frequencies`): FWHM=0.1950 (> rx 0.065; for this beam it is the
+# width of the fringe zone at the RX plane), rx_peak/peak=0.970,
+# energy_frac_in_rx=0.327 -> HIT. The fringes are near-equal (3.59 mm apart), so the
+# reported beam_peak_x (-0.0786) is just whichever one is marginally tallest.
 
 # Bounds and sampling of the 2D (x, z) simulation grid. All units in meters.
 sim_scene:

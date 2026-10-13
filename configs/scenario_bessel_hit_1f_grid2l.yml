@@ -1,0 +1,78 @@
+# SINGLE frequency (300 GHz, the design center) on the HIGH-RESOLUTION grid, BESSEL beam:
+# the twin of scenario_caustic_hit_1f_grid2l.yml with the beam block of
+# scenario_bessel_hit.yml. Same scene, TX window, RX array, noise, seeds, GS settings and
+# 327x151 grid_search (49,377 candidate spots; ~2λ cells at 300 GHz: z step 1.99 mm,
+# x step 2.00 mm), so the true TX location and the candidate grid match the caustic
+# base config and the residual maps compare like for like. gerchberg_saxton.max_iters
+# is 5000 there and here: the single solve at the true TX converges after 611
+# iterations; the sweep keeps its own 800 cap through gs_overrides.
+# scenario_bessel_hit_1f_grid2l_lambda20.yml is its dense-RX control.
+#
+# Scenario: bessel (axicon) beam HITS the RX aperture: the axicon sits where the caustic
+# plate does (x_center=-0.101, z=0.3) and its axis is steered onto the RX.
+# RX window: centered x=0, width 0.04 m. RX at z=0; TX projects -Z. TX width 0.072 m,
+# height z=0.3. RX array at lambda/2 (80 elements); TX plate sampled at
+# lambda/20 (1440 samples); 30 dB receiver noise. Verified (300 GHz): FWHM=0.0445
+# (> rx 0.04: for this beam it is the width of the fringe zone, which is wider than the
+# window), rx_peak/peak=1.000, energy_frac_in_rx=0.796 -> HIT. Five bright fringes
+# inside the window, 6.0-6.3 mm apart; beam_peak_x=+0.0001 is the one on the axis.
+
+sim_scene:
+  x_min: -0.3
+  x_max: 0.3
+  z_min: 0.0
+  z_max: 0.85
+  spacing: 0.00025
+
+tx_aperture:
+  x_min: -0.137
+  x_max: -0.065
+  z: 0.3
+  dx: 0.0000499654         # lambda/20 at 300 GHz: int(width/dx) = 1440 samples across the plate
+  beam:
+    type: bessel
+    cone_angle_deg: 5.0        # half-angle between the two crossing plane waves; fringe period 5.73 mm at 300 GHz
+    steer_angle_deg: -18.61    # tilts the axis from the aperture centre (x=-0.101) onto the RX at x=0; negative steers toward +x
+
+rx_aperture:
+  x_center: 0.0
+  width: 0.04
+  dx: 0.000499654          # lambda/2 at 300 GHz (lambda = 0.999308 mm), a FIXED pitch in metres: one
+                           # physical array for every tone. sampled_axis turns the nominal pitch
+                           # into int(width/dx) = 80 elements across the window (realized 0.506 mm)
+
+plot_path: scenario_bessel_hit_1f_grid2l.png
+
+# Single frequency: the joint solve reduces to the plain single-frequency MGS.
+frequencies: [300.0e9]
+
+gerchberg_saxton:
+  max_iters: 5000
+  convergence_count: 10
+  convergence_threshold: -1.0e-8
+  lr0: 0.05
+  bt_shrink: 0.5
+  bt_tries: 8
+  seed: 0
+  history_stride: 50
+
+output:
+  output_dir: results
+  run_name: scenario_bessel_hit_1f_grid2l
+  save_run: true
+  save_scene_fields: false
+  save_gs_history: false
+
+# Receiver noise on the simulated RX measurement (complex AWGN per RX element, one
+# floor for all antennas and tones). Override with --snr-db DB|off / --noise-seed.
+noise:
+  snr_db: 30.0                     # peak-referenced receiver SNR (dB); null -> noiseless
+  seed: 0
+
+# Speculative TX-location sweep for grid-search-mgs (ignored by plain mgs).
+grid_search:
+  z:        {min: 0.15, max: 0.80, num: 327}
+  x_center: {min: -0.15, max: 0.15, num: 151}
+  aperture: {width: 0.072, dx: 0.00025}
+  seed: 0
+  gs_overrides: {max_iters: 800}

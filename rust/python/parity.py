@@ -11,11 +11,14 @@ Run from the repo root:
 
     .venv/bin/python rust/python/parity.py
 
-Four slices: the two noiseless ones (tiny_check joint F=2; the characterize
-caustic_hit_sparse F=1 slice) and the same two with receiver noise on the
-measurement (noise.snr_db 20 / 10 dB). Noise is added in python by MGS.measure()
-before the engine boundary, so both engines get the identical noisy arrays — the
-noisy slices check the solver on a measurement that is no longer an exact field.
+Four slices: the two noiseless ones (tiny_check joint F=2 at 280/300 GHz; the
+characterize caustic_hit_sparse F=1 slice at 300 GHz) and the same two with receiver
+noise on the measurement (noise.snr_db 20 / 10 dB). The noiseless slices force the
+noise OFF (SNR_OFF, what the CLI's `--snr-db off` passes): the scenario configs
+carry a 30 dB noise block of their own, which a slice would otherwise inherit.
+Noise is added in python by MGS.measure() before the engine boundary, so both
+engines get the identical noisy arrays — the noisy slices check the solver on a
+measurement that is no longer an exact field.
 
 Pass criteria (the settled parity bar — python stays the golden reference), per slice:
   - every candidate's final_loss within rtol 1e-3;
@@ -36,7 +39,7 @@ except ImportError:
              "  VIRTUAL_ENV=$PWD/.venv .venv/bin/maturin develop --release -m rust/Cargo.toml")
 
 from rice_bend import rs
-from rice_bend.config import apply_noise_overrides, center_freq_index, load_config
+from rice_bend.config import SNR_OFF, apply_noise_overrides, center_freq_index, load_config
 from rice_bend.grid_sweep import enumerate_grid
 from rice_bend.mgs import MGS, gs_reconstruct
 
@@ -65,7 +68,10 @@ def rust_solve(tx_z, amp, x_axis, rx_z, channels, params, ref_freq):
 
 def sweep_setup(cfg_path, freqs, *, snr_db=None, noise_seed=0):
     """Steps 1-4 of run_grid_search (grid_sweep.py:243-317), without persistence.
-    snr_db None keeps the config's noise block (noiseless in every shipped config)."""
+    snr_db follows the CLI's --snr-db: a number of dB, SNR_OFF to force a noiseless
+    measurement, or None to keep the config's noise block — which is 30 dB in every
+    scenario config (tiny_check.yml has none), so a slice meant to be noiseless must
+    pass SNR_OFF."""
     cfg = load_config(cfg_path)
     apply_noise_overrides(cfg, snr_db, noise_seed)
     m = MGS(freqs, cfg)
@@ -87,7 +93,12 @@ def run_slice(tag, cfg_path, freqs, limit, *, snr_db=None, noise_seed=0):
     x_axis, rx_z, channels, params, ref_freq, points = sweep_setup(
         cfg_path, freqs, snr_db=snr_db, noise_seed=noise_seed)
     usable = [p for p in points if p.ok][:limit]
-    noise = "off" if snr_db is None else f"SNR {snr_db:g} dB seed {noise_seed}"
+    if snr_db == SNR_OFF:
+        noise = "off"
+    elif snr_db is None:
+        noise = "as configured"
+    else:
+        noise = f"SNR {snr_db:g} dB seed {noise_seed}"
     print(f"\n== {tag}: {len(usable)} candidates, F={len(channels)}, "
           f"max_iters={params.max_iters}, seed={params.seed}, noise {noise}")
 
@@ -134,20 +145,23 @@ def run_slice(tag, cfg_path, freqs, limit, *, snr_db=None, noise_seed=0):
 
 def main():
     ok = True
-    # the joint multi-frequency path on the tiny config (fast, F=2, warm start)
+    # the joint multi-frequency path on the tiny config (fast, F=2, warm start).
+    # NOISELESS, explicitly: tiny_check.yml has no noise block today, but the slice
+    # must not start depending on that
     ok &= run_slice("tiny_check joint", REPO / "configs" / "tiny_check.yml",
-                    [140e9, 150e9], limit=3)
-    # the characterize check-3 slice: full-resolution scene, F=1
+                    [280e9, 300e9], limit=3, snr_db=SNR_OFF)
+    # the characterize check-3 geometry (full-resolution scene, F=1), NOISELESS:
+    # SNR_OFF overrides the config's 30 dB, which check 3 itself runs with
     ok &= run_slice("caustic_hit_sparse limit-6",
                     REPO / "configs" / "scenario_caustic_hit_sparse.yml",
-                    [150e9], limit=6)
+                    [300e9], limit=6, snr_db=SNR_OFF)
     # the same two slices on a NOISY measurement: identical arrays reach both
     # engines, so the bar does not move
     ok &= run_slice("tiny_check joint, 20 dB", REPO / "configs" / "tiny_check.yml",
-                    [140e9, 150e9], limit=3, snr_db=20.0, noise_seed=0)
+                    [280e9, 300e9], limit=3, snr_db=20.0, noise_seed=0)
     ok &= run_slice("caustic_hit_sparse limit-6, 10 dB",
                     REPO / "configs" / "scenario_caustic_hit_sparse.yml",
-                    [150e9], limit=6, snr_db=10.0, noise_seed=0)
+                    [300e9], limit=6, snr_db=10.0, noise_seed=0)
     print(f"\nPARITY: {'PASS' if ok else 'FAIL'} (rtol {RTOL}, argmin exact)")
     sys.exit(0 if ok else 1)
 

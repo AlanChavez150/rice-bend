@@ -58,30 +58,39 @@ run() {
         || { echo "COMMAND FAILED: $*"; tail -40 "$S"/*.log; exit 1; }
 }
 
+# Noise: checks 1 and 5 run tiny_check.yml, which has no noise block, so they pin the
+# NOISELESS path (and the runtime lambda/20 RX sampling). Checks 2-4 run scenario
+# configs, which carry noise.snr_db 30 / seed 0 and a fixed lambda/2 RX pitch, so they
+# pin the receiver-noise path instead: their residuals and hashes depend on the seeded
+# draw, i.e. on numpy's Generator stream (rice_bend/noise.py) as well as on the solver.
+
 # 1. mgs on the tiny config: solver stop state, captured-history indices, npz key set.
-#    Deliberately UNPINNED: tiny_check.yml lists two frequencies, so this exercises
-#    the joint multi-frequency solve through the single-run entry point.
+#    Deliberately UNPINNED: tiny_check.yml lists two frequencies (280 and 300 GHz), so
+#    this exercises the joint multi-frequency solve through the single-run entry point.
+#    Noiseless; stops on max_iters after 40 iterations.
 run $MGS --config "$C/tiny_check.yml" -o "$S/c1_mgs_tiny"
 
 # 2. mgs at full scene resolution — the only full-size check; covers the caustic branch.
 #    PINNED to one frequency: the config lists ten, and an unpinned run would be a
 #    10x full-resolution joint solve — minutes added for no extra coverage (check 1
-#    already pins the joint path).
-run $MGS --config "$C/scenario_caustic_hit.yml" --freq 150e9 -o "$S/c2_mgs_caustic_hit"
+#    already pins the joint path). Noisy (30 dB, seed 0), 80-element lambda/2 RX array;
+#    stops on the config's 800-iteration cap (the solve converges after 834).
+run $MGS --config "$C/scenario_caustic_hit.yml" --freq 300e9 -o "$S/c2_mgs_caustic_hit"
 
-# 3. the sweep, serial.
-run $GRID --config "$C/scenario_caustic_hit_sparse.yml" --freq 150e9 \
+# 3. the sweep, serial. Noisy (30 dB, seed 0): one draw, shared by every candidate.
+run $GRID --config "$C/scenario_caustic_hit_sparse.yml" --freq 300e9 \
     --limit 6 --jobs 1 -o "$S/c3_grid_j1"
 
-# 4. the same sweep across 4 workers — pins seeding, worker ordering and dtype at once.
-run $GRID --config "$C/scenario_caustic_hit_sparse.yml" --freq 150e9 \
+# 4. the same sweep across 4 workers — pins seeding, worker ordering and dtype at once
+#    (and that the workers all see the parent's one noise draw).
+run $GRID --config "$C/scenario_caustic_hit_sparse.yml" --freq 300e9 \
     --limit 6 --jobs 4 -o "$S/c4_grid_j4"
 
 # 5. multi-frequency JOINT run under the DEFAULT (delay) phase model: one flat layout
 #    (no frequencies.json, no freq_<GHz>/ subdirs), the joint + per-frequency loss
 #    decomposition, the mean-combination rule, and the index -> (z, x_center) map that
-#    pins the z-outer/x-inner ordering.
-run $GRID --config "$C/tiny_check.yml" --freq 140e9 150e9 -o "$S/c5_multifreq"
+#    pins the z-outer/x-inner ordering. Noiseless (tiny_check.yml).
+run $GRID --config "$C/tiny_check.yml" --freq 280e9 300e9 -o "$S/c5_multifreq"
 
 echo "---"
 set +e

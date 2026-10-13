@@ -1,11 +1,18 @@
 # Characterization config for scripts/characterize.sh — NOT a research scenario.
 #
 # A deliberately coarse copy of scenario_caustic_hit: same geometry and beam, but a
-# 6x coarser scene grid, 40 GS iterations and a 3x3 speculative grid, so both
-# entry points finish in a fraction of a second while still exercising the caustic
+# 3x coarser scene grid, 40 GS iterations and a 3x3 speculative grid, so both
+# entry points finish in a few seconds while still exercising the caustic
 # branch, the GS history capture, the joint multi-frequency solve and the grid sweep.
 #
-# spacing must stay BELOW the wavelength (1.9986 mm at 150 GHz, 1.578 mm at 190 GHz)
+# It does NOT follow the scenario configs' 300 GHz setup in three places, on purpose:
+# tx_aperture.dx stays 0.00025 (lambda/4 at 300 GHz), rx_aperture.dx stays null and
+# there is no noise block. So the net still covers the noiseless path, the runtime
+# lambda/20 RX branch (747 elements at 280 GHz, 800 at 300 GHz) and a solve that
+# stops on max_iters; the scenario configs behind checks 2-4 cover the noisy,
+# fixed-pitch side.
+#
+# spacing must stay BELOW the wavelength (0.9993 mm at 300 GHz, 0.789 mm at 380 GHz)
 # or rs() raises "needs denser sampling" and every check fails at once.
 
 sim_scene:
@@ -13,7 +20,7 @@ sim_scene:
   x_max: 0.3
   z_min: 0.0
   z_max: 0.85
-  spacing: 0.0015
+  spacing: 0.00075
 
 tx_aperture:
   x_min: -0.137
@@ -33,7 +40,7 @@ plot_path: tiny_check.png
 
 # Two frequencies only: enough to exercise the joint solve (one shared phase mask,
 # per-frequency loss components, the 3D + vs-joint plots) without paying for ten.
-frequencies: [140.0e9, 150.0e9]
+frequencies: [280.0e9, 300.0e9]
 
 gerchberg_saxton:
   max_iters: 40

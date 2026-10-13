@@ -31,7 +31,10 @@ the rest within 1 ulp.
 engines receive the identical noisy `rx_field` / `error_weighting` arrays. The
 golden vectors stay noiseless. `python/parity.py` runs its two slices a second
 time on a noisy measurement (20 dB and 10 dB) under the same bar, and
-`python/compare_runs.py` refuses two runs whose `(snr_db, seed)` differ.
+`python/compare_runs.py` refuses two runs whose `(snr_db, seed)` differ. The
+scenario configs now carry a 30 dB noise block of their own, so the noiseless
+slices force the noise off explicitly (`SNR_OFF`, what `--snr-db off` passes)
+rather than inherit it.
 
 ## Build / dev loop
 
@@ -50,6 +53,15 @@ VIRTUAL_ENV=$PWD/.venv .venv/bin/maturin develop --release -m rust/Cargo.toml
 # end-to-end acceptance (M5):
 .venv/bin/python rust/python/parity.py
 ```
+
+The golden vectors committed under `tests/data/` predate the 300 GHz retarget
+(generated 2026-09-27, at the commit `meta.json` records): `solve_single` at
+150 GHz and `solve_joint` at 140/150 GHz, N=400. They remain valid for
+`cargo test`. They are stored arrays, the tests read no config, and what they
+pin is the solver's arithmetic, which does not care which carrier produced its
+inputs. `gen_golden.py` run today would not reproduce them: from the retargeted
+`tiny_check.yml` it generates 300 GHz and 280/300 GHz vectors of a different
+size (N=800).
 
 Version pins: **pyo3 0.22 + numpy(rust) 0.22, abi3-py38, maturin ≥1.4,<2** — the
 verified pairing for CPython 3.8.10. Do not bump without revisiting the floor.
@@ -84,13 +96,27 @@ the source of truth. The load-bearing traps, in one place:
 - **RNG stays in Python**; the drawn initial phase crosses the boundary, and the
   warm start's stage-1 solve reuses the same array (same seed ⇒ same draw).
 
+> **Note (2026-10-12): everything below predates the 300 GHz retarget.** The
+> timings, speedups and parity figures in the sections below (and the `parity.py`
+> figure in the table above) were measured on the 150 GHz configs and have not
+> been re-run. The command lines are kept as the record of what was timed; run
+> today they would time a different workload. The scenario configs now sample
+> the TX plate at λ/20 and the RX with a fixed λ/2 array, carry 30 dB of receiver
+> noise, and the fine grid has grown about 4× (164×76 = 12 464 candidates then,
+> 327×151 = 49 377 now, so `scenario_caustic_hit_pm5.yml` is no longer the
+> 12 464-point grid named below). Today's equivalents of the frequencies are
+> `--freq 300e9` for the single-tone workloads and `--freq 285e9 300e9 315e9` for
+> the pm5 comb. `python/bench.py` now times exactly those on the 327×151 grid,
+> with the noise forced off; `python/parity.py` runs `tiny_check.yml` at
+> 280/300 GHz and `scenario_caustic_hit_sparse.yml` at 300 GHz.
+
 ## Baseline timings (M0, this machine, 2026-09-19, python engine)
 
 | Workload | Wall time |
 |---|---|
 | `mgs --config configs/tiny_check.yml` (joint F=2, 40 iters + plots) | 1.0 s |
 | `mgs --config configs/scenario_caustic_hit.yml --freq 150e9` (full-res single solve) | 5.3 s |
-| `grid-search-mgs scenario_caustic_hit_sparse --freq 150e9 --limit 6 --jobs 1` | 3.9 s |
+| `grid-search-mgs --config configs/scenario_caustic_hit_sparse.yml --freq 150e9 --limit 6 --jobs 1` | 3.9 s |
 | `scipy.signal.fftconvolve`, N=2400 (the hot primitive) | ~119 µs/call |
 | cached-kernel-spectrum FFT equivalent (what `rs_apply_into` should beat) | ~68 µs/call |
 

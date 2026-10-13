@@ -1,11 +1,15 @@
 # Test scenario: Focus (lens) beam HITS the RX aperture (focal point on the centre of the window)
-# Twin of scenario_caustic_hit.yml: same scene, TX window, RX window, frequencies and grid_search,
-# so the lens sits where the caustic plate does (x_center=-0.101, z=0.3) and is steered onto the RX.
-# Two things differ: the beam block, and gerchberg_saxton.max_iters (5000 against 800; the single
-# 150 GHz solve converges after 938 iterations). The sweep keeps its own 800 cap (gs_overrides).
+# Twin of scenario_caustic_hit.yml: same scene, TX window, RX window, frequencies, noise and
+# grid_search, so the lens sits where the caustic plate does (x_center=-0.101, z=0.3) and is steered
+# onto the RX. Two things differ: the beam block, and gerchberg_saxton.max_iters (5000 against 800;
+# the single 300 GHz solve converges after 690 iterations, inside either cap). The sweep keeps its
+# own 800 cap (gs_overrides).
 # RX window: centered x=0, width 0.04 m. RX at z=0; TX projects -Z. TX width 0.072 m, height z=0.3.
-# Verified (150 GHz): beam_peak_x=+0.0001, FWHM=0.0115 (< rx 0.04), rx_peak/peak=1.000,
-# energy_frac_in_rx=0.954 -> HIT. Across the comb: 0.923 at 100 GHz, 0.964 at 190 GHz.
+# 300 GHz centre (ten-tone comb, 200-380 GHz); RX array at lambda/2 (80 elements, one fixed pitch
+# for every tone); TX plate sampled at lambda/20 (1440 samples); 30 dB receiver noise.
+# Verified (300 GHz): beam_peak_x=+0.0001, FWHM=0.0055 (< rx 0.04), rx_peak/peak=1.000,
+# energy_frac_in_rx=0.977 -> HIT. Across the comb: FWHM=0.0085, 0.967 at 200 GHz; FWHM=0.0045,
+# 0.982 at 380 GHz.
 # Dense 64x48 grid_search (3072 candidate spots).
 
 sim_scene:
@@ -19,7 +23,7 @@ tx_aperture:
   x_min: -0.137
   x_max: -0.065
   z: 0.3
-  dx: 0.00025
+  dx: 0.0000499654         # lambda/20 at 300 GHz: int(width/dx) = 1440 samples across the plate
   beam:
     type: focus
     focal_length: 0.3165       # |(-0.101, 0.3)|: aperture centre -> RX centre, so the focal point sits on the RX plane at x=0
@@ -28,7 +32,9 @@ tx_aperture:
 rx_aperture:
   x_center: 0.0
   width: 0.04
-  dx: null
+  dx: 0.000499654          # lambda/2 at 300 GHz (lambda = 0.999308 mm), a FIXED pitch in metres: one
+                           # physical array for every tone. sampled_axis turns the nominal pitch
+                           # into int(width/dx) = 80 elements across the window (realized 0.506 mm)
 
 plot_path: scenario_focus_hit.png
 
@@ -36,7 +42,7 @@ plot_path: scenario_focus_hit.png
 # shared aperture profile fitted against every frequency at once (one delay
 # plate whose phase scales with frequency; loss = mean of the per-frequency
 # losses), written to one flat results/<run_name>/ with joint + per-frequency plots.
-frequencies: [100.0e9, 110.0e9, 120.0e9, 130.0e9, 140.0e9, 150.0e9, 160.0e9, 170.0e9, 180.0e9, 190.0e9]
+frequencies: [200.0e9, 220.0e9, 240.0e9, 260.0e9, 280.0e9, 300.0e9, 320.0e9, 340.0e9, 360.0e9, 380.0e9]
 
 gerchberg_saxton:
   max_iters: 5000
@@ -54,6 +60,12 @@ output:
   save_run: true
   save_scene_fields: false
   save_gs_history: false
+
+# Receiver noise on the simulated RX measurement (complex AWGN per RX element, one
+# floor for all antennas and tones). Override with --snr-db DB|off / --noise-seed.
+noise:
+  snr_db: 30.0                     # peak-referenced receiver SNR (dB); null -> noiseless
+  seed: 0
 
 # Speculative TX-location sweep for grid-search-mgs (ignored by plain mgs).
 grid_search:
