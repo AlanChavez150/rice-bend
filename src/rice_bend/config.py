@@ -275,6 +275,11 @@ class ExperimentalConfig(BaseModel):
     scene_z_max: float = Field(default=0.4, description="Scene ceiling (m)")
 
 
+# the carrier every entry point falls back to when neither --freq nor the
+# config's `frequencies` names one
+DEFAULT_FREQ_HZ = 300e9
+
+
 class SimConfig(BaseModel):
     """Top-level simulation config."""
     sim_scene: SimSceneConfig
@@ -291,7 +296,8 @@ class SimConfig(BaseModel):
     grid_search: Optional[GridSearchConfig] = Field(default=None,
         description="Optional speculative TX-location sweep (used by grid-search-mgs)")
     frequencies: Optional[List[float]] = Field(default=None,
-        description="Frequencies (Hz) both entry points solve at; null -> --freq, else 150e9. "
+        description="Frequencies (Hz) both entry points solve at; null -> --freq, else "
+                    f"{DEFAULT_FREQ_HZ / 1e9:g}e9. "
                     "More than one means ONE JOINT solve: a single phase mask fitted "
                     "against every frequency at once, the loss being the mean of the "
                     "per-frequency losses.")
@@ -321,7 +327,7 @@ def center_freq_index(freqs: List[float]) -> int:
 
 def resolve_frequencies(config: "SimConfig",
                         cli_freqs: Optional[List[float]]) -> List[float]:
-    """Resolve the frequency list: CLI override -> config.frequencies -> [150e9].
+    """Resolve the frequency list: CLI override -> config.frequencies -> [DEFAULT_FREQ_HZ].
 
     Shared by both entry points (`mgs` and `grid-search-mgs`), so it lives here on
     neutral ground rather than in either of them. Duplicates are dropped
@@ -333,7 +339,7 @@ def resolve_frequencies(config: "SimConfig",
     elif config.frequencies:
         freqs = [float(f) for f in config.frequencies]
     else:
-        return [150e9]
+        return [DEFAULT_FREQ_HZ]
     return list(dict.fromkeys(freqs))
 
 

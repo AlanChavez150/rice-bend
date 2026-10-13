@@ -20,8 +20,9 @@ from rice_bend.candidate_scenes import (ANIM_FPS, ANIM_TOP_DEFAULT, ANIM_WARN_FR
                                         make_candidate_scenes, make_true_mgs_plot,
                                         scenes_from_manifest, scenes_from_run)
 from rice_bend.cli import setup_logging
-from rice_bend.config import (DEFAULT_CONFIG, SimConfig, apply_noise_overrides,
-                              load_config, parse_snr_db_arg, resolve_frequencies)
+from rice_bend.config import (DEFAULT_CONFIG, DEFAULT_FREQ_HZ, SimConfig,
+                              apply_noise_overrides, load_config, parse_snr_db_arg,
+                              resolve_frequencies)
 from rice_bend.data_store import check_run_dir, make_run_dir
 from rice_bend.grid_sweep import (GridSearchRun,
                                   enumerate_grid, grid_summary, load_frequencies_index,
@@ -272,7 +273,8 @@ def _parse_args():
                         help="One or more frequencies in Hz (overrides config `frequencies`). "
                              "Multiple values run ONE joint sweep: each candidate is solved "
                              "once, for a single phase mask, against all of them. "
-                             "Default: config `frequencies`, else 150e9.")
+                             "Default: config `frequencies`, else "
+                             f"{DEFAULT_FREQ_HZ / 1e9:g}e9.")
     parser.add_argument("--limit", type=int, default=None,
                         help="Only run the first N usable candidates (for quick tests)")
     parser.add_argument("--jobs", "-j", type=int, default=os.cpu_count(),

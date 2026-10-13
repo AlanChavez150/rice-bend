@@ -43,7 +43,11 @@ TOP_LOSS_FACTOR = 1.5      # top candidates = the argmin's 8-connected cluster o
                            # cells with loss <= factor * min; the count is
                            # adaptive (calibrated on the observed ~1e-6 near-tie
                            # band at the lambda/20 loss floor, as a fraction)
-TOP_MAX_STORED = 300       # cap on stored entries; stats always use the full set
+TOP_MAX_STORED = 1200      # cap on stored entries; stats always use the full set.
+                           # Sized for the 327x151 candidate grid: the heatmap
+                           # outlines are drawn from the stored list, and a
+                           # low-residual basin covers ~4x the cells it does on
+                           # a 164x76 grid
 N_DOF_EPS = 0.1            # the project-wide accuracy convention (see the docs)
 
 
