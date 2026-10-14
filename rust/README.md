@@ -29,17 +29,47 @@ the rest within 1 ulp.
 **Receiver noise** (`noise.snr_db`, `--snr-db`) is added in Python by
 `MGS.measure()`, before the engine boundary, so the engine is unchanged: both
 engines receive the identical noisy `rx_field` / `error_weighting` arrays. The
-golden vectors stay noiseless. `python/parity.py` runs its two slices a second
-time on a noisy measurement (20 dB and 10 dB) under the same bar, and
-`python/compare_runs.py` refuses two runs whose `(snr_db, seed)` differ. The
-on-grid receiver (`rx_aperture.grid_stride`) is built there too: the element
-samples placed on the scene axis and a weighting that is zero at every sample
-without an element are still just an `rx_field` and an `error_weighting`, so
-the engine does not know about it either. `python/parity.py` has a fifth slice
-for it, `scenario_caustic_hit_1f_grid2l.yml` at 300 GHz under that config's own
-30 dB noise block. The scenario configs now carry a 30 dB noise block of their
-own, so the noiseless slices force the noise off explicitly (`SNR_OFF`, what
-`--snr-db off` passes) rather than inherit it.
+golden vectors stay noiseless, and `python/compare_runs.py` refuses two runs
+whose `(snr_db, seed)` differ. The on-grid receiver (`rx_aperture.grid_stride`)
+is built there too: the element samples placed on the scene axis and a weighting
+that is zero at every sample without an element are still just an `rx_field` and
+an `error_weighting`, so the engine does not know about it either.
+
+**The data-driven start and the refinement pass** (`gerchberg_saxton.init:
+backprop`, `grid_search.refine`) did not touch the crate. `gs_solve` knows two
+modes. `warm_start` runs the engine's own twin of the legacy warm start
+(`src/warm_start.rs`), which is frozen with it so that earlier runs reproduce.
+`random` descends from the phase it is handed, unchanged, and that is how a
+start computed in Python reaches the engine: the back-propagated phase and, for
+several tones, the offset scan over the comb's true period are built in
+`src/rice_bend/mgs.py` for either engine, and Rust runs the descent from the
+result. `gs_reconstruct_multistart` and the sweep's refinement pass are Python
+orchestration over those descents, so with `--engine rust` every descent they
+run (the second start, the re-solves from both starts, the random route's
+reference solve) is the engine's.
+
+`python/parity.py` runs seven slices under the same bar:
+
+| Slice | Config | Tones (GHz) | Noise | Receiver | Start |
+|---|---|---|---|---|---|
+| 1 | `tiny_check.yml`, 3 candidates | 280, 300 | off | interpolated, λ/20 | legacy warm start (Rust's own twin) |
+| 2 | `scenario_caustic_hit_sparse.yml`, 6 candidates | 300 | off | interpolated, λ/2 | legacy (one tone: the seeded random draw) |
+| 3 | slice 1 again | 280, 300 | 20 dB | interpolated, λ/20 | legacy warm start |
+| 4 | slice 2 again | 300 | 10 dB | interpolated, λ/2 | legacy |
+| 5 | `scenario_caustic_hit_1f_grid2l.yml`, 6 candidates | 300 | the config's 30 dB | on-grid, λ/2 | legacy, forced in memory |
+| 6 | the same | 300 | the config's 30 dB | on-grid, λ/2 | `backprop` |
+| 7 | the same | 270, 300, 330 (±10 %) | the config's 30 dB | on-grid, λ/2 | `backprop`, with the offset scan in front |
+
+The scenario configs carry a 30 dB noise block of their own, so the noiseless
+slices force the noise off explicitly (`SNR_OFF`, what `--snr-db off` passes)
+rather than inherit it. The start of the on-grid slices is set in memory and
+never taken from the file: the caustic base config says `init: backprop`, so
+slice 5 overrides it to `warm_start` to stay the legacy on-grid slice, and
+slices 6 and 7 pass `backprop` explicitly. For the legacy starts `rust_solve`
+marshals the candidate for `gs_solve` by hand, an independent second copy of
+what `mgs._gs_solve_rust` does. For `backprop` it is `gs_reconstruct` with the
+engine forced to Rust, the path a sweep takes, so slices 6 and 7 check the
+descent from one identical, structured start.
 
 ## Build / dev loop
 
@@ -57,6 +87,9 @@ VIRTUAL_ENV=$PWD/.venv .venv/bin/maturin develop --release -m rust/Cargo.toml
 
 # end-to-end acceptance (M5):
 .venv/bin/python rust/python/parity.py
+
+# per-candidate timing, python against rust:
+.venv/bin/python rust/python/bench.py
 ```
 
 The golden vectors committed under `tests/data/` predate the 300 GHz retarget
@@ -101,20 +134,25 @@ the source of truth. The load-bearing traps, in one place:
 - **RNG stays in Python**; the drawn initial phase crosses the boundary, and the
   warm start's stage-1 solve reuses the same array (same seed ⇒ same draw).
 
-> **Note (2026-10-12): everything below predates the 300 GHz retarget.** The
-> timings, speedups and parity figures in the sections below (and the `parity.py`
-> figure in the table above) were measured on the 150 GHz configs and have not
-> been re-run. The command lines are kept as the record of what was timed; run
-> today they would time a different workload. The scenario configs now sample
-> the TX plate at λ/20 and the RX with a fixed λ/2 array, carry 30 dB of receiver
-> noise, and the fine grid has grown about 4× (164×76 = 12 464 candidates then,
-> 327×151 = 49 377 now, so `scenario_caustic_hit_pm5.yml` is no longer the
-> 12 464-point grid named below). Today's equivalents of the frequencies are
-> `--freq 300e9` for the single-tone workloads and `--freq 285e9 300e9 315e9` for
-> the pm5 comb. `python/bench.py` now times exactly those on the 327×151 grid,
-> with the noise forced off; `python/parity.py` runs `tiny_check.yml` at
-> 280/300 GHz, `scenario_caustic_hit_sparse.yml` at 300 GHz and (the on-grid
-> receiver) `scenario_caustic_hit_1f_grid2l.yml` at 300 GHz.
+> **Note (2026-10-12, updated 2026-10-13): everything below predates the 300 GHz
+> retarget.** The timings, speedups and parity figures in the sections below (and
+> the `parity.py` figure in the table above) were measured on the 150 GHz configs
+> and have not been re-run. The command lines are kept as the record of what was
+> timed; run today they would time a different workload. The scenario configs now
+> sample the TX plate at λ/20 and the RX with a fixed λ/2 array, carry 30 dB of
+> receiver noise, and the fine grid has grown about 4× (164×76 = 12 464
+> candidates then, 327×151 = 49 377 now, so `scenario_caustic_hit_pm5.yml` is no
+> longer the 12 464-point grid named below). `scenario_caustic_hit.yml` and
+> `scenario_caustic_hit_pm5.yml` have also moved to the on-grid receiver
+> (`rx_aperture.grid_stride: 2`), so the target and the weighting they hand the
+> engines are non-zero at the 80 element samples only. Today's equivalents of the
+> frequencies are `--freq 300e9` for the single-tone workloads and
+> `--freq 285e9 300e9 315e9` for the pm5 comb. `python/bench.py` times exactly
+> those on the 327×151 grid of `scenario_caustic_hit_pm5.yml`, with the noise
+> forced off. That config is kept as the benchmark's input and keeps the legacy
+> start for it: workload A times the engine's own warm start, which a config with
+> `init: backprop` would replace by a start computed in Python for both engines.
+> `python/parity.py` runs the seven slices listed above.
 
 ## Baseline timings (M0, this machine, 2026-09-19, python engine)
 

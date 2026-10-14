@@ -1,4 +1,6 @@
-"""Figures and rank-of-truth numbers for the final report (docs/final_report_new/).
+"""ARCHIVED: the 150 GHz result roots this reads were deleted on 2026-10-13, so it is kept for reference only.
+
+Figures and rank-of-truth numbers for the final report (docs/final_report_new/).
 
 Reads the four frequency-study summaries (coarse 64x48 and fine 164x76 grids,
 lambda/20 and lambda/2 receivers) and, for the fine-grid runs, each point's

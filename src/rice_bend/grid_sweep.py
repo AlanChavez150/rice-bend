@@ -16,16 +16,22 @@ a second pass over the candidates the sweep left near its minimum:
 
   1. the sweep: every usable point solved once, from the one start the config
      names, capped at grid_search.gs_overrides.max_iters. With a refine block,
-     a solve the flatness test stopped is solved once more from the OTHER start,
-     under the same cap, and the candidate keeps the lower of the two
+     a solve the flatness test stopped is solved again from the OTHER start,
+     under the same cap, and the candidate keeps the lower result
      (_reconstruct_candidate): the band of step 2 is taken on the sweep's
      losses, and a candidate whose one start stalled far above what the
-     location can reach would never enter it;
+     location can reach would never enter it. "Again from the other start" is
+     one more descent for a single tone. For several tones it is one descent
+     from EVERY offset that start's scan cannot tell apart
+     (mgs.gs_reconstruct_multistart: the best, and any within
+     mgs.OFFSET_NEAR_TIE_RTOL of it, mgs.OFFSET_NEAR_TIE_MAX at most), the
+     lowest of them kept;
   2. the refinement (_refine_candidates): each candidate whose sweep loss is
      within `refine.within` x the sweep's minimum is solved again — under the
      refinement's own, higher cap and tighter stop threshold, from two starts
-     (mgs.gs_reconstruct_multistart) — and takes that result when it ends below
-     its sweep loss.
+     (mgs.gs_reconstruct_multistart), each of them, for several tones, again
+     from every near-tied offset — and takes that result when it ends below its
+     sweep loss.
 
 The sweep's limits suit the thousands of candidates far from the TX; the ranking
 is decided by the few hundred near it, which is where the iteration cap cuts the
@@ -239,11 +245,16 @@ def _reconstruct_candidate(p: "GridPoint", shared: "SharedMeasurement",
     after 47 to 69 iterations at 20-29x the sweep's minimum on four candidates
     which the random start takes to 1.4-1.8x of it. The refinement cannot repair
     that: it selects by the sweep's loss, and those four sit outside any band
-    that would be affordable. So such a candidate is solved once more, from the
+    that would be affordable. So such a candidate is solved again, from the
     other start (_other_start), under the SAME cap and threshold, and keeps the
-    lower loss — the whole result of that one solve, as in the refinement. A
-    solve that ran into the cap is left alone: it was still descending, and
-    solving every candidate twice is the 2x the second pass exists to avoid.
+    lower loss — the whole result of that one solve, as in the refinement. For
+    a single tone that is one more descent. For several tones the other start
+    goes through gs_reconstruct_multistart, which descends from every offset
+    its scan cannot tell apart (up to mgs.OFFSET_NEAR_TIE_MAX, usually one) and
+    hands back the lowest; when the other start is the random one, its
+    reference solve comes in front of those. A solve that ran into the cap is
+    left alone: it was still descending, and solving every candidate twice is
+    the 2x the second pass exists to avoid.
 
     What this does NOT give is a sweep loss the band is certain to cover. A
     candidate's sweep loss is only an upper bound on what its location reaches,
@@ -359,9 +370,12 @@ class CandidateResult:
     Every solve-result field (the profile, the losses, `n_iters_run`,
     `stop_reason`, `seed`, `loss_full`) describes ONE solve, and in a run with a
     refine block `start` names the start that solve began from. A candidate can
-    have been solved up to four times — the sweep's solve, the sweep's second
+    have been solved from up to four starts — the sweep's own, the sweep's second
     start if the first was stopped by the flatness test, and the refinement's two
-    — and what is stored is whichever ended lowest, whole, never a mix:
+    — and, for several tones, each start after the sweep's own from every offset
+    its scan could not tell apart (mgs.OFFSET_NEAR_TIE_MAX at most), so the
+    number of descents can be higher than four. What is stored is whichever
+    descent ended lowest, whole, never a mix:
 
     - after the sweep, `start` is the config's init ('backprop' | 'random' |
       'warm_start'), or the other start's name where the second solve won;
@@ -639,8 +653,9 @@ def run_grid_search(config: SimConfig, freqs: List[float], *, limit: Optional[in
     without a grid_search.refine block (the comment at the check says why).
 
     With a grid_search.refine block two things are added. In the sweep, a solve
-    stopped by the flatness test is solved once more from the other start and the
-    candidate keeps the lower result (_reconstruct_candidate). After it comes
+    stopped by the flatness test is solved again from the other start (for
+    several tones, from every near-tied offset of that start) and the candidate
+    keeps the lowest result (_reconstruct_candidate). After it comes
     the refinement pass (_refine_candidates): the candidates near the sweep's
     minimum are solved again, under the block's cap and stop threshold and from
     two starts, and the returned run's candidates carry the lowest of their

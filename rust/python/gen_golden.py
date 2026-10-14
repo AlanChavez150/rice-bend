@@ -102,9 +102,10 @@ def gen_conv_cases():
 
 def _candidate_setup(freqs):
     """The sweep's own construction of one usable candidate on tiny_check:
-    MGS + measure + run_grid_search's gs_overrides/seed mutation
-    (grid_sweep.py:280-287) + enumerate_grid to pick a point valid at every
-    frequency + _reconstruct_candidate's box amplitude (grid_sweep.py:137-143)."""
+    MGS + measure + run_grid_search's gs_overrides/seed mutation (step 2 of
+    grid_sweep.run_grid_search) + enumerate_grid to pick a point valid at every
+    frequency + the box amplitude every candidate solve is handed
+    (grid_sweep._candidate_problem)."""
     cfg = load_config(REPO / "configs" / "tiny_check.yml")
     m = MGS(freqs, cfg)
     m.measure()

@@ -57,8 +57,14 @@ STUDY_SCHEMA_VERSION = 8   # v4: points[] gained ref_freq_hz (nullable)
 #                            v8: points[] gained refine_status (null: no refinement
 #                                configured, else 'done' | 'skipped') and n_refined
 STUDY_NAME_FILE = "study.json"
+# The caustic campaign base config. A study is a series of full sweeps, so its
+# default has to be a config whose sweep ranks locations and not solver luck: the
+# on-grid receiver, the data-driven start (gerchberg_saxton.init: backprop) and the
+# refinement pass (grid_search.refine). The file lists one tone, 300 GHz: the
+# frequency and tx_shift series build their combs about it, and the snr series
+# solve with it as it stands.
 STUDY_DEFAULT_CONFIG = (Path(__file__).resolve().parents[2] / "configs"
-                        / "scenario_caustic_hit_pm5.yml")
+                        / "scenario_caustic_hit_1f_grid2l.yml")
 
 # bandwidth half-widths (+/- % of the base config's centre frequency) — dense at
 # the small end where the error curve moves fastest; 0 is the no-diversity
@@ -68,7 +74,7 @@ BANDWIDTH_PCTS = (0.0, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 13.0, 16.0, 20.0)
 # comparison comb), about the same centre
 TX_SHIFT_COMB_PCT = 5.0
 # rigid TX translations (m): dense at small s where the captured energy falls
-# fastest; 0.115 reproduces configs/scenario_caustic_miss.yml exactly
+# fastest; 0.115 is the TX shift of configs/archive/scenario_caustic_miss.yml
 TX_SHIFTS_M = (0.0, 0.010, 0.020, 0.030, 0.045, 0.065, 0.090, 0.115, 0.130)
 # peak-referenced receiver SNRs (dB): every 5 dB from 0 through 40
 SNR_DBS = (0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0)

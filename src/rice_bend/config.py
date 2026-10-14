@@ -1,6 +1,10 @@
 """Pydantic models for the simulation configuration .yml.
-See configs/caustic_config.yml, directional_config.yml, bessel_config.yml and
-focus_config.yml."""
+See configs/caustic_config.yml (the `mgs` default) for a commented general config,
+and configs/scenario_caustic_hit_1f_grid2l.yml for a campaign config with the
+on-grid receiver, the data-driven start and the refinement block. The general
+configs of the other three beam types are archived and not maintained:
+configs/archive/directional_config.yml, configs/archive/bessel_config.yml and
+configs/archive/focus_config.yml."""
 
 import argparse
 from pathlib import Path

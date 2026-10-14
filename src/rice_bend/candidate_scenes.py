@@ -61,8 +61,8 @@ def _display_freq_index(freqs: List[float], scene_freq: Optional[float]) -> int:
 
 
 def _manifest_freqs(manifest: dict) -> List[float]:
-    """The manifest's frequency list — schema 3 (`frequencies`) or the schema-2
-    scalar `freq_hz` as a length-1 list."""
+    """The manifest's frequency list — schema 3 and 4 (`frequencies`) or the
+    schema-2 scalar `freq_hz` as a length-1 list."""
     if "frequencies" in manifest:
         return [float(e["freq_hz"]) for e in manifest["frequencies"]]
     return [float(manifest["freq_hz"])]
@@ -216,9 +216,12 @@ def scenes_from_manifest(run_dir: Path,
                          scene_freq: Optional[float] = None) -> SceneContext:
     """Adapter: a SceneContext from a saved run (reads each candidate npz).
 
-    Handles both layouts: a schema-3 joint run (frequency list, stacked TX
-    profiles, indexed RX aperture keys — rendered at `scene_freq`, defaulting to
-    the centre frequency) and a schema-2 per-frequency run (scalar keys)."""
+    Handles both layouts: a joint run (schema 3, or schema 4 with a refinement
+    block: frequency list, stacked TX profiles, indexed RX aperture keys —
+    rendered at `scene_freq`, defaulting to the centre frequency) and a schema-2
+    per-frequency run (scalar keys). A schema-4 candidate's npz holds its stored
+    solve, so a refined candidate is rendered from the profile its loss belongs
+    to."""
     run_dir = Path(run_dir)
     with open(run_dir / "candidate_beams.json") as f:
         m = json.load(f)
@@ -232,7 +235,7 @@ def scenes_from_manifest(run_dir: Path,
                                     d["aper_axis"], d["aper_profile"], c["stop_reason"]))
     gt = m["ground_truth"]
     i = _display_freq_index(_manifest_freqs(m), scene_freq)
-    if "frequencies" in m:   # schema 3: joint layout
+    if "frequencies" in m:   # schema 3 and 4: joint layout
         wavelength = float(m["frequencies"][i]["wavelength_m"])
         tx_profile = meas["real_tx_aper_profile"][i]
         rx_axis = meas[f"rx_aper_axis_{i:02d}"]

@@ -94,7 +94,8 @@ def caustic_profile(
     # The plate's far edge c - a*prop_len^2 and the aperture edge cut to it (x_min
     # for a > 0) are the same number computed two ways and can land an ULP apart,
     # which would drop the edge sample of a window cut exactly to the support
-    # (scenario_caustic_miss, scenario_caustic_partial, any shifted plate). 1e-9 m
+    # (configs/archive/scenario_caustic_miss.yml,
+    # configs/archive/scenario_caustic_partial.yml, any shifted plate). 1e-9 m
     # is far below any dx and far above that rounding. np.interp clamps to the end
     # values, so a sample let in by the tolerance takes the edge phase.
     inside = (x_axis >= x_sorted[0] - 1e-9) & (x_axis <= x_sorted[-1] + 1e-9)

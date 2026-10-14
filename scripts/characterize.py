@@ -81,7 +81,7 @@ def manifest_without_run_identity(manifest: dict) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# The five checks
+# The six checks
 # --------------------------------------------------------------------------- #
 def check1_mgs_tiny(d: Path) -> dict:
     """`mgs` on tiny_check: the solver's stop state, the captured-history indices and
@@ -120,15 +120,46 @@ def check2_mgs_caustic_hit(d: Path) -> dict:
     }
 
 
+def _refine_digest(m: dict) -> dict:
+    """What a grid_search.refine block adds to a run's manifest (schema 4), for the
+    digest: the schema number, the whole gs.refine block (the settings, the status,
+    the sweep's second-start counts and what the pass changed; none of it depends
+    on wall-clock time or on the worker count) and, per candidate, the start its
+    stored solve began from, whether the pass re-solved it and the loss the sweep
+    had found.
+
+    `refined_never_above_sweep` pins the replacement rule: a re-solve replaces the
+    sweep's result only when it ends strictly lower, so no refined candidate's
+    final loss is above its sweep loss.
+    """
+    cands = m["candidates"]
+    return {
+        "schema_version": m["schema_version"],
+        "block": m["gs"]["refine"],
+        "start": [c["start"] for c in cands],
+        "refined": [c["refined"] for c in cands],
+        "sweep_loss": [c["sweep_loss"] for c in cands],
+        "refined_never_above_sweep": all(c["final_loss"] <= c["sweep_loss"]
+                                         for c in cands if c["refined"]),
+    }
+
+
 def _grid_digest(d: Path) -> dict:
-    """Digest of one joint (schema-3) grid run — the SAME shape whatever the
-    frequency count, which is itself the invariant: a multi-frequency run is one
-    flat directory now, not freq_<GHz>/ subdirs.
+    """Digest of one joint grid run (manifest schema 3, or schema 4 when the config
+    had a grid_search.refine block) — the SAME shape whatever the frequency count,
+    which is itself the invariant: a multi-frequency run is one flat directory
+    now, not freq_<GHz>/ subdirs.
 
     `joint_is_mean_of_valid` pins the loss-combination rule: every candidate's
     joint residual must equal the mean of its per-frequency components over the
     frequencies that actually contributed (all of them, at F=1 — which is also
-    the N=1-reduces-through-the-same-path guarantee).
+    the N=1-reduces-through-the-same-path guarantee). In a schema-4 run the two
+    are the STORED solve's, the sweep's or the re-solve's, so the rule is checked
+    on a refined candidate as well.
+
+    A schema-4 run's digest carries one more key, `refine` (_refine_digest). A
+    schema-3 run's does not, so the digests of checks 3-5 are what they were before
+    the refinement pass existed.
     """
     m = read_json(d / "candidate_beams.json")
     files, n_cand_files = file_list(d)
@@ -138,6 +169,7 @@ def _grid_digest(d: Path) -> dict:
         j == float(np.mean([v for v in row if v is not None]))
         for j, row in zip(joint, per_freq)
     )
+    refine = {"refine": _refine_digest(m)} if "refine" in m["gs"] else {}
     return {
         "counts": m["counts"],
         "ground_truth": m["ground_truth"],
@@ -155,6 +187,21 @@ def _grid_digest(d: Path) -> dict:
         "measurement_sha256": npz_content_hash(d / "measurement.npz"),
         "files": files,
         "n_candidate_files": n_cand_files,
+        **refine,
+    }
+
+
+def _serial_vs_parallel(serial_dir: Path, parallel_dir: Path) -> dict:
+    """One sweep run twice, serially and across workers: whether the two manifests
+    agree once the run directory and the CLI are set aside, whether candidate 3's
+    arrays agree, and the parallel run's own digest."""
+    ser = manifest_without_run_identity(read_json(serial_dir / "candidate_beams.json"))
+    par = manifest_without_run_identity(read_json(parallel_dir / "candidate_beams.json"))
+    return {
+        "manifest_matches_serial": ser == par,
+        "cand_0003_matches_serial": (npz_content_hash(serial_dir / "candidates" / "cand_0003.npz")
+                                     == npz_content_hash(parallel_dir / "candidates" / "cand_0003.npz")),
+        "digest": _grid_digest(parallel_dir),
     }
 
 
@@ -167,14 +214,7 @@ def check4_grid_parallel(serial_dir: Path, parallel_dir: Path) -> dict:
     """The same sweep across 4 workers. Covers seeding, worker ordering and dtype at
     once — Stage 3e (one map_workers replacing four pool copies) is the riskiest
     change in the refactor and this is what catches it."""
-    ser = manifest_without_run_identity(read_json(serial_dir / "candidate_beams.json"))
-    par = manifest_without_run_identity(read_json(parallel_dir / "candidate_beams.json"))
-    return {
-        "manifest_matches_serial": ser == par,
-        "cand_0003_matches_serial": (npz_content_hash(serial_dir / "candidates" / "cand_0003.npz")
-                                     == npz_content_hash(parallel_dir / "candidates" / "cand_0003.npz")),
-        "digest": _grid_digest(parallel_dir),
-    }
+    return _serial_vs_parallel(serial_dir, parallel_dir)
 
 
 def check5_multifreq(d: Path) -> dict:
@@ -188,6 +228,24 @@ def check5_multifreq(d: Path) -> dict:
     return _grid_digest(d)
 
 
+def check6_refine_serial(d: Path) -> dict:
+    """The caustic campaign base config's sweep, run serially: the data-driven start
+    (gerchberg_saxton.init: backprop), the sweep's second start and the refinement
+    pass. The only schema-4 run in the net, so the only digest with a `refine`
+    key: the refine block, and each candidate's start, refined flag and sweep
+    loss beside the losses checks 3 and 4 already digest."""
+    return _grid_digest(d)
+
+
+def check6_refine_parallel(serial_dir: Path, parallel_dir: Path) -> dict:
+    """The same refined sweep across 4 workers. The refinement dispatches its
+    re-solves through the same parallel map as the sweep, and the refine block
+    is written into the manifest, so the manifest comparison covers it: the
+    block, and which start each candidate's stored solve came from, must not
+    depend on the worker count."""
+    return _serial_vs_parallel(serial_dir, parallel_dir)
+
+
 def build_digest(scratch: Path) -> dict:
     return {
         "check1_mgs_tiny": check1_mgs_tiny(scratch / "c1_mgs_tiny"),
@@ -196,6 +254,9 @@ def build_digest(scratch: Path) -> dict:
         "check4_grid_parallel": check4_grid_parallel(scratch / "c3_grid_j1",
                                                      scratch / "c4_grid_j4"),
         "check5_multifreq": check5_multifreq(scratch / "c5_multifreq"),
+        "check6_refine_serial": check6_refine_serial(scratch / "c6_refine_j1"),
+        "check6_refine_parallel": check6_refine_parallel(scratch / "c6_refine_j1",
+                                                         scratch / "c6_refine_j4"),
     }
 
 

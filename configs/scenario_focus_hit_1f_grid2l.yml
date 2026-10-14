@@ -1,12 +1,19 @@
-# SINGLE frequency (300 GHz, the design center) on the HIGH-RESOLUTION grid, FOCUS beam:
-# the twin of scenario_caustic_hit_1f_grid2l.yml with the beam block of
-# scenario_focus_hit.yml. Same scene, TX window, RX array, noise, seeds, GS settings and
-# 327x151 grid_search (49,377 candidate spots; ~2λ cells at 300 GHz: z step 1.99 mm,
-# x step 2.00 mm), so the true TX location and the candidate grid match the caustic
-# base config and the residual maps compare like for like. gerchberg_saxton.max_iters
-# is 5000 there and here: the single solve at the true TX converges after 1424
-# iterations; the sweep keeps its own 800 cap through gs_overrides.
-# scenario_focus_hit_1f_grid2l_lambda20.yml is its dense-RX control.
+# CAMPAIGN BASE CONFIG, FOCUS beam: a SINGLE frequency (300 GHz, the design center)
+# on the HIGH-RESOLUTION grid. The twin of scenario_caustic_hit_1f_grid2l.yml with
+# the beam block of configs/archive/scenario_focus_hit.yml. Same scene, TX window,
+# RX array, noise, seeds, GS settings (the data-driven start included), refinement
+# and 327x151 grid_search (49,377 candidate spots; ~2λ cells at 300 GHz: z step
+# 1.99 mm, x step 2.00 mm), so the true TX location and the candidate grid match the
+# caustic base config and the residual maps compare like for like. mgs-study derives
+# both campaign series from this file (--study frequency, --study snr), as it does
+# from the caustic one. With gerchberg_saxton.init: backprop the single solve at the
+# true TX converges after 223 iterations at 30 dB (one start) where the random start
+# needed 1424. gerchberg_saxton.max_iters is 5000 there and here; the sweep keeps
+# its own 800 cap through gs_overrides, and grid_search.refine re-solves the
+# candidates it leaves near its minimum.
+# configs/archive/scenario_focus_hit_1f_grid2l_lambda20.yml was its dense-RX
+# control; it is archived with the lambda/20 receiver, the legacy start and no
+# refinement, so the pair no longer differs in the receiver alone.
 #
 # Scenario: focus (lens) beam HITS the RX aperture: the lens sits where the caustic
 # plate does (x_center=-0.101, z=0.3) and its focal point is on the centre of the window.
@@ -49,6 +56,16 @@ plot_path: scenario_focus_hit_1f_grid2l.png
 frequencies: [300.0e9]
 
 gerchberg_saxton:
+  init: backprop           # start every solve from the DATA, not from a random draw: the reference
+                           # tone's measurement back-propagated to the candidate plane, its phase
+                           # unwrapped where the plate lights the RX window and continued at
+                           # constant slope where it does not; with several tones the absolute
+                           # offset is then scanned over the comb's TRUE period. The legacy start
+                           # (warm_start, the default) scans a range that is a period only when
+                           # f_ref/df is an integer, and takes its phase from a random-start solve
+                           # of the reference tone, which is not unique where part of the beam
+                           # misses the RX window. A sweep from this start is refused without
+                           # grid_search.refine (below)
   max_iters: 5000
   convergence_count: 10
   convergence_threshold: -1.0e-8
@@ -78,3 +95,14 @@ grid_search:
   aperture: {width: 0.072, dx: 0.00025}
   seed: 0
   gs_overrides: {max_iters: 800}
+  # The second pass. The sweep's limits suit the thousands of candidates far from the
+  # TX and not the few that decide the answer: its 800 cap is below what candidates
+  # near the truth need, gerchberg_saxton.convergence_threshold is an ABSOLUTE loss
+  # slope that stops a high-SNR descent short of its floor, and no single start wins
+  # at every location. With this block, a sweep solve that the flatness test stopped
+  # is solved again from the other start, and after the sweep every candidate whose
+  # loss is within `within` x the sweep's minimum is re-solved from both starts under
+  # this max_iters and convergence_threshold, taking the result only where it is
+  # lower. If more than max_candidates qualify, the pass is SKIPPED and the run is
+  # marked: re-solving only the best N would force the answer into that subset.
+  refine: {within: 10.0, max_iters: 6000, convergence_threshold: -1.0e-10, max_candidates: 12000}

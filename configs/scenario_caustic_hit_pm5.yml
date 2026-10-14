@@ -1,13 +1,26 @@
-# Frequency-comparison case 2 of 3: three frequencies, center 300 GHz ±5%.
-# Compare against scenario_caustic_hit_1f.yml (single frequency) and
-# scenario_caustic_hit_pm10.yml (±10%): identical scene, seed and GS settings —
-# the frequency list is the only variable across the three cases. (1f/pm10 keep
-# the original 64x48 grid; this file runs the fine 327x151 one for the frequency study.)
+# Three frequencies, center 300 GHz ±5%, on the fine 327x151 grid.
+#
+# Kept as the input of the Rust benchmark: rust/python/bench.py times the two engines
+# on this file's three-tone comb, and the rust side of that timing includes the
+# engine's OWN warm start. So this file keeps the LEGACY start (no
+# gerchberg_saxton.init, so warm_start, and no grid_search.refine): the data-driven
+# start is computed in python for both engines, and with it the start would drop
+# out of the comparison. The receiver is the campaign's, the lambda/2 array ON the
+# solver grid (rx_aperture.grid_stride: 2). For a study use a campaign base config
+# (scenario_{caustic,bessel,focus}_hit_1f_grid2l.yml): mgs-study builds its combs,
+# ±5 % among them, from those.
+#
+# This was frequency-comparison case 2 of 3. The other two are archived and keep the
+# interpolated receiver (configs/archive/scenario_caustic_hit_1f.yml, single
+# frequency, and configs/archive/scenario_caustic_hit_pm10.yml, ±10%; both on the
+# original 64x48 grid), so the frequency list is no longer the only variable across
+# the three.
 #
 # Scenario: caustic beam HITS the RX aperture (big arc curves into the window).
 # RX window: centered x=0, width 0.04 m. RX at z=0; TX projects -Z. TX width 0.072 m
-# (the caustic support), height z=0.3. RX array at lambda/2 (80 elements, one fixed
-# pitch for all three tones); TX plate sampled at lambda/20 (1440 samples); 30 dB
+# (the caustic support), height z=0.3. RX array at lambda/2 on the solver grid (80
+# elements, every 2nd scene x sample in the window, one physical array for all three
+# tones); TX plate sampled at lambda/20 (1440 samples); 30 dB
 # receiver noise. Verified (300 GHz): big-arc caustic (a=0.8): launches ~-0.10, curves
 # into the RX. beam_peak_x=+0.0031, FWHM=0.0178, rx_peak/peak=1.000,
 # energy_frac_in_rx=0.840 -> HIT (the peak is not centred in the ±0.02 m RX window:
@@ -34,9 +47,12 @@ tx_aperture:
 rx_aperture:
   x_center: 0.0
   width: 0.04
-  dx: 0.000499654          # lambda/2 at 300 GHz (lambda = 0.999308 mm), a FIXED pitch in metres: one
-                           # physical array for every tone. sampled_axis turns the nominal pitch
-                           # into int(width/dx) = 80 elements across the window (realized 0.506 mm)
+  grid_stride: 2           # elements ON the solver grid: every 2nd scene x sample in the window, 80
+                           # elements at 0.5002 mm pitch (lambda/2 at 300 GHz to 0.1 %; lambda =
+                           # 0.999308 mm), one physical array for every tone. The field is sampled at
+                           # those points directly and the loss is scored only there. `dx` instead
+                           # would put the elements on their own axis and interpolate them onto the
+                           # 0.25 mm grid, leaving the solver's target about -18 dB off the true field
 
 plot_path: scenario_caustic_hit_pm5.png
 

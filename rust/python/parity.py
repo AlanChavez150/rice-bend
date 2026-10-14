@@ -14,15 +14,26 @@ Run from the repo root:
 Seven slices: the two noiseless ones (tiny_check joint F=2 at 280/300 GHz; the
 characterize caustic_hit_sparse F=1 slice at 300 GHz), the same two with receiver
 noise on the measurement (noise.snr_db 20 / 10 dB), one on the ON-GRID receiver
-(caustic_hit_1f_grid2l, F=1 at 300 GHz, rx_aperture.grid_stride: 2) under that
-config's own 30 dB noise block, and two on the same config and noise with the
-DATA-DRIVEN start (gerchberg_saxton.init overridden to 'backprop' in memory): F=1
-at 300 GHz and F=3 at 270/300/330 GHz (±10 %). The noiseless slices force the
-noise OFF (SNR_OFF, what the CLI's `--snr-db off` passes): the scenario configs
-carry a 30 dB noise block of their own, which a slice would otherwise inherit — as
-the on-grid slices deliberately do. Noise is added in python by MGS.measure()
-before the engine boundary, so both engines get the identical noisy arrays — the
-noisy slices check the solver on a measurement that is no longer an exact field.
+with the LEGACY start (caustic_hit_1f_grid2l, F=1 at 300 GHz,
+rx_aperture.grid_stride: 2) under that config's own 30 dB noise block, and two on
+the same config and noise with the DATA-DRIVEN start: F=1 at 300 GHz and F=3 at
+270/300/330 GHz (±10 %). The noiseless slices force the noise OFF (SNR_OFF, what
+the CLI's `--snr-db off` passes): the scenario configs carry a 30 dB noise block
+of their own, which a slice would otherwise inherit — as the on-grid slices
+deliberately do. Noise is added in python by MGS.measure() before the engine
+boundary, so both engines get the identical noisy arrays — the noisy slices check
+the solver on a measurement that is no longer an exact field.
+
+The start of every on-grid slice is set IN MEMORY, never taken from the file. The
+caustic base config says `init: backprop` (it is a campaign config), so the legacy
+slice overrides it to 'warm_start' — at one tone, the seeded random draw, which
+crosses the engine boundary as the draw plus a mode. Left to the file it would be a
+third backprop slice, and no slice would put a legacy start on a comb-shaped
+measurement. The two backprop slices pass 'backprop' explicitly for the same
+reason: what a slice tests must not change when a config's start does. The first
+four slices take the legacy start from their configs (tiny_check.yml and
+scenario_caustic_hit_sparse.yml set no init, so warm_start), which run_slice
+prints.
 
 The on-grid slice covers the other shape a measurement can take. The interpolated
 receiver (rx_aperture.dx) hands the engines a target and a weighting that are dense
@@ -107,7 +118,10 @@ def rust_solve(tx_z, amp, x_axis, rx_z, channels, params, ref_freq):
 
 
 def sweep_setup(cfg_path, freqs, *, snr_db=None, noise_seed=0, init=None):
-    """Steps 1-4 of run_grid_search (grid_sweep.py:243-317), without persistence.
+    """Steps 1-4 of grid_sweep.run_grid_search (the measurement, the grid-only GS
+    overrides, the enumeration, the shared payload), without persistence and
+    without its refinement pass or its init/refine check: a slice calls the solver
+    directly, one start per candidate.
     snr_db follows the CLI's --snr-db: a number of dB, SNR_OFF to force a noiseless
     measurement, or None to keep the config's noise block — which is 30 dB in every
     scenario config (tiny_check.yml has none), so a slice meant to be noiseless must
@@ -215,14 +229,16 @@ def main():
     # the ON-GRID receiver (rx_aperture.grid_stride: 2): the target and the weighting
     # are non-zero at the 80 element samples only, not across the whole RX window.
     # snr_db=None keeps the config's OWN noise block (30 dB, seed 0), so this is the
-    # measurement the campaign base config actually solves against
-    ok &= run_slice("caustic_hit_1f_grid2l limit-6, on-grid RX",
+    # measurement the campaign base config actually solves against. The LEGACY start,
+    # forced in memory: the config itself says backprop (see the module docstring).
+    # At one tone warm_start is the seeded random draw, hand-marshaled by rust_solve
+    ok &= run_slice("caustic_hit_1f_grid2l limit-6, on-grid RX, legacy start",
                     REPO / "configs" / "scenario_caustic_hit_1f_grid2l.yml",
-                    [300e9], limit=6)
-    # the DATA-DRIVEN start (init: backprop) on that same config and noise. The
-    # start is built in python for both engines and rust descends from it as handed
-    # over, so these check the descent from one identical structured start: a
-    # single tone first (the back-propagated phase alone)...
+                    [300e9], limit=6, init="warm_start")
+    # the DATA-DRIVEN start (init: backprop, passed explicitly) on that same config
+    # and noise. The start is built in python for both engines and rust descends
+    # from it as handed over, so these check the descent from one identical
+    # structured start: a single tone first (the back-propagated phase alone)...
     ok &= run_slice("caustic_hit_1f_grid2l limit-6, backprop start, 1 tone",
                     REPO / "configs" / "scenario_caustic_hit_1f_grid2l.yml",
                     [300e9], limit=6, init="backprop")

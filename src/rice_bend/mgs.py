@@ -1539,8 +1539,10 @@ class MGS():
         Otherwise the elements sit on an axis of their own at pitch `dx`, which
         defaults to wavelength/20 when left null -- so the element count is
         per-frequency -- and is what sets the receiver element count, the
-        independent variable in the scenario_caustic_hit_lambda2/lambda4
-        experiments. `scene_x_axis` is not used on this path."""
+        independent variable of the archived pitch experiments
+        (configs/archive/scenario_caustic_hit_lambda2.yml and
+        configs/archive/scenario_caustic_hit_lambda4.yml). `scene_x_axis` is not
+        used on this path."""
         if rx_cfg.grid_stride is not None:
             return SimAperature.on_grid(
                 x_min=rx_cfg.x_center - rx_cfg.width / 2.0,
@@ -1647,12 +1649,12 @@ class MGS():
         rs.rs(x, z_axis, ...)[k], since each row is computed independently from u0.
 
         The round trip through rx_ap.aper_axis is kept deliberately -- it models the
-        receiver element spacing (lambda/2 vs lambda/20), which is the whole point of
-        scenario_caustic_hit_lambda2.yml. It is also a LINEAR interpolation of a
-        field whose phase turns between scene samples: the elements of an array on
-        its own axis fall between grid points, so what they are handed is the
-        chord, not the field (about -31 dB off it for the 80-element lambda/2 array
-        at 300 GHz).
+        receiver element spacing (lambda/2 vs lambda/20), which was the whole point of
+        configs/archive/scenario_caustic_hit_lambda2.yml. It is also a LINEAR
+        interpolation of a field whose phase turns between scene samples: the
+        elements of an array on its own axis fall between grid points, so what they
+        are handed is the chord, not the field (about -31 dB off it for the
+        80-element lambda/2 array at 300 GHz).
 
         An on-grid receiver (rx_ap.grid_idx, from rx_aperture.grid_stride) has no
         round trip to make: its elements are scene x samples, so the row is read at

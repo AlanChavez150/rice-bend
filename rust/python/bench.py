@@ -10,9 +10,18 @@ timing includes the python-side kernel build and marshaling.
     .venv/bin/python rust/python/bench.py [--candidates 16]
 
 Workloads:
-  A  configs/scenario_caustic_hit_pm5.yml — the study's default: 3-tone comb
-     (285/300/315 GHz), warm start, N=2400, max_iters 800, 327x151 grid
+  A  configs/scenario_caustic_hit_pm5.yml — the ±5 % comb of the frequency study:
+     3 tones (285/300/315 GHz), warm start, N=2400, max_iters 800, 327x151 grid
   B  the same candidates at 300 GHz alone (the 1-frequency anchor, random init)
+
+That config is kept for this script and keeps the LEGACY start (no
+gerchberg_saxton.init, so warm_start; no grid_search.refine): rust runs its own
+twin of the warm start, so workload A times the two engines' starts as well as
+their descents. The campaign configs start from `init: backprop`, which is computed
+in python for both engines; a workload on one of them would time one shared start
+plus the two descents. The receiver is the campaign's on-grid lambda/2 array
+(rx_aperture.grid_stride: 2), so the arrays timed are the comb-shaped target and
+weighting a campaign sweep hands the engines.
 
 Both are timed on a NOISELESS measurement, as they always were: the config's 30 dB
 noise block is forced off (SNR_OFF, what the CLI's `--snr-db off` passes), so the
