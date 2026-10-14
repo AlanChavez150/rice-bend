@@ -11,20 +11,20 @@
 #   (rx_aperture.dx), so the solver's target is the field the elements sampled and
 #   nothing else;
 # - the start: gerchberg_saxton.init: backprop, the phase of the back-propagated
-#   measurement in place of a random draw. The single solve at the true TX converges
-#   after 873 iterations at 30 dB (one start) where the random start needed 1488.
-#   gerchberg_saxton.max_iters stays 5000 for that solve; the sweep keeps its own
-#   800 cap through gs_overrides;
-# - the refinement: grid_search.refine re-solves the candidates the sweep leaves
-#   near its minimum, under a higher cap and a tighter stop threshold and from both
-#   starts, so the ranking near the TX is not decided by the sweep's cap or by the
-#   luck of one start.
+#   measurement in place of a random draw. The single solve at the true TX converged
+#   after 873 iterations at 30 dB where the random start needed 1488 (both measured
+#   under the earlier -1e-8 stop threshold);
+# - one solver setting for every solve: gerchberg_saxton.max_iters 3000 and
+#   convergence_threshold -1e-10, with no grid_search.gs_overrides, so every
+#   candidate of the sweep gets exactly one solve from that start under the same
+#   settings as a plain mgs run, --true-mgs and scripts/true_tx_table.py.
 #
 # It began as a copy of configs/archive/scenario_caustic_hit_1f.yml (the 64x48 grid,
 # the interpolated receiver, the legacy start).
 # configs/archive/scenario_caustic_hit_1f_grid2l_lambda20.yml was its dense-RX
-# control; it is archived with the lambda/20 receiver, the legacy start and no
-# refinement, so the pair no longer differs in the receiver alone.
+# control; it is archived with the lambda/20 receiver, the legacy start and the
+# earlier solver settings (5000 cap, -1e-8 stop, the sweep at 800 through
+# gs_overrides), so the pair no longer differs in the receiver alone.
 #
 # Scenario: caustic beam HITS the RX aperture (big arc curves into the window).
 # RX window: centered x=0, width 0.04 m. RX at z=0; TX projects -Z. TX width 0.072 m
@@ -75,11 +75,12 @@ gerchberg_saxton:
                            # (warm_start, the default) scans a range that is a period only when
                            # f_ref/df is an integer, and takes its phase from a random-start solve
                            # of the reference tone, which is not unique where part of the beam
-                           # misses the RX window. A sweep from this start is refused without
-                           # grid_search.refine (below)
-  max_iters: 5000
+                           # misses the RX window
+  max_iters: 3000          # the cap of EVERY solve: grid_search has no gs_overrides, so the sweep
+                           # (each candidate solved once), mgs, --true-mgs and
+                           # scripts/true_tx_table.py all solve under the same settings
   convergence_count: 10
-  convergence_threshold: -1.0e-8
+  convergence_threshold: -1.0e-10
   lr0: 0.05
   bt_shrink: 0.5
   bt_tries: 8
@@ -105,15 +106,3 @@ grid_search:
   x_center: {min: -0.15, max: 0.15, num: 151}
   aperture: {width: 0.072, dx: 0.00025}
   seed: 0
-  gs_overrides: {max_iters: 800}
-  # The second pass. The sweep's limits suit the thousands of candidates far from the
-  # TX and not the few that decide the answer: its 800 cap is below what candidates
-  # near the truth need, gerchberg_saxton.convergence_threshold is an ABSOLUTE loss
-  # slope that stops a high-SNR descent short of its floor, and no single start wins
-  # at every location. With this block, a sweep solve that the flatness test stopped
-  # is solved again from the other start, and after the sweep every candidate whose
-  # loss is within `within` x the sweep's minimum is re-solved from both starts under
-  # this max_iters and convergence_threshold, taking the result only where it is
-  # lower. If more than max_candidates qualify, the pass is SKIPPED and the run is
-  # marked: re-solving only the best N would force the answer into that subset.
-  refine: {within: 10.0, max_iters: 6000, convergence_threshold: -1.0e-10, max_candidates: 12000}

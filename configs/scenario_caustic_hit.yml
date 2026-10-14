@@ -2,11 +2,10 @@
 #
 # Kept for scripts/characterize.sh: check 2 runs this file pinned to 300 GHz, the
 # net's one full-resolution single solve. It therefore keeps the LEGACY start (no
-# gerchberg_saxton.init, so warm_start, and no grid_search.refine): the check pins
-# the solver the earlier results were made with. The receiver is the campaign's, the
-# lambda/2 array ON the solver grid (rx_aperture.grid_stride: 2). For the campaign
-# itself use scenario_caustic_hit_1f_grid2l.yml, which adds the data-driven start
-# and the refinement pass.
+# gerchberg_saxton.init, so warm_start): the check pins the solver the earlier
+# results were made with. The receiver is the campaign's, the lambda/2 array ON the
+# solver grid (rx_aperture.grid_stride: 2). For the campaign itself use
+# scenario_caustic_hit_1f_grid2l.yml, which adds the data-driven start.
 #
 # RX window: centered x=0, width 0.04 m. RX at z=0; TX projects -Z. Shared symmetric
 # scene across all scenarios. TX width 0.072 m (the caustic support), height z=0.3.

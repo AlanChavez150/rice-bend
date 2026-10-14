@@ -42,9 +42,9 @@ def _init_worker(shared, setup: Optional[Callable[[], None]]) -> None:
     # only place the variable binds.
     #
     # What keeps each worker on one thread is therefore the task, not this loop:
-    # the per-candidate path (gs_reconstruct, its starts, gs_reconstruct_multistart)
-    # is fftconvolve + ufuncs + explicit sums, with no `@`/dot/vdot/einsum and no
-    # linalg/polyfit on it (see mgs._offset_peaks, mgs._line_fit); the scene-
+    # the per-candidate path (gs_reconstruct and its starts) is fftconvolve +
+    # ufuncs + explicit sums, with no `@`/dot/vdot/einsum and no linalg/polyfit on
+    # it (see mgs._offset_peaks, mgs._line_fit); the scene-
     # rendering tasks make no such call of their own either. A BLAS or LAPACK call
     # added to a task brings the oversubscription back at once and silently — the
     # results do not change, only the system time. BLAS that runs in the PARENT is

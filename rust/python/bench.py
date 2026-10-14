@@ -15,7 +15,7 @@ Workloads:
   B  the same candidates at 300 GHz alone (the 1-frequency anchor, random init)
 
 That config is kept for this script and keeps the LEGACY start (no
-gerchberg_saxton.init, so warm_start; no grid_search.refine): rust runs its own
+gerchberg_saxton.init, so warm_start): rust runs its own
 twin of the warm start, so workload A times the two engines' starts as well as
 their descents. The campaign configs start from `init: backprop`, which is computed
 in python for both engines; a workload on one of them would time one shared start

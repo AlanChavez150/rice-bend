@@ -3,10 +3,10 @@
 # Kept as the input of the Rust benchmark: rust/python/bench.py times the two engines
 # on this file's three-tone comb, and the rust side of that timing includes the
 # engine's OWN warm start. So this file keeps the LEGACY start (no
-# gerchberg_saxton.init, so warm_start, and no grid_search.refine): the data-driven
-# start is computed in python for both engines, and with it the start would drop
-# out of the comparison. The receiver is the campaign's, the lambda/2 array ON the
-# solver grid (rx_aperture.grid_stride: 2). For a study use a campaign base config
+# gerchberg_saxton.init, so warm_start): the data-driven start is computed in
+# python for both engines, and with it the start would drop out of the comparison.
+# The receiver is the campaign's, the lambda/2 array ON the solver grid
+# (rx_aperture.grid_stride: 2). For a study use a campaign base config
 # (scenario_{caustic,bessel,focus}_hit_1f_grid2l.yml): mgs-study builds its combs,
 # ±5 % among them, from those.
 #

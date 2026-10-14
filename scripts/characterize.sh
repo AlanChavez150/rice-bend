@@ -68,8 +68,7 @@ run() {
 #   1, 5   interpolated, lambda/20 at runtime (rx_aperture.dx: null)   legacy start
 #   2      ON the solver grid (rx_aperture.grid_stride: 2)             legacy start
 #   3, 4   interpolated, fixed pitch (rx_aperture.dx: 0.000499654)     legacy start
-#   6      ON the solver grid (rx_aperture.grid_stride: 2)             init: backprop,
-#                                                                      grid_search.refine
+#   6      ON the solver grid (rx_aperture.grid_stride: 2)             init: backprop
 # scenario_caustic_hit_sparse.yml (checks 3 and 4) stays on the interpolated receiver on
 # purpose: it is the only noisy run of that path here (see its header).
 
@@ -89,7 +88,7 @@ run $MGS --config "$C/tiny_check.yml" -o "$S/c1_mgs_tiny"
 run $MGS --config "$C/scenario_caustic_hit.yml" --freq 300e9 -o "$S/c2_mgs_caustic_hit"
 
 # 3. the sweep, serial. Noisy (30 dB, seed 0): one draw, shared by every candidate.
-#    Interpolated receiver, legacy start, no refinement: a schema-3 manifest.
+#    Interpolated receiver, legacy start.
 run $GRID --config "$C/scenario_caustic_hit_sparse.yml" --freq 300e9 \
     --limit 6 --jobs 1 -o "$S/c3_grid_j1"
 
@@ -106,19 +105,15 @@ run $GRID --config "$C/tiny_check.yml" --freq 280e9 300e9 -o "$S/c5_multifreq"
 
 # 6. the caustic campaign base config, as it stands (one tone, 300 GHz, 30 dB, seed 0,
 #    on-grid receiver), serial and then across 4 workers, the pattern of checks 3 and
-#    4. It is the only check whose config sets gerchberg_saxton.init: backprop and
-#    grid_search.refine, so it is what puts the data-driven start, the sweep's second
-#    start and the refinement pass in the net, and the schema-4 manifest they write.
-#    On these six candidates (the first six of the grid, far from the TX) one sweep
-#    solve is stopped by the flatness test and solved again from the random start, and
-#    all six fall within the refinement's band and are re-solved from both starts under
-#    its 6000 cap. That re-solve is most of this check's time (about half a minute
-#    serial). The parallel run pins that the refinement, like the sweep, does not
-#    depend on the worker count.
+#    4. It is the only check whose config sets gerchberg_saxton.init: backprop, so it
+#    is what puts the data-driven start in the net, together with the campaign's
+#    one-solve sweep: every candidate solved once, under gerchberg_saxton's 3000 cap
+#    and -1e-10 stop threshold (the config has no gs_overrides). The parallel run pins
+#    that this sweep, like the others, does not depend on the worker count.
 run $GRID --config "$C/scenario_caustic_hit_1f_grid2l.yml" \
-    --limit 6 --jobs 1 -o "$S/c6_refine_j1"
+    --limit 6 --jobs 1 -o "$S/c6_backprop_j1"
 run $GRID --config "$C/scenario_caustic_hit_1f_grid2l.yml" \
-    --limit 6 --jobs 4 -o "$S/c6_refine_j4"
+    --limit 6 --jobs 4 -o "$S/c6_backprop_j4"
 
 echo "---"
 set +e

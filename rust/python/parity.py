@@ -119,9 +119,8 @@ def rust_solve(tx_z, amp, x_axis, rx_z, channels, params, ref_freq):
 
 def sweep_setup(cfg_path, freqs, *, snr_db=None, noise_seed=0, init=None):
     """Steps 1-4 of grid_sweep.run_grid_search (the measurement, the grid-only GS
-    overrides, the enumeration, the shared payload), without persistence and
-    without its refinement pass or its init/refine check: a slice calls the solver
-    directly, one start per candidate.
+    overrides, the enumeration, the shared payload), without persistence: a slice
+    calls the solver directly, one solve per candidate.
     snr_db follows the CLI's --snr-db: a number of dB, SNR_OFF to force a noiseless
     measurement, or None to keep the config's noise block — which is 30 dB in every
     scenario config (tiny_check.yml has none), so a slice meant to be noiseless must

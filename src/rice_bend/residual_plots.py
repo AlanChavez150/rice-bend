@@ -81,11 +81,11 @@ def summary_from_manifest(run_dir: Path) -> ResidualSummary:
     """Rebuild a ResidualSummary from a saved run's candidate_beams.json (no npz needed).
 
     Works on every schema: `final_loss` is the joint (mean-over-frequency)
-    residual in a joint run (schema 3, or schema 4 when the run had a
-    grid_search.refine block) and the single frequency's residual in a legacy
-    schema-2 run — either way it is THE residual that ranks candidates. In a
-    schema-4 run it is the loss of the candidate's STORED solve, the lowest of the
-    sweep's and the refinement's, so nothing here needs to know a refinement ran."""
+    residual in a joint run (schema 3, or schema 4: the layout the removed
+    refinement pass wrote, still read) and the single frequency's residual in a
+    legacy schema-2 run — either way it is THE residual that ranks candidates. In
+    a schema-4 run it is the loss of the candidate's STORED solve, so nothing here
+    needs its extra keys."""
     with open(Path(run_dir) / "candidate_beams.json") as f:
         manifest = json.load(f)
     spec = manifest["grid_spec"]
@@ -101,9 +101,9 @@ def summary_from_manifest(run_dir: Path) -> ResidualSummary:
 
 
 def freq_summaries_from_manifest(run_dir: Path) -> List[Tuple[float, ResidualSummary]]:
-    """Per-frequency component summaries of a joint run (schema 3 or 4: the
-    refinement's keys change nothing this reads, and per_freq_losses belongs to
-    the same stored solve as final_loss).
+    """Per-frequency component summaries of a joint run (schema 3, or schema 4
+    from the removed refinement pass: its extra keys change nothing this reads,
+    and per_freq_losses belongs to the same stored solve as final_loss).
 
     One ResidualSummary per frequency, built from each candidate's
     per_freq_losses (a null component means the candidate failed that

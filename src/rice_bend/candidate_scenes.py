@@ -216,12 +216,12 @@ def scenes_from_manifest(run_dir: Path,
                          scene_freq: Optional[float] = None) -> SceneContext:
     """Adapter: a SceneContext from a saved run (reads each candidate npz).
 
-    Handles both layouts: a joint run (schema 3, or schema 4 with a refinement
-    block: frequency list, stacked TX profiles, indexed RX aperture keys —
-    rendered at `scene_freq`, defaulting to the centre frequency) and a schema-2
-    per-frequency run (scalar keys). A schema-4 candidate's npz holds its stored
-    solve, so a refined candidate is rendered from the profile its loss belongs
-    to."""
+    Handles both layouts: a joint run (frequency list, stacked TX profiles,
+    indexed RX aperture keys — rendered at `scene_freq`, defaulting to the centre
+    frequency) and a schema-2 per-frequency run (scalar keys). A joint run is
+    schema 3, or schema 4: the layout the removed refinement pass wrote, whose
+    extra keys are ignored. A schema-4 candidate's npz holds its stored solve, so
+    it is rendered from the profile its loss belongs to."""
     run_dir = Path(run_dir)
     with open(run_dir / "candidate_beams.json") as f:
         m = json.load(f)

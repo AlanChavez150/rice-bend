@@ -288,10 +288,11 @@ def analysis_from_run(run: "GridSearchRun", summary: "ResidualSummary") -> dict:
 def analysis_from_manifest(run_dir: Path, summary: "ResidualSummary") -> dict:
     """Rebuild the identical analysis from a saved run dir (--replot path).
 
-    Reads schema-3 and schema-4 manifests alike: the keys a refined run adds
-    (gs.refine; refined / start / sweep_loss per candidate) are not read here, and
-    the losses in `summary` are each candidate's stored solve, so a refined run is
-    ranked on its refined losses.
+    Reads schema-3 and schema-4 manifests alike. Schema 4 is the layout the
+    removed refinement pass wrote: its extra keys (gs.refine; refined / start /
+    sweep_loss per candidate) are not read here, and the losses in `summary` are
+    each candidate's stored solve, so such a run is ranked on the losses it
+    stored.
 
     Legacy guards: schema-2 manifests lack 'frequencies'/'rx_aperture', and
     measurement.npz from before rx_plane_row existed lacks the key — any absence

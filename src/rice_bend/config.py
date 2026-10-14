@@ -1,7 +1,7 @@
 """Pydantic models for the simulation configuration .yml.
 See configs/caustic_config.yml (the `mgs` default) for a commented general config,
 and configs/scenario_caustic_hit_1f_grid2l.yml for a campaign config with the
-on-grid receiver, the data-driven start and the refinement block. The general
+on-grid receiver and the data-driven start. The general
 configs of the other three beam types are archived and not maintained:
 configs/archive/directional_config.yml, configs/archive/bessel_config.yml and
 configs/archive/focus_config.yml."""
@@ -292,52 +292,6 @@ class GridGSOverrides(BaseModel):
         description="Override gerchberg_saxton.max_iters during the sweep")
 
 
-class GridRefineConfig(BaseModel):
-    """Second pass of the grid sweep: re-solve the candidates the sweep left near
-    its minimum, each from two starts (mgs.gs_reconstruct_multistart), and keep
-    the lower loss. Defined and validated here; the sweep is what consumes it.
-
-    The sweep ranks every candidate under limits that suit the thousands far from
-    the TX and not the few that decide the answer:
-
-    - its iteration cap (grid_search.gs_overrides.max_iters) is below what the
-      candidates near the truth need, so the ones that matter are the ones it
-      cuts off;
-    - gerchberg_saxton.convergence_threshold is an ABSOLUTE loss slope. At high
-      SNR the loss near the truth is small, and a threshold that does not scale
-      with it stops the descent short of the floor it could reach;
-    - no single start wins at every wrong location, so a ranking made from one
-      start mixes the loss of a location with the luck of its start.
-
-    The re-solve therefore has its own cap and its own stop threshold, and runs
-    both starts.
-
-    `max_candidates` bounds the cost, and it SKIPS the refinement rather than
-    truncating it. A set cut to the best N by sweep loss holds the sweep's best
-    candidate by construction and leaves out others that qualified; re-solving
-    lowers the loss of the ones kept (more iterations, the better of two starts)
-    while the ones left out keep their sweep loss — so the answer would be forced
-    into the truncated set. When more than this qualify, no candidate is
-    re-solved and the sweep's result stands."""
-    # every field has a default, so a typo (withn) must not silently refine at the
-    # default
-    model_config = ConfigDict(extra="forbid")
-
-    within: float = Field(default=10.0, gt=1.0,
-        description="Re-solve every candidate whose sweep loss is <= within x the "
-                    "sweep's minimum loss (> 1: at 1 only the best candidate itself "
-                    "would qualify)")
-    max_iters: int = Field(default=6000, gt=0,
-        description="Iteration cap of the re-solve (the sweep's own cap is "
-                    "grid_search.gs_overrides.max_iters)")
-    convergence_threshold: Optional[float] = Field(default=-1e-10,
-        description="Stop threshold of the re-solve, on mean(diff(recent loss)); "
-                    "null -> gerchberg_saxton.convergence_threshold")
-    max_candidates: int = Field(default=12000, gt=0,
-        description="If more candidates than this qualify, the refinement is SKIPPED "
-                    "for the run (never truncated to the best N)")
-
-
 class GridSearchConfig(BaseModel):
     """Speculative (z, x_center) sweep for `grid-search-mgs`.
 
@@ -345,8 +299,10 @@ class GridSearchConfig(BaseModel):
     aperture (uniform assumed amplitude) is centered at `x_center` and placed at
     height `z`; MGS then reconstructs its phase against the single shared measured
     RX field. Each result is saved as a candidate beam."""
-    # refine and gs_overrides are optional, so a typo (refne) must not silently run
-    # the sweep without the block it was meant to carry
+    # gs_overrides is optional, so a typo (gs_override) must not silently run the
+    # sweep without the block it was meant to carry. A `refine` block (the removed
+    # post-sweep re-solve pass) is refused the same way: such a config was written
+    # for a sweep that no longer exists
     model_config = ConfigDict(extra="forbid")
 
     z: AxisSweep
@@ -355,9 +311,6 @@ class GridSearchConfig(BaseModel):
     seed: Optional[int] = Field(default=0,
         description="Fixed GS seed reused across every candidate so residuals are comparable")
     gs_overrides: GridGSOverrides = Field(default_factory=GridGSOverrides)
-    refine: Optional[GridRefineConfig] = Field(default=None,
-        description="Re-solve the near-best candidates after the sweep (see "
-                    "GridRefineConfig); null -> the sweep's result stands")
 
 
 class ExperimentalConfig(BaseModel):

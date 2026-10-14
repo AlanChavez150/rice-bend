@@ -188,7 +188,9 @@ def _replot_one_dir(run_dir: Path, args, log) -> ResidualSummary:
     """Regenerate one saved run directory's plots + analysis.json from disk.
 
     The analysis is always RECOMPUTED (never read back), so a replot doubles as
-    the reproducibility check against the save-time analysis.json."""
+    the reproducibility check against the save-time analysis.json. A schema-4
+    manifest, the layout the removed refinement pass wrote, replots like a
+    schema-3 one: its extra keys are ignored."""
     run_dir = Path(run_dir)
     summary = summary_from_manifest(run_dir)
     analysis = analysis_from_manifest(run_dir, summary)

@@ -19,8 +19,8 @@ candidate_beams.json already exists skips its solve on re-run, and its directory
 name is all that keys it — so a root is refused up front, not reused, when it
 holds another study or a saved point that is not the one this invocation would
 solve: a different experiment (tones, scene, TX and beam, RX, candidate grid,
-solver settings, the grid's refinement settings), a different --limit, or
-different noise.
+solver settings), a different --limit, or different noise — or a point solved with
+the refinement pass, which has been removed.
 """
 
 import argparse
@@ -46,7 +46,7 @@ from rice_bend.grid_sweep import run_grid_search
 from rice_bend.plotting import add_wavelength_axis
 from rice_bend.residual_plots import snr_suffix, summary_from_manifest
 
-STUDY_SCHEMA_VERSION = 8   # v4: points[] gained ref_freq_hz (nullable)
+STUDY_SCHEMA_VERSION = 9   # v4: points[] gained ref_freq_hz (nullable)
 #                            v5: top-level noise {snr_db, seed} (null when noiseless);
 #                                points[] gained snr_db (nullable)
 #                            v6: noise gained swept (true: the series sets each point's
@@ -56,13 +56,13 @@ STUDY_SCHEMA_VERSION = 8   # v4: points[] gained ref_freq_hz (nullable)
 #                                its centre filled in
 #                            v8: points[] gained refine_status (null: no refinement
 #                                configured, else 'done' | 'skipped') and n_refined
+#                            v9: points[] dropped refine_status and n_refined
+#                                (refinement removed)
 STUDY_NAME_FILE = "study.json"
-# The caustic campaign base config. A study is a series of full sweeps, so its
-# default has to be a config whose sweep ranks locations and not solver luck: the
-# on-grid receiver, the data-driven start (gerchberg_saxton.init: backprop) and the
-# refinement pass (grid_search.refine). The file lists one tone, 300 GHz: the
-# frequency and tx_shift series build their combs about it, and the snr series
-# solve with it as it stands.
+# The caustic campaign base config: the on-grid receiver and the data-driven start
+# (gerchberg_saxton.init: backprop), every candidate solved once under one setting.
+# The file lists one tone, 300 GHz: the frequency and tx_shift series build their
+# combs about it, and the snr series solve with it as it stands.
 STUDY_DEFAULT_CONFIG = (Path(__file__).resolve().parents[2] / "configs"
                         / "scenario_caustic_hit_1f_grid2l.yml")
 
@@ -187,16 +187,8 @@ STUDIES = {
 
 def _record(study: StudyDef, value: float, point_name: str, analysis: dict,
             resumed: bool, ref_freq_hz: Optional[float],
-            noise: Optional[dict], refine: Optional[dict]) -> dict:
-    """One study.json points[] entry, from the point's analysis dict.
-
-    `refine` is the point's refinement block (its manifest's gs.refine; None when
-    the grid ran without one). The record keeps the two things a reader of the
-    study needs from it: `refine_status`, because a 'skipped' point is ranked by
-    the sweep alone and is not comparable, loss for loss, with a 'done' one
-    beside it (the study plot draws it hollow); and `n_refined`, how many
-    candidates the pass re-solved (0 unless it ran)."""
-    refine_status = refine.get("status") if refine else None
+            noise: Optional[dict]) -> dict:
+    """One study.json points[] entry, from the point's analysis dict."""
     argmin = analysis.get("argmin")
     err_m = argmin["error_distance_m"] if argmin else None
     energy = analysis.get("energy") or {}
@@ -210,8 +202,6 @@ def _record(study: StudyDef, value: float, point_name: str, analysis: dict,
         "resumed": bool(resumed),
         "ref_freq_hz": float(ref_freq_hz) if ref_freq_hz is not None else None,
         "snr_db": noise.get("snr_db") if noise else None,
-        "refine_status": refine_status,
-        "n_refined": int(refine.get("n_selected") or 0) if refine_status == "done" else 0,
         "error_distance_m": err_m,
         "error_mm": 1000.0 * err_m if err_m is not None else None,
         "argmin": ({"z": argmin["z"], "x_center": argmin["x_center"],
@@ -228,24 +218,17 @@ def _record(study: StudyDef, value: float, point_name: str, analysis: dict,
     return rec
 
 
-def _manifest_refine(point_dir: Path) -> Optional[dict]:
-    """The refinement block of a saved point (its manifest's gs.refine), or None:
-    the point ran with no grid_search.refine, or was saved before the pass
-    existed (a schema-3 manifest has no such key)."""
-    with open(point_dir / "candidate_beams.json") as f:
-        return (json.load(f).get("gs") or {}).get("refine")
-
-
-def _recompute_analysis(point_dir: Path, log) -> Tuple[dict, Optional[float],
-                                                       Optional[dict], Optional[dict]]:
+def _recompute_analysis(point_dir: Path,
+                        log) -> Tuple[dict, Optional[float], Optional[dict]]:
     """Always recompute (cheap, and the run dir's analysis.json stays fresh).
-    Also hands back the manifest's centre frequency for the record's λ axis, its
-    noise block (None when noiseless) for the record's snr_db, and its refinement
-    block (None when not configured) for the record's refine_status."""
+    Also hands back the manifest's centre frequency for the record's λ axis, and
+    its noise block (None when noiseless) for the record's snr_db. A schema-4
+    manifest (written by the removed refinement pass) reads like a schema-3 one:
+    its refine keys are not looked at."""
     summary = summary_from_manifest(point_dir)
     analysis = analysis_from_manifest(point_dir, summary)
     write_analysis(point_dir, analysis)
-    return analysis, summary.ref_freq_hz, summary.noise, _manifest_refine(point_dir)
+    return analysis, summary.ref_freq_hz, summary.noise
 
 
 def _point_noise(cfg: SimConfig) -> Optional[dict]:
@@ -359,12 +342,7 @@ def _apply_sweep_overrides(cfg: SimConfig) -> None:
     snapshots the config. config_snapshot.json therefore holds the effective
     values, and a config has to be brought to the same form before it is
     compared with one. That logic is inline there, not a helper — this mirrors
-    it, and the two must change together.
-
-    The refinement pass has nothing to mirror: it re-solves from a copy of the
-    sweep's params and leaves gerchberg_saxton as the sweep set it, so its cap
-    and threshold reach the snapshot only as grid_search.refine — which
-    _fingerprint compares as it stands."""
+    it, and the two must change together."""
     grid, gs = cfg.grid_search, cfg.gerchberg_saxton
     if grid is None:
         return
@@ -384,15 +362,9 @@ def _fingerprint(cfg: dict, freqs: List[float]) -> dict:
     gerchberg_saxton.engine and history_stride (see _GS_IDENTITY_FIELDS),
     grid_search.aperture.dx (provenance only), and grid_search.seed /
     gs_overrides, which gerchberg_saxton already carries in effective form (see
-    _apply_sweep_overrides).
-
-    grid_search.refine is IN, whole: the refinement pass re-solves the candidates
-    near the minimum under its own cap, threshold and selection width, so two
-    roots that differ in any of them hold different losses at the candidates
-    that decide each point. A snapshot from before the block existed has no such
-    key and one without refinement has null; _identity_diffs counts both as
-    null, so either resumes under a config with no refine block and is refused
-    under one that has it."""
+    _apply_sweep_overrides). grid_search.refine is gone from the config; a saved
+    point that carries a non-null one is refused before any fingerprint is
+    compared (_check_resume_identity)."""
     grid = cfg.get("grid_search") or {}
     gs = cfg.get("gerchberg_saxton") or {}
     return {
@@ -402,8 +374,7 @@ def _fingerprint(cfg: dict, freqs: List[float]) -> dict:
         "rx_aperture": cfg.get("rx_aperture"),
         "grid_search": {
             "z": grid.get("z"), "x_center": grid.get("x_center"),
-            "aperture": {"width": (grid.get("aperture") or {}).get("width")},
-            "refine": grid.get("refine")},
+            "aperture": {"width": (grid.get("aperture") or {}).get("width")}},
         "gerchberg_saxton": {k: gs.get(k) for k in _GS_IDENTITY_FIELDS},
     }
 
@@ -489,6 +460,18 @@ def _check_resume_identity(study: StudyDef, base_cfg: SimConfig, root: Path, arg
             refuse(f"{point_dir} cannot be checked against this invocation ({e}), "
                    "so resuming could reuse a run of a different experiment.")
 
+        # A point solved with the refinement pass holds re-solved losses near its
+        # minimum that the current sweep never produces, so it is not reused
+        # whatever the rest of its settings. Its snapshot records the pass as a
+        # non-null grid_search.refine; a new snapshot has no such key and an older
+        # unrefined one has null, and both go on to the comparison below.
+        if (snapshot.get("grid_search") or {}).get("refine") is not None:
+            refuse(f"{point_dir} was solved with the refinement pass (its "
+                   "config_snapshot.json carries grid_search.refine), which has been "
+                   "removed: its losses near the minimum come from re-solves the "
+                   "current sweep does not run, so the root cannot be resumed.",
+                   "Start a new --out root.")
+
         expected = study.apply(base_cfg, value)     # a deep copy: safe to mutate
         _apply_sweep_overrides(expected)
         # the snapshot stores the config's own list, which is null when the run
@@ -570,16 +553,6 @@ def _plot_namespace(cfg_path: Path, args) -> argparse.Namespace:
         noise_seed=getattr(args, "noise_seed", None))
 
 
-def _refine_note(rec: dict) -> str:
-    """How the refinement pass ended for one point, for its log line."""
-    status = rec.get("refine_status")
-    if status is None:
-        return "not refined (no grid_search.refine block)"
-    if status == "done":
-        return f"refined ({rec['n_refined']} candidate(s) re-solved)"
-    return "NOT refined (the refinement was skipped: the sweep's result stands)"
-
-
 def _run_point(study: StudyDef, i: int, value: float, base_cfg: SimConfig,
                root: Path, args, log) -> dict:
     n = len(study.values)
@@ -589,11 +562,9 @@ def _run_point(study: StudyDef, i: int, value: float, base_cfg: SimConfig,
     if (point_dir / "candidate_beams.json").exists():
         log.info(f"[{i + 1}/{n}] {name}: candidate_beams.json present — "
                  "skipping the solve")
-        analysis, ref, noise, refine = _recompute_analysis(point_dir, log)
-        rec = _record(study, value, name, analysis, resumed=True, ref_freq_hz=ref,
-                      noise=noise, refine=refine)
-        log.info(f"[{i + 1}/{n}] {name}: saved point {_refine_note(rec)}")
-        return rec
+        analysis, ref, noise = _recompute_analysis(point_dir, log)
+        return _record(study, value, name, analysis, resumed=True, ref_freq_hz=ref,
+                       noise=noise)
     if point_dir.exists():
         _repair_partial(point_dir, log)
 
@@ -614,12 +585,8 @@ def _run_point(study: StudyDef, i: int, value: float, base_cfg: SimConfig,
     run = run_grid_search(cfg, freqs, limit=args.limit, jobs=args.jobs, log=log)
     out_dir = make_run_dir(root, name, kind="grid")
     analysis = persist_and_plot(run, out_dir, cfg, _plot_namespace(cfg_path, args), log)
-    # run.refine is the block save_grid_run has just written as gs.refine, so
-    # this record and a later resume's (read back from the manifest) agree
-    rec = _record(study, value, name, analysis, resumed=False,
-                  ref_freq_hz=run.ref_freq, noise=run.noise, refine=run.refine)
-    log.info(f"[{i + 1}/{n}] {name}: solved; point {_refine_note(rec)}")
-    return rec
+    return _record(study, value, name, analysis, resumed=False,
+                   ref_freq_hz=run.ref_freq, noise=run.noise)
 
 
 def _x_label(study: StudyDef, center_hz: Optional[float]) -> str:
@@ -674,17 +641,6 @@ _ERROR_SERIES = (
     ("error_mm", "argmin to true TX", "C0", "o", 1.5, 6.0, 45, 3),
     ("top_mean_dist_mm", "top candidates mean to true TX", "C1", "s", 3.0, 9.0, 100, 2),
 )
-# Study plot only: a point whose refinement pass was SKIPPED (too many candidates
-# near the sweep's minimum, see config.GridRefineConfig) is drawn hollow in both
-# series. Its ranking is the sweep's — the sweep's iteration cap, one start —
-# while the filled points beside it had their near-best candidates re-solved
-# under the refinement's cap from two starts, and a curve that mixes the two has
-# to show which is which. The legend entry is one neutral marker for both series:
-# hollow is the encoding, the colour and shape stay the series'.
-_SKIPPED_LABEL = "hollow: refinement skipped (the sweep's result)"
-_SKIPPED_EDGE_PT = 1.5     # edge width of a hollow marker: readable at ms 6
-
-
 def _records_ref_freq(records: List[dict]) -> Optional[float]:
     """The one centre frequency shared by every point, or None (no λ axis).
     Every series today keeps the base config's centre at each point, so the
@@ -707,19 +663,13 @@ def _plot_study(study: StudyDef, records: List[dict], out_path: Path, log,
     """Argmin error and top-K mean distance vs the study's x-axis. Points
     connect in SERIES order (= table order), which matters for the energy axis:
     x there is a measured quantity. `beam` and `center_hz` only name the study
-    in the title and the x label (see _title, _x_label).
-
-    Points whose refinement was skipped are drawn hollow, with one legend entry
-    saying so (see _SKIPPED_LABEL). A study with no such point — every study
-    without a refine block among them — draws exactly what it drew before."""
+    in the title and the x label (see _title, _x_label)."""
     import matplotlib.pyplot as plt
     from matplotlib import patheffects
-    from matplotlib.lines import Line2D
 
     plotted = [r for r in records if r.get("x_value") is not None]
     fig, ax = plt.subplots(figsize=(9, 6), layout="constrained")
     drew = False
-    drew_hollow = False
     for key, label, color, marker, lw, ms, _area, zorder in _ERROR_SERIES:
         if key == "error_mm" and not study.plot_argmin:
             continue
@@ -729,16 +679,6 @@ def _plot_study(study: StudyDef, records: List[dict], out_path: Path, log,
         drew = True
         ax.plot([p[0] for p in pts], [p[1] for p in pts], marker=marker,
                 color=color, label=label, lw=lw, ms=ms, zorder=zorder)
-        hollow = [p for p in pts if p[2].get("refine_status") == "skipped"]
-        if hollow:
-            # the same marker again with a white face, just above its own series
-            # (and, for the underlay, still below the argmin series): the filled
-            # marker and the line through it disappear behind the face
-            drew_hollow = True
-            ax.plot([p[0] for p in hollow], [p[1] for p in hollow], linestyle="none",
-                    marker=marker, ms=ms, markerfacecolor="white",
-                    markeredgecolor=color, markeredgewidth=_SKIPPED_EDGE_PT,
-                    zorder=zorder + 0.5)
         if key == "top_mean_dist_mm":
             # the adaptive set size is part of the signal — annotate it, offset
             # clear of the underlay's larger square and haloed: a line through
@@ -762,15 +702,8 @@ def _plot_study(study: StudyDef, records: List[dict], out_path: Path, log,
                             alpha=0.8)
         # outside, below the x label: with both series drawn no corner of the
         # axes is reliably empty, and an in-axes legend covered data
-        handles, labels = ax.get_legend_handles_labels()
-        if drew_hollow:
-            handles.append(Line2D([], [], linestyle="none", marker="o", ms=6.0,
-                                  markerfacecolor="white", markeredgecolor="0.3",
-                                  markeredgewidth=_SKIPPED_EDGE_PT))
-            labels.append(_SKIPPED_LABEL)
-        # one row either way: the extra entry gets its own column
-        fig.legend(handles, labels, loc="outside lower center",
-                   ncol=3 if drew_hollow else 2, framealpha=0.9)
+        fig.legend(*ax.get_legend_handles_labels(), loc="outside lower center",
+                   ncol=2, framealpha=0.9)
     else:
         ax.text(0.5, 0.5, "no measurable points", ha="center", va="center",
                 transform=ax.transAxes)
@@ -852,7 +785,9 @@ def _snapshot_beam(root: Path, records: List[dict]) -> Optional[dict]:
 
 def _replot_study(root: Path, args, log) -> None:
     """Rebuild study.json + the study plot from the per-point run dirs (each
-    point's analysis is recomputed; nothing is re-solved)."""
+    point's analysis is recomputed; nothing is re-solved). A schema-8 root, from
+    the removed refinement pass, replots like any other: study.json is rewritten
+    in the current schema, without refine_status / n_refined."""
     with open(root / STUDY_NAME_FILE) as f:
         data = json.load(f)
     study = STUDIES[data["study"]]
@@ -865,9 +800,9 @@ def _replot_study(root: Path, args, log) -> None:
             log.warning(f"{name}: missing — skipped")
             complete = False
             continue
-        analysis, ref, noise, refine = _recompute_analysis(pdir, log)
-        records.append(_record(study, value, name, analysis, resumed=True,
-                               ref_freq_hz=ref, noise=noise, refine=refine))
+        analysis, ref, noise = _recompute_analysis(pdir, log)
+        records.append(_record(study, value, name, analysis,
+                               resumed=True, ref_freq_hz=ref, noise=noise))
     # no config here (base configs get edited in place, so the one study.json
     # names may no longer be the one that was solved): carry the saved noise
     # block through, or a replot drops it — and take the beam and the centre

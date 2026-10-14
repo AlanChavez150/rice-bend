@@ -2,11 +2,11 @@
 #
 # Kept for the regression net (scripts/characterize.sh checks 3 and 4, and two slices
 # of rust/python/parity.py), and it deliberately stays on the OLD receiver: the
-# interpolated lambda/2 array (rx_aperture.dx), with the legacy start and no
-# refinement. Every other kept scenario config has moved to the on-grid receiver
-# (rx_aperture.grid_stride), so this file is the only NOISY run of the interpolated
-# path that characterize.sh has, and that path is still in use: the experimental
-# bench captures go through it, and so does tiny_check.yml (noiseless, lambda/20).
+# interpolated lambda/2 array (rx_aperture.dx), with the legacy start. Every other
+# kept scenario config has moved to the on-grid receiver (rx_aperture.grid_stride),
+# so this file is the only NOISY run of the interpolated path that characterize.sh
+# has, and that path is still in use: the experimental bench captures go through it,
+# and so does tiny_check.yml (noiseless, lambda/20).
 # The cost of a lambda/2 pitch on this path (the solver's target sits about -18 dB
 # off the true field) is known and is why the campaign configs left it; here it is
 # part of what the net pins. Do not switch this file to grid_stride.

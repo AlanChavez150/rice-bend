@@ -35,18 +35,14 @@ is built there too: the element samples placed on the scene axis and a weighting
 that is zero at every sample without an element are still just an `rx_field` and
 an `error_weighting`, so the engine does not know about it either.
 
-**The data-driven start and the refinement pass** (`gerchberg_saxton.init:
-backprop`, `grid_search.refine`) did not touch the crate. `gs_solve` knows two
-modes. `warm_start` runs the engine's own twin of the legacy warm start
-(`src/warm_start.rs`), which is frozen with it so that earlier runs reproduce.
-`random` descends from the phase it is handed, unchanged, and that is how a
-start computed in Python reaches the engine: the back-propagated phase and, for
-several tones, the offset scan over the comb's true period are built in
-`src/rice_bend/mgs.py` for either engine, and Rust runs the descent from the
-result. `gs_reconstruct_multistart` and the sweep's refinement pass are Python
-orchestration over those descents, so with `--engine rust` every descent they
-run (the second start, the re-solves from both starts, the random route's
-reference solve) is the engine's.
+**The data-driven start** (`gerchberg_saxton.init: backprop`) did not touch
+the crate. `gs_solve` knows two modes. `warm_start` runs the engine's own twin
+of the legacy warm start (`src/warm_start.rs`), which is frozen with it so that
+earlier runs reproduce. `random` descends from the phase it is handed,
+unchanged, and that is how a start computed in Python reaches the engine: the
+back-propagated phase and, for several tones, the offset scan over the comb's
+true period are built in `src/rice_bend/mgs.py` for either engine, and Rust runs
+the descent from the result.
 
 `python/parity.py` runs seven slices under the same bar:
 

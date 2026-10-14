@@ -105,7 +105,7 @@ def _candidate_setup(freqs):
     MGS + measure + run_grid_search's gs_overrides/seed mutation (step 2 of
     grid_sweep.run_grid_search) + enumerate_grid to pick a point valid at every
     frequency + the box amplitude every candidate solve is handed
-    (grid_sweep._candidate_problem)."""
+    (grid_sweep._reconstruct_candidate)."""
     cfg = load_config(REPO / "configs" / "tiny_check.yml")
     m = MGS(freqs, cfg)
     m.measure()

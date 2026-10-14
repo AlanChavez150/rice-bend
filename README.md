@@ -94,12 +94,13 @@ LANDING note: positions carry the propagator's +dx/2 lateral offset (...); outsi
   another basin (see Initialization, under "Multiple frequencies"). An on-grid
   receiver changes the reference: its target is the true field at the elements, so on
   a **noiseless** run the true plate scores almost nothing, far below the loss at
-  which the solver's convergence test stops, and the ratio is large for a solve that
-  sits in the right basin. Read it next to the match figures there. With receiver
-  noise the true plate's loss is the noise it cannot fit, and a **single-tone** solve
-  reaches that floor: the ratio is about 1 (0.95, 0.93 and 1.01 at 30 dB on the
-  caustic, bessel and focus base configs). Several tones get there or not depending
-  on the start (see Initialization, under "Multiple frequencies").
+  which the solver stops (its convergence test or its iteration cap), and the ratio
+  is large for a solve that sits in the right basin. Read it next to the match
+  figures there. With receiver noise the true plate's loss is the noise it cannot
+  fit, and a **single-tone** solve reaches that floor: the ratio is about 1 (0.95,
+  0.93 and 1.01 at 30 dB on the caustic, bessel and focus base configs, under the
+  −1e-8 stop they had before). Several tones get there or not depending on the start
+  (see Initialization, under "Multiple frequencies").
 
 The block is logged, not written to `run.json`; `grid-search-mgs --true-mgs` logs the
 same block for its baseline solve. The numbers come from `src/rice_bend/landing.py`.
@@ -131,24 +132,28 @@ widest (`W/2`) at half that range. The `focus` spot is about `λ·F / W` wide.
 `configs/` holds the eight files that the 300 GHz campaign, the defaults and the test
 harness need. Everything else is in `configs/archive/`.
 
-| Config | Kept for | Tones (GHz) | Receiver | Start and refinement | Candidate grid |
+| Config | Kept for | Tones (GHz) | Receiver | Start | Candidate grid |
 | --- | --- | --- | --- | --- | --- |
-| `scenario_caustic_hit_1f_grid2l.yml` | **campaign base config**, caustic beam. Also the `mgs-study` default, characterize check 6 and three parity slices | 300 | on-grid λ/2 (`grid_stride: 2`) | `init: backprop`, `grid_search.refine` | 327×151 (49,377) |
-| `scenario_bessel_hit_1f_grid2l.yml` | **campaign base config**, bessel beam | 300 | on-grid λ/2 | `init: backprop`, `grid_search.refine` | 327×151 |
-| `scenario_focus_hit_1f_grid2l.yml` | **campaign base config**, focus beam | 300 | on-grid λ/2 | `init: backprop`, `grid_search.refine` | 327×151 |
-| `scenario_caustic_hit.yml` | characterize check 2, the net's full-resolution single solve | ten-tone comb, 200 to 380 | on-grid λ/2 | legacy start, no refinement | 64×48 (3,072) |
-| `scenario_caustic_hit_pm5.yml` | the input of `rust/python/bench.py`, which times the Rust engine's own warm start | 285, 300, 315 (±5 %) | on-grid λ/2 | legacy start, no refinement | 327×151 |
-| `scenario_caustic_hit_sparse.yml` | characterize checks 3 and 4 and two parity slices | ten-tone comb | **interpolated** λ/2 (`dx: 0.000499654`) | legacy start, no refinement | 12×12 (144) |
-| `tiny_check.yml` | characterize checks 1 and 5, two parity slices, the Rust golden-vector generator. A coarse copy of the caustic scene, not a research scenario | 280, 300 | interpolated, λ/20 of each tone (`dx: null`) | legacy start, no refinement | 3×3 |
-| `caustic_config.yml` | the `mgs` and `grid-search-mgs` default: a commented general config on a larger scene | none listed (300 by default) | interpolated, λ/20 of each tone | legacy start, no refinement | 20×20 |
+| `scenario_caustic_hit_1f_grid2l.yml` | **campaign base config**, caustic beam. Also the `mgs-study` default, characterize check 6 and three parity slices | 300 | on-grid λ/2 (`grid_stride: 2`) | `init: backprop` | 327×151 (49,377) |
+| `scenario_bessel_hit_1f_grid2l.yml` | **campaign base config**, bessel beam | 300 | on-grid λ/2 | `init: backprop` | 327×151 |
+| `scenario_focus_hit_1f_grid2l.yml` | **campaign base config**, focus beam | 300 | on-grid λ/2 | `init: backprop` | 327×151 |
+| `scenario_caustic_hit.yml` | characterize check 2, the net's full-resolution single solve | ten-tone comb, 200 to 380 | on-grid λ/2 | legacy start | 64×48 (3,072) |
+| `scenario_caustic_hit_pm5.yml` | the input of `rust/python/bench.py`, which times the Rust engine's own warm start | 285, 300, 315 (±5 %) | on-grid λ/2 | legacy start | 327×151 |
+| `scenario_caustic_hit_sparse.yml` | characterize checks 3 and 4 and two parity slices | ten-tone comb | **interpolated** λ/2 (`dx: 0.000499654`) | legacy start | 12×12 (144) |
+| `tiny_check.yml` | characterize checks 1 and 5, two parity slices, the Rust golden-vector generator. A coarse copy of the caustic scene, not a research scenario | 280, 300 | interpolated, λ/20 of each tone (`dx: null`) | legacy start | 3×3 |
+| `caustic_config.yml` | the `mgs` and `grid-search-mgs` default: a commented general config on a larger scene | none listed (300 by default) | interpolated, λ/20 of each tone | legacy start | 20×20 |
 
 The three base configs are the ones to run and to copy from. They share the scene, the
 TX window, the RX array, the noise, the seeds and the candidate grid, and differ in the
 beam block alone, so the true TX location is the same and the residual maps compare
-like for like. They start every solve from the data (`gerchberg_saxton.init: backprop`)
-and re-solve the near-best candidates (`grid_search.refine`); both are described under
-`grid-search-mgs`. The other five keep the legacy start (`init` left at its default,
-`warm_start`) and no refinement. For the three scenario configs and `tiny_check.yml`
+like for like. They start every solve from the data (`gerchberg_saxton.init: backprop`,
+described under `grid-search-mgs`) and run every solve under one setting:
+`gerchberg_saxton.max_iters: 3000` and `convergence_threshold: -1.0e-10`, with no
+`grid_search.gs_overrides`, so each sweep candidate gets exactly one solve, under the
+same solver settings as a plain `mgs` run, `--true-mgs` and `scripts/true_tx_table.py`
+(which solve at the real TX, not at a grid point). The other
+five keep the legacy start (`init` left at its default, `warm_start`). For the three
+scenario configs and `tiny_check.yml`
 that is what they are kept for: the characterize checks on them pin the solver the
 earlier results were made with, and the Rust benchmark times the engine's own warm
 start. `caustic_config.yml` is unchanged.
@@ -246,7 +251,7 @@ elements sampled (plus the receiver noise) and nothing else.
 
 What that does to localisation was measured on the full 327×151 grid, for a single
 tone at 300 GHz, when the on-grid receiver was added: pilot runs from the legacy
-start, under the sweep's 800-iteration cap, with no refinement pass. Each cell is the
+start, under the sweep's 800-iteration cap. Each cell is the
 top candidate's distance from the true TX (mm) / the mean distance of the top
 candidates (mm) / the size of that tied set, which is the lowest-loss cell's connected
 cluster of cells within 1.5× its loss (`analysis.json`):
@@ -267,9 +272,9 @@ a real array. And the 800-iteration cap of those runs is below what the on-grid 
 at the true TX needs from a random start (1488 / 1765 / 1424 iterations at 30 dB for
 caustic / bessel / focus), so the on-grid rows rank candidates near the truth on
 solves that were cut off. The base configs have since been given a start from the
-data and a second pass over the near-best candidates; the figures for that pipeline
-are under "Refinement pass" (`grid-search-mgs`). These are single-tone runs; they say
-nothing about multi-tone localisation.
+data and one setting for every solve, the sweep's included (3000 iterations, stop
+threshold −1e-10; see "Configs"). These are single-tone runs; they say nothing about
+multi-tone localisation.
 
 #### Scenario geometry
 
@@ -369,13 +374,13 @@ produce the same set of files.
 Configure the sweep in the `grid_search` block of the config: the `z` / `x_center` sweeps,
 the assumed aperture `width` (its `dx` is provenance-only — candidates are sampled on the
 scene grid), a fixed `seed` (reused across candidates so residuals are comparable),
-`gs_overrides.max_iters` for a cheaper search, and optionally `refine`, a second pass
-over the candidates the sweep leaves near its minimum (see "Refinement pass"). An
-unknown key in `grid_search`, `gs_overrides`, `refine` or `gerchberg_saxton` is a config
-error, so a misspelt `init` or `refine` cannot silently run the legacy path. Each run is
-saved to `<output_dir>/<run_name>/` — the run name comes from the config's
-`output.run_name` (fallback `grid_search`), e.g. `results/scenario_caustic_hit/`, or
-`-o/--out` names the directory outright.
+and `gs_overrides.max_iters` for a cheaper search (the campaign base configs set none,
+so the sweep solves under `gerchberg_saxton`'s own cap). Every usable candidate is
+solved exactly once, from `gerchberg_saxton.init`. An unknown key in `grid_search`,
+`gs_overrides` or `gerchberg_saxton` is a config error, so a misspelt `init` cannot
+silently run the legacy path. Each run is saved to `<output_dir>/<run_name>/` — the
+run name comes from the config's `output.run_name` (fallback `grid_search`), e.g.
+`results/scenario_caustic_hit/`, or `-o/--out` names the directory outright.
 
 Plain `mgs` resolves `output.run_name` to the same path, but the two tools will no longer
 clear each other's runs: each refuses to clear a directory that does not carry its own
@@ -385,8 +390,6 @@ marker file, and says so before starting work. Use `-o/--out` to keep them apart
   list (the alignment order for every per-frequency value in the run), and the indexed
   candidate list (z, x_center, joint residual, `per_freq_losses` with `null` where a
   frequency failed the sampling check, `freq_valid`, iters, stop reason) plus any skipped points.
-  A run with a `refine` block also records the pass (`gs.refine`) and, per candidate,
-  `start`, `refined` and `sweep_loss` (see "Refinement pass").
 - `measurement.npz` — the per-frequency RX fields and error weightings (stacked `(F, nx)` on
   the scene axis), the ragged per-frequency RX element arrays (`rx_aper_axis_00`, ...), and
   the real-TX aperture (one shared axis, per-frequency profiles).
@@ -434,10 +437,10 @@ marker file, and says so before starting work. Use `-o/--out` to keep them apart
 Lower residual = better data fit = more likely TX location, which is the input to the
 candidate-ranking step. On a headless machine set `MPLBACKEND=Agg`.
 
-`--jobs/-j` sets the worker-process count for the sweep, the refinement pass and
-scene/animation rendering (default: all cores; `1` = serial). Results do not depend on
-it — every candidate uses the same fixed seed, and results are assembled by input index,
-so the manifest and every candidate `.npz` are byte-identical whatever `-j` you pass.
+`--jobs/-j` sets the worker-process count for the sweep and scene/animation rendering
+(default: all cores; `1` = serial). Results do not depend on it — every candidate uses
+the same fixed seed, and results are assembled by input index, so the manifest and
+every candidate `.npz` are byte-identical whatever `-j` you pass.
 
 #### Solver engines
 
@@ -554,26 +557,20 @@ The data-driven start gets there in a half to a tenth of the iterations.
 the scan cannot tell apart. The ±13 % comb (87:100:113) repeats after 100 cycles and
 almost after 77, so two offsets score within about 1e-4 of each other, only one of
 them lies in the basin the other tones agree with, and which of the two scores higher
-depends on the noise draw. Two things follow in the code. The offset is chosen from
-the 32 best local maxima of a closed-form score, each polished by Newton steps, so the
-choice does not depend on where the 0.02 rad scan grid falls. And
-`gs_reconstruct_multistart`, which the refinement pass uses, descends from every
-offset within 1e-3 of the best score (at most 3) and keeps the lowest loss. A single
-start (`mgs`, `--true-mgs`, the sweep's first solve) takes the best-scoring offset
-alone: on the caustic config at ±13 % that ended at 2.1 to 2.3 times the true plate's
-loss for two of nine noise seeds, where the multistart solve ends at 1.13 at most.
+depends on the noise draw. The offset is chosen from the 32 best local maxima of a
+closed-form score, each polished by Newton steps, so the choice does not depend on
+where the 0.02 rad scan grid falls. It is still the best-scoring offset, and the
+descent cannot cross from one of the pair to the other: on the caustic config at
+±13 % the solve ended at 2.1 to 2.3 times the true plate's loss for two of nine noise
+seeds. That is a known limit of the single data-driven start, which every solve
+(`mgs`, `--true-mgs`, each sweep candidate) runs.
 
 **The legacy start is kept unchanged**, so that earlier runs can be reproduced:
 `warm_start` is still the default, with its original scan range, on both engines, and
-a config that does not set `init` solves exactly as it did before. A grid sweep with
-`init: backprop` and no `grid_search.refine` block is refused before anything is
-solved: the data-driven start is the one whose solves the flatness test stops early at
-locations it does not suit, and the block is what puts a second start behind them.
-Single solves (`mgs`, `--true-mgs`) are not affected. The derivations and the
-measurements behind all of this are in `src/rice_bend/mgs.py` (the notes above
-`comb_period`, and the docstrings of `_backprop_start` and
-`gs_reconstruct_multistart`). `scripts/true_tx_table.py` (see `mgs-study`) tabulates
-the solve at the true TX per bandwidth for a given config.
+a config that does not set `init` solves exactly as it did before. The derivations
+and the measurements behind all of this are in `src/rice_bend/mgs.py` (the notes above
+`comb_period`, and the docstring of `_backprop_start`). `scripts/true_tx_table.py`
+(see `mgs-study`) tabulates the solve at the true TX per bandwidth for a given config.
 
 A candidate too close to the RX plane may fail the Rayleigh-Sommerfeld sampling check at
 the highest frequencies while passing at lower ones; such a candidate is solved jointly
@@ -622,95 +619,10 @@ replotting a run made by older code produces a figure pair that silently disagre
 The 300 GHz retarget is such a change: the caustic generator now builds its plate by resampling
 the unwrapped phase, so a caustic run saved before it gets its baseline re-solved against a plate
 built differently from the one its residuals were measured on.
-`schema_version` in `candidate_beams.json` distinguishes result sets (4 = joint, from a
-config with a refinement block; 3 = joint; 2 = the retired per-frequency layout).
+`schema_version` in `candidate_beams.json` distinguishes result sets (3 = joint; 4 =
+joint, written by the since-removed refinement pass, whose extra keys the readers
+ignore; 2 = the retired per-frequency layout).
 `run.json` is 3.
-
-#### Refinement pass
-
-A sweep solves every candidate under limits that suit the thousands far from the TX
-and not the few that decide the answer. Near the truth three things go wrong. The
-sweep's iteration cap (`gs_overrides.max_iters`, 800 in the scenario configs) is below
-what those candidates need on the on-grid receiver. `convergence_threshold` is an
-absolute loss slope, so at 35 to 40 dB, where the loss near the truth is small, it
-stops the descent above the floor it could reach. And no single start wins at every
-location: the data-driven start ends up to 2.8× above the random route on the focus
-beam, the random route up to 219× above the data-driven start on bessel. A ranking
-made from one start under the sweep's cap compares the luck of the solves as much as
-the locations.
-
-A `refine` block under `grid_search` adds a second pass. The base configs carry it
-with these values, which are also the defaults (`refine: {}`):
-
-```yaml
-grid_search:
-  gs_overrides: {max_iters: 800}
-  refine: {within: 10.0, max_iters: 6000, convergence_threshold: -1.0e-10, max_candidates: 12000}
-```
-
-- **The second start, in the sweep.** A solve that stops by the flatness test
-  (`converged`) has stalled, and from one start that says more about the start than
-  about the location. It is solved again from the other start (the random route for
-  `backprop`, the data-driven start for `random` and `warm_start`) under the same cap,
-  and the candidate keeps the lower loss. For several tones the second start descends
-  from every near-tied offset. A solve that ran into the cap is left alone: it was
-  still descending.
-- **The band, after the sweep.** Every candidate whose sweep loss is within `within` ×
-  the sweep's minimum is re-solved from both starts (`gs_reconstruct_multistart`: the
-  data-driven start and the random route with the corrected offset scan, each from
-  every near-tied offset).
-- **The cap and the threshold.** The re-solve runs under the block's own `max_iters`
-  and `convergence_threshold` (`null` keeps `gerchberg_saxton`'s). A candidate takes
-  the re-solve's result only if it ends strictly lower than its sweep loss, and takes
-  it whole: the profile, the losses, the iteration count and the stop reason always
-  describe one solve. So a refined candidate never ends above its sweep loss.
-- **The skip rule.** If more than `max_candidates` qualify, nothing is re-solved and
-  the run is marked `skipped`; the sweep's result stands for every candidate. The set
-  is never cut to the best N: re-solving lowers the ones kept and leaves the rest at
-  their sweep loss, which would force the answer into the N.
-
-**What is recorded.** A run from a config with a `refine` block writes manifest
-schema 4; without one it writes schema 3, key for key what it wrote before the pass
-existed. Schema 4 adds `gs.refine` to `candidate_beams.json`: the four settings (the
-effective threshold), `status` (`done` or `skipped`), `sweep_second_start` (`n_tried`,
-`n_won`), `sweep_min`, `n_selected`, `n_improved`, `wins` (per selected candidate:
-`backprop`, `random`, or `kept` when the sweep's result stood), `gain_max` and
-`gain_max_index`. Each candidate gains `start` (the start its stored solve began
-from), `refined` and `sweep_loss`, in the manifest and in its `cand_####.json`. The
-fields beside them (`final_loss`, `per_freq_losses`, `n_iters_run`, `stop_reason`, the
-`.npz` profile and loss curve) are the stored solve's, so `analysis.json` and every
-plot rank a refined run on its refined losses without knowing a pass ran.
-`gs.effective_max_iters` stays the sweep's cap. `mgs-study` records each point's
-`refine_status` and `n_refined` and draws a skipped point hollow (see `mgs-study`).
-
-**Measured.** Against re-solving every candidate, on a fine patch round the true TX
-and on a coarse grid over the whole search area, for the three beams, at a single tone
-and at ±20 %: the pass gives the same best candidate and the same 1.5× set in 12 of 12
-cases, and the band needed to hold every member of that set was at most 2.4×, against
-the 10× used. Full-grid single-tone pilots from the base configs (327×151, on-grid
-receiver; top candidate's distance from the true TX in mm / mean distance of the top
-candidates in mm / size of the tied set):
-
-| | caustic | bessel | focus |
-| --- | --- | --- | --- |
-| 30 dB | 1.83 / 8.5 / 36 | 4.56 / 27.0 / 55 | 2.65 / 8.9 / 17 |
-| 40 dB | 1.83 / 2.5 / 4 | not run | not run |
-| 10 dB | pass skipped: every candidate is within 10× of the best | not run | not run |
-
-A sweep from the legacy start under a 2400-iteration cap, with no second pass, gives
-the same three top candidates at 30 dB (1.83, 4.56 and 2.65 mm).
-
-**Known limits.**
-
-- The band is measured, not guaranteed. A candidate's sweep loss is only an upper
-  bound on what its location reaches, and the pass sees the candidate only if that
-  bound falls inside the band. On the caustic scenario at ±10 % one candidate stalled
-  at 16× the sweep's minimum and was not re-solved; fully re-solved it belongs at
-  2.2×, outside the 1.5× set, so nothing was lost there, but outside the band too.
-- Most re-solves stop on the 6000 cap, 0 to 7 % above the converged loss. That can
-  flip a 0.2 % tie between neighbouring cells.
-- At 10 dB and below every candidate is within 10× of the best, so the pass is skipped
-  there and the ranking is the sweep's.
 
 ### `mgs-animate`
 
@@ -759,15 +671,22 @@ mgs-study --replot results/study_frequency_snr30dB                 # rebuild stu
 ```
 
 The default base config is the caustic campaign base config, because a study is a
-series of full sweeps and should run them from a config with the on-grid receiver, the
-data-driven start and the refinement pass. The 300 GHz campaign is six studies, the
-two series below for each `<beam>` of `caustic`, `bessel` and `focus`, each from that
-beam's base config and into its own root:
+series of full sweeps and should run them from a config with the on-grid receiver and
+the data-driven start. The 300 GHz campaign is six studies, the two series below for
+each `<beam>` of `caustic`, `bessel` and `focus`, each from that beam's base config and
+into its own root:
 
 ```bash
 mgs-study --study frequency --config configs/scenario_<beam>_hit_1f_grid2l.yml --engine rust -j 32 --out results/campaign_300ghz/frequency_<beam>
 mgs-study --study snr --config configs/scenario_<beam>_hit_1f_grid2l.yml --engine rust -j 32 --out results/campaign_300ghz/snr_<beam>
 ```
+
+The roots already under `results/campaign_300ghz/` were made with the 800-iteration
+sweep plus the refinement pass that has since been removed (manifest schema 4; the pass
+ran at every point of the frequency series and at 15 dB and above in the snr series,
+and was skipped at 0, 5 and 10 dB). The current code cannot reproduce them, and the
+resume guard below refuses to resume them: a re-run needs new `--out` roots. They
+still replot.
 
 | `--study` | Varies | Points |
 | --- | --- | --- |
@@ -788,64 +707,43 @@ ordinary grid-run directory per point, the study plot (`study_error_vs_bandwidth
 `study_metrics_vs_ndof.png`. The default root is `<output_dir>/study_<study>`, plus an
 `_snr<DB>dB` suffix when noise is on (see "Receiver noise (SNR)").
 
-`study.json` is schema 8: it records the base config's `beam` block and
-`center_freq_hz` at the top level, stores `x_label` with the centre filled in
-(`bandwidth (± % of 300 GHz)`), and gives every point a `refine_status` (`null` when
-the base config has no `grid_search.refine` block, else `done` or `skipped`) and
-`n_refined`, the number of candidates the refinement pass re-solved there. Plot titles
-name the beam and the carrier, e.g. `frequency study — caustic beam, 300 GHz — SNR
-30 dB`.
-
-A point whose refinement pass was skipped is drawn **hollow** in the study plot, in
-both series, with one legend entry saying so. Its ranking is the sweep's alone (the
-sweep's cap, the second start but no re-solve), while the filled points beside it had
-their near-best candidates re-solved, so the two are not comparable loss for loss and
-the curve has to show which is which. The pass is skipped where too many candidates
-lie near the sweep's minimum: in the caustic single-tone pilot at 10 dB every
-candidate was within 10× of the best (see "Refinement pass").
+`study.json` is schema 9: it records the base config's `beam` block and
+`center_freq_hz` at the top level and stores `x_label` with the centre filled in
+(`bandwidth (± % of 300 GHz)`). Plot titles name the beam and the carrier, e.g.
+`frequency study — caustic beam, 300 GHz — SNR 30 dB`. A schema-8 root (written while
+the refinement pass existed) still replots; its points come back without their
+`refine_status` / `n_refined`.
 
 A point whose `candidate_beams.json` exists is not solved again, and its directory
 name is all that keys it. So before anything is written, a pre-flight guard refuses
 (exit 2) to resume a root whose saved points are not the ones this invocation would
 solve: different frequencies, scene, TX (beam included), RX, candidate grid, solver
-settings or refinement settings, a different `--limit`, another study, or different
-noise. The default root names neither the beam nor the carrier, so different beams or
-carriers need different `--out` roots. A root solved before the retarget (150 GHz) is
-refused by the retargeted configs. `--replot` is not guarded: such a root still
-replots from what its own points recorded, and keeps its 150 GHz labels.
+settings, a different `--limit`, another study, or different noise — or a point solved
+with the removed refinement pass, whatever its settings. The default root names neither
+the beam nor the carrier, so different beams or carriers need different `--out` roots.
+A root solved before the retarget (150 GHz) is refused by the retargeted configs.
+`--replot` is not guarded: such a root still replots from what its own points
+recorded, and keeps its 150 GHz labels.
 
 `scripts/true_tx_table.py CONFIG.yml --out FILE.md [--snr-db DB|off] [--noise-seed N]
-[--max-iters N] [--engine python|rust]` is the companion check for the `frequency`
+[--max-iters N]` is the companion check for the `frequency`
 series. A grid search can only rank the true location first if the solve *at* the true
 location gets down to what the true plate scores, and whether a multi-tone joint solve
 does depends on its start (see Initialization, under "Multiple frequencies"). For each
 study bandwidth the script runs one solve at the true TX location with the study's
-exact comb, from the config's own `init`, and tabulates the solver's loss against the
-true plate's loss (the `LANDING` loss numbers).
-
-When the config has a `grid_search.refine` block, as the base configs do, each
-bandwidth gets a second solve of the same problem: what the refinement pass would give
-this location if it were a near-best candidate (`gs_reconstruct_multistart`, both
-starts, each from every near-tied offset, under the block's cap and stop threshold and
-from the sweep's seed). The table then has the single-start columns, named as such
-(`single-start loss`, `single-start ratio`, `single-start iterations`, `single-start
-stop`), and beside them the refined columns: `refined loss`, `refined ratio` (to the
-same true-plate loss) and `refined start`, the start that loss came from. The JSON
-rows also carry `refined_n_iters`, `refined_stop_reason` and `flag_basis`.
+exact comb, from the config's own `init` and under its own cap and stop threshold,
+and tabulates the solver's loss against the true plate's loss (the `LANDING` loss
+numbers). With the base configs (no `gs_overrides`) it runs under the same solver
+settings as the sweep's one solve per candidate; the true TX is not a grid point.
 
 A ratio above 2 flags the row as `solver-limited`: a localization error at that
-bandwidth reflects the solver, not the physics. With a refine block the flag is read
-off the **refined** ratio, because that is the loss a sweep's ranking is made from
-near the truth; a single-start ratio above 2 beside an unflagged refined one is a
-start that the refinement repairs. Without a refine block the flag is read off the one
-ratio there is, and the table is what it was before. On a noiseless run with an
-on-grid receiver the flag column reads `n/a` on every row: the target is then the true
-field at the elements, the true plate scores almost zero, and the ratio is not a basin
-test. The ratios are still written; run with receiver noise for a ratio that tests the
-basin. `--max-iters` caps the single-start solve alone, and `--engine` chooses the
-refined solve's engine (the single-start solve captures history and runs on python).
-The script writes the Markdown table to `FILE.md` and the same rows to `FILE.json`
-beside it.
+bandwidth reflects the solver, not the physics. On a noiseless run with an on-grid
+receiver the flag column reads `n/a` on every row: the target is then the true field
+at the elements, the true plate scores almost zero, and the ratio is not a basin test.
+The ratios are still written; run with receiver noise for a ratio that tests the
+basin. `--max-iters` overrides the iteration cap. The solve captures history, so it
+runs on python whatever `gerchberg_saxton.engine` says. The script writes the
+Markdown table to `FILE.md` and the same rows to `FILE.json` beside it.
 
 ### Receiver noise (SNR)
 
@@ -945,8 +843,7 @@ The `snr` series sweeps the SNR itself: 0 to 40 dB in 5 dB steps, one grid searc
 value, all with the same seed. Nothing else changes, so it solves with whatever
 frequencies the base config lists, and the base config's own `snr_db` (30 dB in the
 scenario configs) is overridden at every point. Its default root is `study_snr` (no
-suffix), and it plots error against SNR (`study_error_vs_snr.png`). A point where the
-refinement pass was skipped is drawn hollow (see `mgs-study`). `--snr-db` cannot
+suffix), and it plots error against SNR (`study_error_vs_snr.png`). `--snr-db` cannot
 be combined with it (exit 2) because the series sets every point's SNR, but
 `--noise-seed` can:
 
@@ -999,11 +896,11 @@ Infrastructure:
 Entry points:
 
 - `mgs.py` — the MGS solver core and driver (`mgs`): the descent, the three starts
-  (`init`), the offset scan over the comb's true period, and `gs_reconstruct_multistart`
+  (`init`) and the offset scan over the comb's true period
 - `animate.py` — TX-estimate animation from a saved run (`mgs-animate`)
 - `grid_search.py` — orchestration + CLI for the sweep (`grid-search-mgs`), over three modules:
-  - `grid_sweep.py` — enumerate the grid, solve at each point, re-solve the near-best
-    candidates when the config has a `refine` block, persist. No matplotlib
+  - `grid_sweep.py` — enumerate the grid, solve once at each point, persist. No
+    matplotlib
   - `residual_plots.py` — the residual grid and its six plots
   - `candidate_scenes.py` — re-illuminated candidate beams and the true-MGS baseline
 - `study.py` — the parameter-study driver (`mgs-study`): the series tables, the resume guards,
@@ -1039,7 +936,7 @@ The six checks split by noise, receiver and start:
 | 2 | `mgs` on `scenario_caustic_hit.yml`, pinned to 300 GHz | 30 dB, seed 0 | on-grid λ/2 | legacy |
 | 3, 4 | `grid-search-mgs --limit 6` on `scenario_caustic_hit_sparse.yml` at 300 GHz, serially and across 4 workers | 30 dB, seed 0 | interpolated λ/2 | legacy |
 | 5 | `grid-search-mgs` on `tiny_check.yml`, 280 and 300 GHz | none | interpolated, λ/20 at runtime | legacy |
-| 6 | `grid-search-mgs --limit 6` on `scenario_caustic_hit_1f_grid2l.yml`, serially and across 4 workers | 30 dB, seed 0 | on-grid λ/2 | `backprop`, with `grid_search.refine` |
+| 6 | `grid-search-mgs --limit 6` on `scenario_caustic_hit_1f_grid2l.yml`, serially and across 4 workers | 30 dB, seed 0 | on-grid λ/2 | `backprop` |
 
 Checks 1 and 5 pin the noiseless path and the runtime λ/20 RX sampling. The others pin
 the receiver-noise path: their residuals and hashes depend on the seeded draw, that
@@ -1047,15 +944,11 @@ is on numpy's `Generator` stream (`noise.py`) as well as on the solver. Checks 3
 are the net's only noisy run of the interpolated receiver, which is why
 `scenario_caustic_hit_sparse.yml` stays on it.
 
-Check 6 is what puts the data-driven start, the sweep's second start and the
-refinement pass in the net. On its six candidates one sweep solve is stopped by the
-flatness test and solved again from the random start, and all six fall inside the
-refinement's band and are re-solved from both starts. It is the only run that writes a
-schema-4 manifest, so its digest holds what checks 3 and 4 digest plus the `gs.refine`
-block, each candidate's `start`, `refined` and `sweep_loss`, and the rule that no
-refined candidate ends above its sweep loss. As in check 4, the parallel run's
-manifest has to equal the serial one's, which here covers the refinement as well as
-the sweep.
+Check 6 is what puts the data-driven start in the net, with the campaign's one-solve
+sweep: each of its six candidates is solved once, under the base config's 3000-iteration
+cap and −1e-10 stop threshold (no `gs_overrides`). Its digest holds what checks 3 and 4
+digest (`init`, every residual and iteration count, candidate 3's and the measurement's
+hashes), and as in check 4 the parallel run's manifest has to equal the serial one's.
 
 The expected values are generated, never transcribed — hand-typed float literals rot
 the moment nobody re-blesses them. After a change that is meant to move the numbers
@@ -1068,9 +961,8 @@ runs to the end, exits 1 and reports differences on every check, with check 6 as
 `ADDED` entries: a run shows that every command still completes, not that the numbers
 are held.
 
-The run took ~25 s before the retarget; with check 6 it takes about a minute, and
-check 6's re-solves under the 6000-iteration cap are the largest part of that. It pins
-the python engine only.
+The run took ~25 s before the retarget; check 6 adds about 20 seconds. It pins the
+python engine only.
 The Rust engine has its own gates: `cd rust && cargo test`, and
 `rust/python/parity.py`, whose seven slices run `tiny_check.yml` and
 `scenario_caustic_hit_sparse.yml` noiseless and again at 20 and 10 dB, and

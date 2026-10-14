@@ -18,9 +18,10 @@ from pathlib import Path
 from typing import List, Optional
 
 import numpy as np
+import yaml
 
 from rice_bend import __version__
-from rice_bend.config import SimConfig, load_config
+from rice_bend.config import SimConfig
 
 
 @dataclass
@@ -45,8 +46,8 @@ class GSHistory:
     error_weighting: np.ndarray    # (F, size)
     support: np.ndarray            # bool mask (shared across F)
     # the phase the descent STARTED from (shared across F): the seeded RNG draw, the
-    # warm start, a back-propagated start or a caller's given phase -- whichever
-    # gs_reconstruct used, so no longer always the draw
+    # warm start or the back-propagated start -- whichever gs_reconstruct used, so
+    # not always the draw
     initial_phase: np.ndarray
     rx_z: float
     seed: int
@@ -211,9 +212,29 @@ def save_config_snapshot(run_dir: Path, config, config_path: Path) -> None:
         pass
 
 
+def _drop_removed_refine(raw, run_dir: Path, log: logging.Logger):
+    """`raw` (a saved run's config, as read) without grid_search.refine.
+
+    Runs saved while the sweep had its post-sweep re-solve pass carry the key: a
+    refined run has the full settings block in both config_source.yml and
+    config_snapshot.json, and an unrefined run's snapshot has it as null. The
+    config models now refuse it as an unknown key. A saved run is a record, not a
+    request to run that pass again, and the block never changed the single solve
+    this config is read back for (the true-TX replay), so it is dropped here and
+    the run stays replayable. A config handed to a command is not read through
+    here and is still refused."""
+    grid = raw.get("grid_search") if isinstance(raw, dict) else None
+    if isinstance(grid, dict) and "refine" in grid:
+        if grid.pop("refine") is not None:
+            log.info(f"{run_dir}: ignoring the saved config's grid_search.refine "
+                     "block (the refinement pass has been removed)")
+    return raw
+
+
 def load_run_config(run_dir: Path, log: logging.Logger) -> Optional[SimConfig]:
     """Read a saved run's config back: prefer the verbatim source .yml, fall back to
-    the effective snapshot JSON. None if neither is present.
+    the effective snapshot JSON. None if neither is present. A grid_search.refine
+    block in either is dropped (_drop_removed_refine).
 
     This is the reader for the format save_config_snapshot writes; the two halves
     used to live in different modules.
@@ -221,11 +242,14 @@ def load_run_config(run_dir: Path, log: logging.Logger) -> Optional[SimConfig]:
     run_dir = Path(run_dir)
     src = run_dir / "config_source.yml"
     if src.exists():
-        return load_config(src)
+        with open(src) as f:
+            raw = yaml.safe_load(f)
+        return SimConfig(**_drop_removed_refine(raw, run_dir, log))
     snap = run_dir / "config_snapshot.json"
     if snap.exists():
         with open(snap) as f:
-            return SimConfig.model_validate(json.load(f))
+            raw = json.load(f)
+        return SimConfig.model_validate(_drop_removed_refine(raw, run_dir, log))
     log.warning(f"No config_source.yml/config_snapshot.json in {run_dir}; "
                 "cannot build the true MGS run")
     return None
