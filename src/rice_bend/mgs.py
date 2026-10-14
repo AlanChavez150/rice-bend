@@ -1,9 +1,11 @@
 import logging
 import argparse
+import math
 from collections import namedtuple
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 from pydantic import ValidationError
@@ -32,11 +34,112 @@ FreqChannel = namedtuple("FreqChannel", "freq wavelength rx_field error_weightin
 # Warm-start stage 3: scan step for the absolute-offset search — fine enough to land
 # well inside the joint basin; the joint descent polishes the remainder. The scan is
 # elementwise work only (see _warm_start_phase), so a fine step costs nothing.
+# The LEGACY scan's step, frozen with it; the corrected scan has its own
+# (OFFSET_SCAN_STEP).
 WARM_START_SCAN_STEP = 2 * np.pi / 64
 
 # Backstop on offset samples for pathological near-duplicate frequency lists, whose
-# synthetic period (2π·f_ref/Δf_min) explodes as the frequency gaps shrink.
+# synthetic period (2π·f_ref/Δf_min) explodes as the frequency gaps shrink. The
+# LEGACY scan's cap, frozen with it; the corrected scan has its own
+# (_offset_scan_max_samples), sized to its own step.
 WARM_START_MAX_SAMPLES = 100_000
+
+# The largest denominator comb_period looks for when it turns a tone ratio into a
+# fraction, and so the length in cycles of the range it falls back on when the
+# tones have no period that short. One number, because two things hang on it: the
+# fallback range itself, and the corrected scan's sample cap, which is sized so
+# that this many cycles always fit (_offset_scan_max_samples).
+COMB_PERIOD_MAX_DEN = 1024
+
+# Grid step of the corrected absolute-offset scan (_offset_scan), in rad of psi. The
+# grid's job is to FIND the peaks of the score; which peak wins is decided after each
+# has been polished to its own top, so the choice no longer rests on this number. It
+# did before the polish, and the case says why it must not. A ±13 % comb (87:100:113)
+# repeats exactly after 100 cycles and ALMOST after 77 (0.87 * 77 = 66.99,
+# 1.13 * 77 = 87.01), which leaves two offsets that differ by 0.063 rad on each edge
+# tone and by nothing on the centre one. At the true TX of the caustic scenario
+# (30 dB) their peaks score 719.405 and 719.297: 1.5e-4 apart. A grid sample sits up
+# to half a step off its peak. At the legacy 2π/64 that costs up to 1.2e-3 of the
+# score, the plain grid maximum is the WRONG peak (sampled 718.557 against 718.604),
+# the descent cannot cross from one to the other, and the solve ends at 2.28x the
+# true plate's loss instead of 1.09. At 0.02 rad it costs up to 5e-5 and the grid
+# maximum happens to be the right peak — on a third of the gap, which is not a
+# margin to rest on. With the polish the same offset comes back from either grid, to
+# 1e-13 rad, for every comb of the study and all three beams. What the step still
+# has to do is put every peak on the grid as a local maximum well inside its own
+# basin: peaks are about one cycle apart, so 314 samples each, and a 100-cycle period
+# is 31,416 samples of F phasors — still free.
+#
+# (Those two scores are noise seed 0's. WHICH of the two peaks is the higher is the
+# noise draw's choice — the other one in 22 of 48 seeds — and no grid or polish
+# settles that: see OFFSET_NEAR_TIE_RTOL.)
+OFFSET_SCAN_STEP = 0.02
+
+# The polish that follows the grid scan (_offset_scan): how many of the grid's local
+# maxima are carried to their own peak before the best is chosen, and how many
+# Newton steps each gets. Thirty-two is far more than ever compete: over the study's
+# combs and the three beams at most two peaks come within 1.2e-3 of the best (what
+# the legacy step's misalignment can cost), and where a period holds more than 32
+# peaks the 32nd is 29 % or more below it. Three steps from within half a grid step
+# of a peak land on it to rounding: Newton converges quadratically, and from 0.01
+# rad that is the offset to 1e-13 rad (the same from a 2π/64 grid, 0.049 rad off).
+OFFSET_POLISH_CANDIDATES = 32
+OFFSET_POLISH_STEPS = 3
+
+# Near-tied offsets (_offset_candidates): a polished peak within this fraction of
+# the best score is too close to the best for the scan to call, and
+# gs_reconstruct_multistart descends from it as well — from at most
+# OFFSET_NEAR_TIE_MAX offsets per start, the best included.
+#
+# Both numbers are measured (30 dB, on-grid receiver, back-propagated start unless
+# said). What makes a near-tie is a comb that almost repeats inside its period: the
+# runner-up is then the best offset's twin (77 or 23 cycles away at ±13 %, 43 at
+# ±7 %, 33 at ±3 %, the adjacent cycle at ±1 %), 0.063 rad off on each edge tone,
+# and the descent from the wrong one of the pair stays about 2x above the other.
+#   - At the true TX of the caustic scenario at ±13 % the twin scores HIGHER than
+#     the offset in the true plate's basin in 22 of 48 noise seeds, by up to 2.5e-4.
+#     (±7 %: never in 48, closest 1.8e-4; ±3 %, ±1 % and the other two beams:
+#     never, closest 4.8e-4.)
+#   - At wrong locations the gap is wider. Over the 97-114 candidates the refinement
+#     re-solves on a 21x21 patch round that TX at ±13 % (noise seeds 0, 1, 2), the
+#     runner-up is the better basin for 22-25 of them — a final loss 1.07x to 1.93x
+#     lower — at gaps from 2e-5 up to 1.3e-3.
+#   - 1e-3 reaches 19-21 of those; the 3-5 it leaves end at 2.6x the run's minimum
+#     or more either way. 5e-4 reaches 11-12 and 3e-4 only 6-7, and both leave out
+#     members of the final 1.5x set (candidates at 1.25x to 1.48x the minimum).
+#   - The price at 1e-3: a second descent that does not help for 40-42 of those
+#     candidates (1.6 descents per start on average at ±13 %); at ±1 %, where the
+#     runner-up was the better basin for none of 114, a second offset still comes
+#     within 1e-3 for 91 of the patch's 441 candidates — 1.2 descents per start,
+#     for nothing. At 2e-3 every candidate would get two and most three, at every
+#     bandwidth. So 1e-3: the widest tolerance that does not charge the combs
+#     without a close twin.
+#   - What it bought on that patch: the candidate nearest the TX took the twin's
+#     offset in all three seeds and ended at 1.62-1.77x the run's minimum; with
+#     both offsets descended it ends at 1.42-1.51x (1.51x is where the right
+#     offset stands when it runs into the refinement's 6000-iteration cap; it
+#     reaches 1.42x by 40,000).
+# OFFSET_NEAR_TIE_MAX is a backstop, not a tuning: at 1e-3 a third peak came within
+# tolerance in none of these measurements (45 true-TX cases x 2 starts, six patch
+# surveys of 441 candidates). It bounds the cost for a comb with several
+# near-repeats.
+OFFSET_NEAR_TIE_RTOL = 1e-3
+OFFSET_NEAR_TIE_MAX = 3
+
+# The data-driven start (_backprop_start). The back-propagated reference tone is
+# "lit" where its amplitude is at least this fraction of its peak over the support;
+# the phase is read between the first and the last lit sample and continued outside.
+# 0 turns the threshold off (everything is lit: a plain unwrap over the whole
+# support). What it buys and what it costs is measured in _backprop_start's
+# docstring — a trade, not a clear win, so treat the value as a knob.
+BACKPROP_LIT_FRACTION = 0.1
+
+# ...and how the phase is continued outside the lit span: at the constant slope of a
+# least-squares line through this many lit samples nearest the edge (fewer if the
+# span is shorter). One sample pair would hand the edge's own noise to the whole
+# dark stretch; this many average it out while staying local enough to follow a
+# curved profile's slope AT the edge.
+BACKPROP_SLOPE_FIT_SAMPLES = 24
 
 
 def _warm_start_phase(tx_z, orig_aper_amp, x_axis, rx_z, channels, params, seed,
@@ -121,6 +224,509 @@ def _warm_start_phase(tx_z, orig_aper_amp, x_axis, rx_z, channels, params, seed,
     return psi
 
 
+# ---------------------------------------------------------------------------------
+# The data-driven start (`init: backprop`) and the comb's TRUE offset period.
+#
+# _warm_start_phase above is the LEGACY start and is kept exactly as it was, its
+# short scan included: `init: warm_start` has to reproduce every result already on
+# disk bit for bit, on both engines (rust/src/warm_start.rs is its twin and is frozen
+# with it). It has two limits, both measured at the true TX with an on-grid receiver
+# at 30 dB as final loss / loss of the true plate's own phase, over the frequency
+# study's three-tone combs (±1 % to ±20 %):
+#
+#   1. The scan range. 2π·f_ref/Δf_min is a period of the joint loss only when
+#      f_ref/Δf is an integer. For tones (100-p):100:(100+p) the period is
+#      2π·100/gcd(100, p), so the range is the period at ±1, 2, 5, 10 and 20 % and
+#      a fraction of it at ±3, 7, 13 and 16 % — the four bandwidths at which the
+#      focus beam fails (2.00, 5.02, 31.5, 16.8 against 1.01 to 1.04 at the others):
+#      the offset that lines the tones up lies outside what was scanned.
+#   2. The reference solve. Started from a random phase, the single-tone solve is
+#      not unique where part of the beam misses the RX window: nothing measured
+#      constrains the part of the plate that feeds the missing energy. The scaled
+#      copy of what the solve returns there (rho_f * psi) misses the other tones,
+#      and the joint descent stalls (bessel: 1.60 at ±1 % rising to 165 at ±20 %).
+#
+# The start below takes the phase from the DATA instead (the reference tone's
+# measurement back-propagated to the candidate plane) and scans the offset over the
+# true period; the ordinary descent follows, with no reference solve. Measured the
+# same way — on the configs' noise draw, seed 0 — it ends at 0.95-1.11 (caustic),
+# 0.93-1.00 (bessel) and 0.98-1.01 (focus) of the true plate's loss at all ten
+# bandwidths, after 804-1714, 375-570 and 117-223 iterations (the legacy route's
+# reference solve alone takes 1488, 1765 and 1424).
+#
+# Other noise draws (seeds 1-8, same single start, cap 5000, stop -1e-8): bessel
+# and focus stay at or below 1.022 at every bandwidth. The caustic goes above 1.2
+# at ±13 % for four of the eight seeds (2.115, 2.310, 1.225, 1.224) and at ±20 % for
+# two (1.203, 1.270). The two near 2.2 are not a slow descent: the ±13 % comb
+# nearly repeats after 77 cycles, the scan's two best offsets are a near-tie that
+# the noise draw decides, and the single start took the one outside the true
+# plate's basin (OFFSET_NEAR_TIE_RTOL). A single start cannot do better than
+# that, and the single-shot paths (`mgs`, --true-mgs) and the sweep's first solve
+# ARE a single start. gs_reconstruct_multistart, which the refinement runs on the
+# sweep's near-best candidates, descends from every near-tied offset: under the
+# refinement's settings (cap 6000, stop -1e-10) the caustic at ±13 % then ends at
+# 0.92-1.13 over noise seeds 0-8, where the single start under the same settings
+# ends at 0.93-2.21.
+#
+# The data-driven start is also not the better one at every WRONG location, which
+# is the other reason gs_reconstruct_multistart exists: it runs this start against
+# the random-start route (with the scan corrected) and keeps the lower loss.
+# ---------------------------------------------------------------------------------
+def comb_period(freqs: Sequence[float], ref_freq: float,
+                max_den: int = COMB_PERIOD_MAX_DEN,
+                rtol: float = 1e-9) -> Tuple[float, bool]:
+    """The true period of the joint loss in the absolute offset: the smallest
+    delta > 0 with rho_f * delta = 0 (mod 2π) for every tone, rho_f = f / ref_freq.
+    Returns (period in rad, exact).
+
+    Adding delta to psi multiplies tone f's field by exp(1j * rho_f * delta), so
+    the joint loss repeats when — and only when — every one of those factors is
+    back at 1 together. Each rho_f is taken as a fraction n_f / d_f in lowest
+    terms. With Q = lcm(d_f) the ratios are m_f / Q for the integers
+    m_f = n_f * Q / d_f, the factors are exp(1j * m_f * delta / Q), and the first
+    delta that returns them all is 2π * Q / gcd(m_f).
+
+    For the study's combs (100-p):100:(100+p) about the reference this is
+    2π * 100 / gcd(100, p): 100 cycles of 2π at ±1, 3, 7 and 13 %, 50 at ±2 %, 25
+    at ±16 %, 20 at ±5 %, 10 at ±10 % and 5 at ±20 %. The legacy scan range
+    2π·f_ref/Δf_min = 2π * 100 / p agrees only where p divides 100; where it does
+    not, it is not a period at all and the range it covers can miss the best offset.
+    A single tone at the reference has period 2π, and a single tone off it (a
+    candidate that solves on a subset of the run's tones) 2π / rho.
+
+    The fractions come from Fraction.limit_denominator(max_den): tones are floats
+    (338999999999.99994 Hz for +13 % of 300 GHz), so the ratio is matched to the
+    nearest fraction with a small denominator, not read off the bits. A ratio that
+    is not within `rtol` (relative) of that fraction has no period this short —
+    then (2π * max_den, False) is returned: a range to scan, but not a period, and
+    the caller should say so.
+    """
+    ratios = []
+    for f in freqs:
+        rho = float(f) / float(ref_freq)
+        frac = Fraction(rho).limit_denominator(max_den)
+        if frac <= 0 or abs(float(frac) - rho) > rtol * abs(rho):
+            return 2 * np.pi * max_den, False
+        ratios.append(frac)
+    # Q = lcm of the denominators, folded pairwise: math.lcm needs python 3.9 and
+    # math.gcd takes two arguments before it
+    q = 1
+    for frac in ratios:
+        q = q * frac.denominator // math.gcd(q, frac.denominator)
+    # gcd of the integers m_f = n_f * Q / d_f (gcd(0, m) == m starts the fold)
+    g = 0
+    for frac in ratios:
+        g = math.gcd(g, frac.numerator * (q // frac.denominator))
+    return 2 * np.pi * q / g, True
+
+
+def _offset_scan_max_samples() -> int:
+    """The corrected scan's cap on grid samples: what COMB_PERIOD_MAX_DEN cycles
+    take at OFFSET_SCAN_STEP (321,700 at 0.02 rad), read at call time like the
+    step itself.
+
+    Sized that way because that is the longest range comb_period can ask for
+    without the tones being near-duplicates: its fallback for ratios that are
+    not small fractions is exactly COMB_PERIOD_MAX_DEN cycles, and a comb whose
+    ratios ARE fractions with a common denominator up to it has a true period no
+    longer. Under the legacy cap (WARM_START_MAX_SAMPLES, 100,000 — sized for a
+    step five times coarser) the fallback was cut to its first third, and on
+    the sweep's path, where workers have no logger, cut silently; and a scan at
+    a finer step lost the end of an ordinary 100-cycle period (at 0.005 rad:
+    125,664 samples). What still exceeds the cap is a true period LONGER than
+    COMB_PERIOD_MAX_DEN cycles — tones whose ratios need several different large
+    denominators, i.e. nearly duplicate frequencies — and that is truncated to
+    the start of the range, with a WARNING where there is a logger
+    (_scan_comb_offset)."""
+    return int(np.ceil(2 * np.pi * COMB_PERIOD_MAX_DEN / OFFSET_SCAN_STEP))
+
+
+def _offset_peaks(psi0: np.ndarray, channels: Sequence[FreqChannel], rho: np.ndarray,
+                  h_fwd: Sequence[np.ndarray], curr_aper_amp: np.ndarray, dx: float,
+                  period: float, periodic: bool = True
+                  ) -> Tuple[np.ndarray, np.ndarray]:
+    """The peaks of the absolute-offset score of psi0 over [0, period): a grid scan
+    at OFFSET_SCAN_STEP to find them, a Newton polish of each to its own top.
+    Returns (offsets, scores), best first — the highest score, and among equal
+    scores the smallest offset. `period` is the range to cover (comb_period's);
+    `periodic` says whether it is a true period of the loss (comb_period's
+    `exact`), i.e. whether the range wraps. _offset_scan takes the first of
+    these, _offset_candidates the first few when they are too close to call.
+
+    Adding delta multiplies tone f's field by exp(1j * rho_f * delta) and
+    propagation is linear, so with b_f the field of psi0 at the RX plane the loss
+    of tone f is 0.5 * mean(|w_f * (exp(1j * rho_f * delta) * b_f - y_f)|^2).
+    Expanding the square, only the cross term depends on delta:
+
+        joint loss(delta) = const - S(delta) / (N * F),
+        S(delta) = sum_f Re(c_f * exp(1j * rho_f * delta)),
+        c_f = sum(conj(w_f^2 * y_f) * b_f)
+
+    So each tone is propagated once, its whole contribution is the one complex
+    number c_f, and the score S — whose maximum is the loss's minimum — is a sum
+    of F phasors per sample. The comb's full period, up to 13 times the legacy
+    range on the study's combs, costs nothing; the legacy loop rebuilds every
+    tone's residual array per sample. The same closed form gives the derivatives
+    the polish needs:
+
+        S'(delta)  =  sum_f Re(1j * rho_f * c_f * exp(1j * rho_f * delta))
+        S''(delta) = -sum_f Re(rho_f^2 * c_f * exp(1j * rho_f * delta))
+
+    NO BLAS. All three are written as explicit sums of elementwise products: no
+    `@`, np.dot, np.vdot or einsum. This runs once per start of every candidate,
+    inside the sweep's worker processes, and a BLAS call there is not one thread:
+    each worker inherits the parent's OpenBLAS, sized to every core, and nothing a
+    worker can set afterwards shrinks it (parallel._init_worker). Written as
+    (len(d), F) phasors `e` against the coefficients, `e @ c`, the score put all
+    32 threads of every worker onto a matrix of three columns: 2.75 ms a call
+    against 0.16 ms on one thread, and a three-tone 441-candidate patch at 4
+    workers (rust engine) took 9 min 01 s of user and 10 min 57 s of system
+    time, against 5 min 39 s and 9 s once the matmul was gone. F is
+    at most ten, so a python loop over the tones costs nothing. np.vdot is out
+    for the same reason, though it was not what was measured: at a scene of 2,400
+    samples it stays on one thread here, at 24,000 it takes all 32, and where
+    that line falls is the BLAS build's business.
+
+    WHY THE POLISH. The grid's best sample is not the best offset: it sits up to
+    half a step off its peak, and by a different amount at every peak. That
+    error must not be what chooses between two peaks, and on its own it would
+    be: a comb can repeat ALMOST exactly well inside its true period, leaving
+    two offsets whose scores differ by less than the grid's misalignment costs
+    (see OFFSET_SCAN_STEP). So the grid is only asked to FIND the peaks. The
+    OFFSET_POLISH_CANDIDATES highest samples that are local maxima of the grid
+    score are each moved to the top of their own peak by OFFSET_POLISH_STEPS
+    Newton steps on S, and the offsets are compared there, where the grid no
+    longer enters. A Newton step is clamped to one grid step (a candidate stays
+    on the peak it was found on) and skipped where S'' >= 0 (not a maximum's
+    neighbourhood: the step would head for a minimum); a candidate whose polish
+    did not raise S keeps its grid sample, so the result is never worse than
+    the plain grid maximum.
+
+    The ends. With a true period the range wraps: sample 0 and the last sample
+    are neighbours, a peak that straddles the wrap is one candidate, and the
+    polished offset is returned in [0, period). Without one (`periodic` false,
+    or the sample count capped at _offset_scan_max_samples for near-duplicate
+    tones, when the grid covers the start of the range only) the ends are ends:
+    an end sample is a candidate if it beats its one neighbour, and the polish
+    is held inside the scanned range.
+
+    Deterministic: no draw, and every choice among equals is by index.
+    """
+    rho = np.asarray(rho, dtype=np.float64)
+    c = np.array([
+        np.sum(np.conj(ch.error_weighting ** 2 * ch.rx_field)
+               * rs.rs_apply(curr_aper_amp * np.exp(1j * (rho[f] * psi0)), h_fwd[f], dx))
+        for f, ch in enumerate(channels)])
+
+    def score_at(d):
+        """S, S' and S'' at the offsets `d`, accumulated one tone at a time (see
+        NO BLAS above). With t_f = c_f * exp(1j * rho_f * d):
+        Re(1j * rho_f * t_f) = -rho_f * Im(t_f) and Re(rho_f^2 * t_f) =
+        rho_f^2 * Re(t_f), so one phasor array per tone gives all three."""
+        s0, s1, s2 = np.zeros(len(d)), np.zeros(len(d)), np.zeros(len(d))
+        for f in range(len(c)):
+            t = c[f] * np.exp(1j * (rho[f] * d))
+            s0 += t.real
+            s1 -= rho[f] * t.imag
+            s2 -= rho[f] ** 2 * t.real
+        return s0, s1, s2
+
+    # 1. the grid. The step is read HERE, at call time, so a test can scan the
+    # same score on another grid (the gate that the choice does not depend on it)
+    step = OFFSET_SCAN_STEP
+    n_full = int(np.ceil(period / step))
+    n_samples = min(n_full, _offset_scan_max_samples())
+    wraps = periodic and n_samples == n_full
+    deltas = step * np.arange(n_samples)
+    score = score_at(deltas)[0]
+
+    # 2. the candidates: grid local maxima, the highest first. Strict on one side
+    # only, so a flat pair of samples is one candidate and not two; a tie in
+    # height keeps the smaller offset first (stable sort on an ascending index)
+    left, right = np.roll(score, 1), np.roll(score, -1)
+    if not wraps:
+        left[0] = right[-1] = -np.inf
+    peaks = np.flatnonzero((score > left) & (score >= right))
+    if peaks.size == 0:
+        # a constant score (every c_f zero: a dark candidate) has no peak; any
+        # offset is as good, and the first is the one a plain argmax would return
+        peaks = np.array([int(np.argmax(score))])
+    cand = peaks[np.argsort(-score[peaks], kind="stable")[:OFFSET_POLISH_CANDIDATES]]
+
+    # 3. the polish: Newton on S from each candidate's grid sample
+    d = deltas[cand].copy()
+    for _ in range(OFFSET_POLISH_STEPS):
+        _, s1, s2 = score_at(d)
+        concave = s2 < 0
+        move = np.zeros_like(d)
+        move[concave] = np.clip(-s1[concave] / s2[concave], -step, step)
+        d = d + move
+    if not wraps:
+        # an end is an end: the polish stays inside the range that was scanned
+        d = np.clip(d, 0.0, deltas[-1])
+    polished = score_at(d)[0]
+    # a polish that did not raise S is dropped for the sample it started from, so
+    # no candidate ends below the grid — nor the result below the grid maximum
+    lower = polished < score[cand]
+    d[lower], polished[lower] = deltas[cand][lower], score[cand][lower]
+    if wraps:
+        # a peak across the wrap comes back into [0, period) (np.mod can round a
+        # tiny negative offset up to `period` itself, which is offset 0)
+        d = np.mod(d, period)
+        d[d >= period] = 0.0
+
+    # 4. best first: the highest polished score; among equals, the smallest offset
+    order = np.lexsort((d, -polished))
+    return d[order], polished[order]
+
+
+def _offset_scan(psi0: np.ndarray, channels: Sequence[FreqChannel], rho: np.ndarray,
+                 h_fwd: Sequence[np.ndarray], curr_aper_amp: np.ndarray, dx: float,
+                 period: float, periodic: bool = True) -> float:
+    """The absolute offset delta that minimises the joint loss of psi0 + delta over
+    [0, period): the best of _offset_peaks (the closed form, the grid, the polish
+    and the ends are documented there) — the polished offset with the highest
+    score, a tie going to the smallest offset. The ONE offset the sweep's solve
+    and the single-shot paths start from (_backprop_phase)."""
+    offsets, _ = _offset_peaks(psi0, channels, rho, h_fwd, curr_aper_amp, dx, period,
+                               periodic=periodic)
+    return float(offsets[0])
+
+
+def _offset_candidates(psi0: np.ndarray, channels: Sequence[FreqChannel],
+                       rho: np.ndarray, h_fwd: Sequence[np.ndarray],
+                       curr_aper_amp: np.ndarray, dx: float, period: float,
+                       periodic: bool = True) -> List[float]:
+    """The offsets worth descending from: _offset_scan's best, followed by the
+    peaks that score within OFFSET_NEAR_TIE_RTOL (relative to the best score) of
+    it, best first, OFFSET_NEAR_TIE_MAX at most. One offset when nothing comes
+    that close. The constants' comment has the measurements behind both numbers.
+
+    WHY MORE THAN ONE. The score ranks offsets by the loss of the START phase,
+    and near a tie that is not the order of what the descent reaches from them.
+    A comb that nearly repeats inside its true period (see OFFSET_SCAN_STEP)
+    leaves two offsets that differ by a few hundredths of a radian on the edge
+    tones: their scores can be closer than 1e-4, the noise draw then decides
+    which is higher, and only one of them is in the true plate's basin — the
+    descent from the other stays about 2x above it at any iteration cap. No
+    amount of care in the scan settles that from the start phase alone. The
+    descent does: so where the scan cannot call it, gs_reconstruct_multistart
+    descends from each of these and keeps the lowest final loss.
+    """
+    offsets, scores = _offset_peaks(psi0, channels, rho, h_fwd, curr_aper_amp, dx,
+                                    period, periodic=periodic)
+    near = scores[0] - scores <= OFFSET_NEAR_TIE_RTOL * abs(scores[0])
+    near[0] = True     # the best is a candidate whatever its score is
+    # `scores` is descending, so the near-tied ones are a leading run
+    return [float(v) for v in offsets[near][:OFFSET_NEAR_TIE_MAX]]
+
+
+def _backprop_field(ch_ref: FreqChannel, h_fwd_ref: np.ndarray, dx: float,
+                    idx: np.ndarray) -> np.ndarray:
+    """One tone's weighted measurement back-propagated to the candidate plane, at
+    the support samples `idx`: the solver's own adjoint kernel applied to
+    w^2 * y, the field whose phase _backprop_start reads. complex128: rs_apply
+    returns complex64, and the unwrap that follows accumulates in float64."""
+    g = rs.rs_apply(ch_ref.error_weighting ** 2 * ch_ref.rx_field,
+                    np.conjugate(h_fwd_ref), dx)[idx]
+    return g.astype(np.complex128)
+
+
+def _lit_span(amp: np.ndarray) -> Optional[Tuple[int, int]]:
+    """First and last sample at which a back-propagated amplitude `amp` reaches
+    BACKPROP_LIT_FRACTION of its peak — the stretch of the plate that illuminates
+    the RX window, as far as the data can tell. None when there is nothing to
+    read: an empty support, or a back-propagation that is dark throughout."""
+    if amp.size == 0 or not amp.max() > 0:
+        return None
+    lit = np.flatnonzero(amp >= BACKPROP_LIT_FRACTION * amp.max())
+    return int(lit[0]), int(lit[-1])
+
+
+def _line_fit(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """The least-squares line through (x, y) as [slope, intercept] — what
+    np.polyfit(x, y, 1) returns, and np.polyval evaluates — from the closed form:
+    slope = sum((x - mean x) * (y - mean y)) / sum((x - mean x)^2), and the line
+    passes through the two means. Needs two or more samples at distinct x.
+
+    Not np.polyfit, which solves the same two unknowns through LAPACK's
+    least-squares driver: this is called twice per start of every candidate, in
+    the sweep's worker processes, where a LAPACK call wakes the worker's whole
+    inherited thread pool (see _offset_scan, NO BLAS). On 24 samples polyfit ran
+    at 2.4 cores of CPU per core of wall time, a third of it system time.
+    """
+    x_mean, y_mean = np.mean(x), np.mean(y)
+    xc = x - x_mean
+    slope = np.sum(xc * (y - y_mean)) / np.sum(xc * xc)
+    return np.array([slope, y_mean - slope * x_mean])
+
+
+def _backprop_start(ch_ref: FreqChannel, h_fwd_ref: np.ndarray, dx: float,
+                    support: np.ndarray, rho_ref: float) -> np.ndarray:
+    """The data-driven starting psi: the unwrapped phase of the reference tone's
+    measurement back-propagated to the candidate plane, in psi units (divided by
+    `rho_ref`). float64, zero off the support.
+
+    Why this is a start for EVERY tone and not only the one it was read from: a
+    delay plate steers achromatically. Its phase at tone f is rho_f * psi, the
+    wavenumber scales by the same rho_f, and the ray angle — phase slope over
+    wavenumber — does not change with frequency. A smooth, ray-like profile that
+    sends the reference tone's energy where it was measured therefore sends the
+    other tones' energy to the same place. The back-propagated phase is such a
+    profile, and its unwrap is the one continuous choice among its 2π-shifted
+    copies — which a single tone cannot tell apart and several can. The legacy
+    warm start gets its profile from a random-start solve of the reference tone
+    instead, which is not unique where part of the beam misses the RX window.
+
+    The part of the plate that does not illuminate the RX window carries no
+    information: the back-propagated field is dark there, and its phase is noise
+    and sidelobe leakage. So the phase is read only between the first and the
+    last sample whose amplitude reaches BACKPROP_LIT_FRACTION of the peak
+    (_lit_span), and CONTINUED outside: at the constant slope of a least-squares
+    line through the nearest BACKPROP_SLOPE_FIT_SAMPLES lit samples, joined
+    continuously at the edge — the plate keeps steering the way it does where it
+    can be seen, rather than taking a phase from noise.
+
+    What the threshold is worth, measured (30 dB, on-grid receiver, against a
+    plain unwrap over the whole support, BACKPROP_LIT_FRACTION = 0): a trade.
+    It only acts where the plate is partly dark. At the true TX that is the
+    caustic alone (the last 10 of its 288 samples; the bessel and focus plates
+    are lit throughout and the two starts are the same array), and there it
+    COSTS a little: 0.95-1.11 of the true plate's loss over the ten bandwidths
+    (noise seed 0), against 0.94-1.04 for the plain unwrap, in up to twice the
+    iterations. Over
+    22 candidate locations on and around the TX (single tone, ±10 %, ±20 %, at
+    the re-solve's cap and stop threshold) it removed the plain unwrap's one
+    early stall that matters — caustic, single tone, a candidate within 10x of
+    the minimum: stopped after 67 iterations at 5.2x the thresholded start's
+    loss — and caused three of its own, all at one far candidate whose loss is
+    over 100x the minimum either way (1.6x to 1.8x the plain unwrap's);
+    everywhere else the two end within 9 % of each other. It is NOT what keeps the
+    multi-tone solve out of a wrong basin: a comparison that had the plain
+    unwrap at 2.25x at ±13 % on the caustic had also changed the offset scan's
+    grid, and the grid was the cause (see OFFSET_SCAN_STEP — with the offset
+    chosen right the plain unwrap ends at 1.02 there, the thresholded start at
+    1.09).
+
+    An all-dark back-propagation (the measurement gives this candidate nothing to
+    go on) returns zeros: a flat plate, from which the descent starts as it would
+    from any other phase. Like the legacy unwrap this assumes a CONNECTED support
+    (box candidate windows; the contiguous plate aperture).
+
+    The absolute offset is not settled here: the other tones see rho_f times
+    any common offset, which is what _offset_scan resolves over comb_period.
+    """
+    psi = np.zeros(len(support))
+    idx = np.where(support)[0]
+    g = _backprop_field(ch_ref, h_fwd_ref, dx, idx)
+    span = _lit_span(np.abs(g))
+    if span is None:
+        return psi
+    lo, hi = span
+    ph = np.unwrap(np.angle(g[lo:hi + 1]))
+    out = np.empty(len(idx))
+    out[lo:hi + 1] = ph
+    k = np.arange(len(idx), dtype=float)
+    n_fit = min(BACKPROP_SLOPE_FIT_SAMPLES, hi - lo + 1)
+    if n_fit >= 2:
+        # each side: the line through the n_fit lit samples at that edge, shifted so
+        # it passes THROUGH the edge sample (the fit's own value there is off by its
+        # residual, and a step at the edge is a discontinuity the plate does not have)
+        left = _line_fit(k[lo:lo + n_fit], ph[:n_fit])
+        out[:lo] = np.polyval(left, k[:lo]) + (ph[0] - np.polyval(left, k[lo]))
+        right = _line_fit(k[hi - n_fit + 1:hi + 1], ph[-n_fit:])
+        out[hi + 1:] = np.polyval(right, k[hi + 1:]) + (ph[-1] - np.polyval(right, k[hi]))
+    else:
+        # a single lit sample has no slope to continue: hold its phase
+        out[:lo] = ph[0]
+        out[hi + 1:] = ph[-1]
+    psi[idx] = out / rho_ref
+    return psi
+
+
+def _scan_comb_offset(psi0: np.ndarray, channels: Sequence[FreqChannel],
+                      rho: np.ndarray, ref_freq: float, h_fwd: Sequence[np.ndarray],
+                      curr_aper_amp: np.ndarray, dx: float, log=None,
+                      near_ties: bool = False) -> Tuple[List[float], str]:
+    """The offset scan over comb_period, for a multi-tone start: the offset(s) to
+    add to psi0 (on the support), best first, and a phrase describing the scan
+    for the caller's log line. One offset — _offset_scan's — unless `near_ties`,
+    which adds the peaks too close to it to call (_offset_candidates).
+
+    Warns — once, when `log` is given — if the range scanned is not the whole
+    period: the tones have no period short enough to find, or it needs more
+    samples than _offset_scan_max_samples."""
+    period, exact = comb_period([ch.freq for ch in channels], ref_freq)
+    if log is not None:
+        n_needed = int(np.ceil(period / OFFSET_SCAN_STEP))
+        n_max = _offset_scan_max_samples()
+        if not exact:
+            log.warning(
+                "offset scan: the tones' ratios to the reference frequency "
+                f"({ref_freq / 1e9:g} GHz) are not ratios of small integers, so the "
+                "joint loss has no period short enough to scan in full; scanning "
+                f"{period / (2 * np.pi):g} x 2π, which is NOT a period — the best "
+                "offset may lie outside it")
+        elif n_needed > n_max:
+            log.warning(
+                f"offset scan: the comb's period ({period / (2 * np.pi):g} x 2π) needs "
+                f"{n_needed} offset samples; capping at {n_max}, so the best offset "
+                "may lie outside the range scanned (nearly-duplicate frequencies?)")
+    if near_ties:
+        offsets = _offset_candidates(psi0, channels, rho, h_fwd, curr_aper_amp, dx,
+                                     period, periodic=exact)
+    else:
+        offsets = [_offset_scan(psi0, channels, rho, h_fwd, curr_aper_amp, dx, period,
+                                periodic=exact)]
+    note = (f"offset scan over {period / (2 * np.pi):g} x 2π "
+            f"({'exact period' if exact else 'NOT a period'}) -> delta "
+            f"{offsets[0]:.3f} rad")
+    if len(offsets) > 1:
+        note += (f", with {len(offsets) - 1} near-tied offset(s) at "
+                 + ", ".join(f"{d:.3f}" for d in offsets[1:]) + " rad")
+    return offsets, note
+
+
+def _backprop_phase(channels: Sequence[FreqChannel], rho: np.ndarray, ref_freq: float,
+                    h_fwd: Sequence[np.ndarray], support: np.ndarray,
+                    curr_aper_amp: np.ndarray, dx: float, log=None) -> np.ndarray:
+    """The whole `init: backprop` start, the counterpart of _warm_start_phase:
+    _backprop_start on the reference channel, then — for more than one channel —
+    the absolute offset from _offset_scan over the comb's true period. No solve.
+    Returns the starting psi (zero off the support).
+
+    The reference channel is the one nearest rho == 1, as the legacy warm start
+    picks it, and NOT "the channel at ref_freq": a grid candidate solves on the
+    subset of the run's tones that pass its sampling check, against the run-level
+    reference, so the reference tone itself may be missing. _backprop_start
+    divides by that channel's own rho, so psi comes out in the run's units either
+    way. A single channel gets no scan: with one tone a common offset is a global
+    phase, which the descent corrects on its own, and there is no second tone to
+    line it up with.
+    """
+    c_idx = int(np.argmin(np.abs(rho - 1.0)))
+    ch_ref = channels[c_idx]
+    psi = _backprop_start(ch_ref, h_fwd[c_idx], dx, support, rho[c_idx])
+    scan_note = ""
+    if len(channels) > 1:
+        offsets, scan_note = _scan_comb_offset(psi, channels, rho, ref_freq, h_fwd,
+                                               curr_aper_amp, dx, log=log)
+        # on the support only: off it the amplitude is zero, the offset changes no
+        # field, and psi stays zero there as everywhere else in the solver
+        psi[support] += offsets[0]
+        scan_note = "; " + scan_note
+    if log is not None:
+        # re-derived here rather than returned by _backprop_start: only a logged
+        # (single-shot) solve wants it, and it is one convolution
+        idx = np.where(support)[0]
+        span = _lit_span(np.abs(_backprop_field(ch_ref, h_fwd[c_idx], dx, idx)))
+        n_lit = 0 if span is None else span[1] - span[0] + 1
+        rest = "" if n_lit == len(idx) else ", phase continued over the rest"
+        log.info(f"backprop start: {ch_ref.freq / 1e9:g} GHz back-propagated, lit over "
+                 f"{100 * n_lit / max(len(idx), 1):.1f} % of the support{rest}{scan_note}")
+    return psi
+
+
 # Result of one solver run. `curr_aper_f` is the reconstructed complex aperture on the
 # math (scene) x-axis — the field at `ref_freq`; `history` is a GSHistory when
 # capture=True, else None. `final_loss`/`loss_full` are the joint
@@ -158,10 +764,21 @@ def rust_core():
 
 
 def _gs_solve_rust(channels, params, ref_freq, seed, initial_phase, curr_aper_amp,
-                   h_fwd, dx, log=None) -> "GSResult":
+                   h_fwd, dx, log=None, init_mode: Optional[str] = None) -> "GSResult":
     """The warm start + descent of gs_reconstruct, run by rice_bend_core.gs_solve
     from the SAME seed draw, kernels and measurements the python path would use.
-    Parity with the python engine: rust/python/parity.py, rust/README.md."""
+    Parity with the python engine: rust/python/parity.py, rust/README.md.
+
+    `init_mode` is what rust is told to do with `initial_phase`, and it is passed
+    explicitly rather than read off params.init: the rust side knows two modes
+    only. 'warm_start' runs its own twin of _warm_start_phase from the phase
+    (the seeded draw); 'random' descends from the phase as handed over, unchanged
+    — which is how a start computed in python (a caller's initial_phase, the
+    `init: backprop` start) reaches it. None means params.init, the legacy
+    behaviour, valid for 'random' and 'warm_start' alone: 'backprop' forwarded
+    as it stands is a mode rust rejects."""
+    if init_mode is None:
+        init_mode = params.init
     (curr_aper_f, final_loss, final_loss_pf, n_iters_run, stop_reason, loss_full,
      loss_full_pf) = rust_core().gs_solve(
         initial_phase, np.asarray(curr_aper_amp, dtype=np.float64),
@@ -169,7 +786,7 @@ def _gs_solve_rust(channels, params, ref_freq, seed, initial_phase, curr_aper_am
         np.stack([np.asarray(ch.rx_field, dtype=np.complex128) for ch in channels]),
         np.stack([np.asarray(ch.error_weighting, dtype=np.float64) for ch in channels]),
         np.stack(h_fwd).astype(np.complex128, copy=False), float(dx),
-        params.init, int(params.max_iters), int(params.convergence_count),
+        init_mode, int(params.max_iters), int(params.convergence_count),
         float(params.convergence_threshold), float(params.lr0),
         float(params.bt_shrink), int(params.bt_tries))
     if log is not None:
@@ -188,7 +805,8 @@ def _gs_solve_rust(channels, params, ref_freq, seed, initial_phase, curr_aper_am
 def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
                    rx_z: float, channels: Sequence[FreqChannel],
                    params: GerchbergSaxtonConfig, ref_freq: Optional[float] = None,
-                   capture: bool = False, log=None) -> "GSResult":
+                   capture: bool = False, log=None,
+                   initial_phase: Optional[np.ndarray] = None) -> "GSResult":
     """Modified Gerchberg-Saxton solver core (no MGS/SimScene instance required).
 
     Solves for ONE aperture profile psi(x) at plane `tx_z` that best reproduces
@@ -221,10 +839,31 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
     either way, so results do not depend on `capture`. `log` (optional) receives the
     per-iteration progress lines; workers pass None to stay quiet.
 
-    `params.engine == "rust"` hands the warm start and descent to the rust engine
-    after the shared setup below (seed, initial draw, kernels, sampling checks).
-    GS history exists only on the python engine, so a capture=True solve runs
-    wholly on python — including its warm-start stage-1 recursion.
+    Where the descent starts, in order of precedence:
+
+    - `initial_phase` (an array on `x_axis`, in psi units): the plain descent from
+      it, cast to float64 and zeroed off the support, with no warm start of any
+      kind whatever `params.init` says. For a caller that has built its own start
+      (gs_reconstruct_multistart).
+    - `params.init == "backprop"`: the data-driven start (_backprop_phase) — the
+      reference channel's measurement back-propagated and unwrapped, plus, for
+      more than one channel, the absolute offset scanned over the comb's true
+      period — then the plain descent. No reference-frequency solve.
+    - `params.init == "warm_start"` (the default) and `"random"`: the LEGACY
+      starts, bit-identical to what they have always produced. 'warm_start' is
+      _warm_start_phase for more than one channel and the random draw for one;
+      'random' is the seeded random draw.
+
+    GSHistory.initial_phase (capture=True) records the phase the descent actually
+    started from, whichever of these it was.
+
+    `params.engine == "rust"` hands the descent to the rust engine after the
+    shared setup below (seed, initial draw, kernels, sampling checks). The legacy
+    starts run there too (rust has its own twin of the warm start); a given
+    `initial_phase` and the backprop start are computed HERE, on python, and rust
+    descends from them as handed over (_gs_solve_rust's init_mode). GS history
+    exists only on the python engine, so a capture=True solve runs wholly on
+    python — including its warm-start stage-1 recursion.
     """
     if capture and params.engine == "rust":
         if log is not None:
@@ -279,26 +918,50 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
 
     # track aperature amplitude and phase seperatly. curr_aper_phase is the shared
     # unknown psi: the plate's delay profile expressed as phase at ref_freq.
+    #
+    # The draw is UNCONDITIONAL, made even when a given or back-propagated start
+    # replaces it a few lines down. Every legacy start begins from it, on both
+    # engines, and those must stay bit-identical; one unused size-N draw is the
+    # price of never having a branch between the seed and the draw to get wrong.
     curr_aper_amp = np.abs(orig_aper_amp.copy())
     curr_aper_phase = 2 * np.pi * rng.random(size)
-    initial_phase = curr_aper_phase.copy()
 
     support = np.abs(orig_aper_amp) > 0  # aperature mask
 
+    # The two starts that are built HERE, for either engine (see the docstring for
+    # the order of precedence). Anything else is a legacy start and leaves the draw
+    # in place: _warm_start_phase below on python, its twin inside rust.
+    legacy_start = initial_phase is None and params.init != "backprop"
+    if initial_phase is not None:
+        # a copy, so the caller's array is not the one the descent overwrites
+        curr_aper_phase = np.array(initial_phase, dtype=np.float64)
+        if curr_aper_phase.shape != (size,):
+            raise ValueError(f"initial_phase has shape {curr_aper_phase.shape}, "
+                             f"expected ({size},): one phase per x_axis sample")
+        curr_aper_phase[~support] = 0.0
+    elif params.init == "backprop":
+        curr_aper_phase = _backprop_phase(
+            channels=channels, rho=rho, ref_freq=ref_freq, h_fwd=h_fwd,
+            support=support, curr_aper_amp=curr_aper_amp, dx=dx, log=log)
+
     if params.engine == "rust":
+        # a start built above goes over as the phase to descend from ('random':
+        # used unchanged); a legacy start goes over as the draw plus its own mode
         return _gs_solve_rust(channels, params, ref_freq, seed, curr_aper_phase,
-                              curr_aper_amp, h_fwd, dx, log=log)
+                              curr_aper_amp, h_fwd, dx, log=log,
+                              init_mode=None if legacy_start else "random")
 
     # Multi-wavelength warm start: replace the random start with a point inside the
     # true basin (reference-frequency solve -> unwrap -> absolute-offset scan). A
     # strict no-op at a single frequency — the random path above runs untouched —
     # which is what preserves the F=1 bit-identity guarantees under any config.
-    if params.init == "warm_start" and n_freq > 1:
+    if legacy_start and params.init == "warm_start" and n_freq > 1:
         curr_aper_phase = _warm_start_phase(
             tx_z=tx_z, orig_aper_amp=orig_aper_amp, x_axis=x_axis, rx_z=rx_z,
             channels=channels, params=params, seed=seed, rho=rho, ref_freq=ref_freq,
             h_fwd=h_fwd, support=support, curr_aper_amp=curr_aper_amp, dx=dx, log=log)
-        initial_phase = curr_aper_phase.copy()
+    # the phase the descent starts from, whichever start produced it
+    start_phase = curr_aper_phase.copy()
 
     history = None
     if capture:
@@ -309,7 +972,7 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
             orig_aper_amp=orig_aper_amp,
             error_weighting=np.stack([np.asarray(ch.error_weighting) for ch in channels]),
             support=support,
-            initial_phase=initial_phase,
+            initial_phase=start_phase,
             rx_z=float(rx_z),
             seed=seed,
             history_stride=params.history_stride,
@@ -405,6 +1068,201 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
                     ref_freq=float(ref_freq),
                     history=history,
                     psi=curr_aper_phase.copy() if capture else None)
+
+
+def _multistart_setup(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
+                      rx_z: float, channels: Sequence[FreqChannel], ref_freq: float):
+    """What gs_reconstruct_multistart needs to build a multi-tone start itself:
+    (dx, rho, h_fwd, curr_aper_amp, support) — gs_reconstruct's own setup,
+    written the same way, so an offset is scanned against the fields the descent
+    will then compute. Runs gs_reconstruct's sampling guard too, BEFORE any
+    solve, so an undersampled channel fails here and not after a wasted
+    reference solve."""
+    dx = x_axis[1] - x_axis[0]
+    rho = np.array([ch.freq / ref_freq for ch in channels], dtype=np.float64)
+    rx_plane = np.array([rx_z])
+    for ch in channels:
+        rs.check_sampling(x_axis, rx_plane, ch.wavelength, z_src=tx_z, forward_dir=-1.0)
+    h_fwd = [rs.rs_kernel(x_axis, ch.wavelength, -1.0 * (rx_z - tx_z)) for ch in channels]
+    curr_aper_amp = np.abs(orig_aper_amp)
+    support = curr_aper_amp > 0
+    return dx, rho, h_fwd, curr_aper_amp, support
+
+
+def _random_route_phase(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
+                        rx_z: float, ch_ref: FreqChannel, rho_ref: float,
+                        params: GerchbergSaxtonConfig,
+                        support: np.ndarray) -> Tuple[np.ndarray, "GSResult"]:
+    """The multi-tone start phase of gs_reconstruct_multistart's "random" start,
+    BEFORE its absolute offset: the legacy warm start's first two stages — solve
+    the channel nearest the reference alone from the seeded random draw, unwrap
+    it over the support. Returns (psi0, the reference solve's result); psi0 is
+    zero off the support.
+
+    _warm_start_phase is not touched to get this (it is frozen with the results on
+    disk), so those two stages are repeated here, term for term. What follows
+    them is the difference: the offset is scanned over the comb's true period
+    (comb_period) instead of 2π·f_ref/Δf_min, and it is the difference that
+    matters where the legacy range is not a period: at the true TX of the focus
+    scenario at ±13 % the legacy start ends at 31.5x the true plate's loss and
+    this route at 1.00. It does nothing for the reference solve's other limit
+    (not unique where the beam partly misses the window): on the bessel scenario
+    at ±20 % the two end at 165x and 164x.
+    """
+    # 1. reference solve, from the random draw of the pinned seed (init='random':
+    # a single channel under 'backprop' would start from the data instead)
+    stage1 = gs_reconstruct(tx_z=tx_z, orig_aper_amp=orig_aper_amp, x_axis=x_axis,
+                            rx_z=rx_z, channels=[ch_ref],
+                            params=params.model_copy(update={"init": "random"}),
+                            ref_freq=ch_ref.freq, capture=False, log=None)
+
+    # 2. unwrap over the support and rescale into psi units (theta_c = rho_c * psi)
+    psi0 = np.zeros(len(x_axis))
+    idx = np.where(support)[0]
+    psi0[idx] = np.unwrap(np.angle(stage1.curr_aper_f[idx])) / rho_ref
+    return psi0, stage1
+
+
+# The starts gs_reconstruct_multistart knows, in its default order (a tie goes to
+# the earlier one).
+MULTISTART_STARTS = ("backprop", "random")
+
+
+def gs_reconstruct_multistart(tx_z: float, orig_aper_amp: np.ndarray,
+                              x_axis: np.ndarray, rx_z: float,
+                              channels: Sequence[FreqChannel],
+                              params: GerchbergSaxtonConfig,
+                              ref_freq: Optional[float] = None,
+                              starts: Sequence[str] = MULTISTART_STARTS,
+                              log=None) -> Tuple["GSResult", str]:
+    """Solve one candidate from each of `starts` — for several tones, from every
+    offset a start's scan cannot tell apart — and keep the lowest final loss.
+    Returns (that solve's GSResult, the name of its start).
+
+    No single start wins everywhere. On the configs' noise draw the data-driven
+    start reaches the true plate's loss at the true TX at every bandwidth, but at
+    a WRONG location neither it nor the random one is reliably the lower: over 22
+    candidates on and around the TX (30 dB, single tone, ±10 % and ±20 %) the
+    data start ended up to 2.8x above the random route on the focus beam, and the
+    random route up to 219x above the data start on the bessel beam. A candidate
+    ranking is a comparison of losses across locations, so a location solved from
+    its worse start is ranked by the start and not by the location. Taking the
+    minimum over the starts removes that from the comparison, at the cost of one
+    solve per start; it is meant for the few candidates near the sweep's minimum,
+    not for the sweep.
+
+    The starts (`params.init` is overridden per start, never read):
+
+    - "backprop": the back-propagated reference tone (_backprop_start).
+    - "random": the reference channel solved alone from the seeded random draw
+      and unwrapped (_random_route_phase) — the legacy warm start's route, but
+      with the offset scanned over the comb's true period. This is NOT
+      init='warm_start', whose scan range is kept as it was for the results on
+      disk; it is what that start does once the range is right.
+
+    For ONE channel each start is a plain gs_reconstruct with that init. For
+    several, each start's phase gets its absolute offset from the scan, and that
+    is where one descent per start stops being enough: a comb that nearly
+    repeats inside its period leaves two offsets that can score within 1e-4 of
+    each other, only one of them in the basin the other tones agree with, and
+    which scores higher is decided by the noise draw (at the true TX of the
+    caustic scenario at ±13 %, the wrong one in 22 of 48 seeds). So each start
+    is descended from EVERY offset _offset_candidates returns — the best, and
+    any other within OFFSET_NEAR_TIE_RTOL of it, OFFSET_NEAR_TIE_MAX at most —
+    and keeps the lowest final loss; the descent from the first is the very
+    solve init='backprop' runs, so a start never does worse here than alone.
+    Measured at that true TX under the refinement's settings (cap 6000, stop
+    -1e-10), noise seeds 0-8: 0.92-1.13 of the true plate's loss, against
+    0.93-2.21 from the single data-driven start. Most starts have ONE such
+    offset (see the constants for the counts), so the cost is paid where the
+    comb has a close twin: about 1.6 descents per start at ±13 %, 1.2 at ±1 %.
+
+    A tie goes to the earlier name in `starts`, and within a start to the
+    higher-scoring offset. The returned name is the START's ("backprop" /
+    "random"), whichever of its offsets won. The result's n_iters_run counts the
+    winning joint descent alone, as it does for the legacy warm start (the
+    "random" route's reference solve and the descents that lost are not in it).
+    With a logger, each start logs its scan — the near-tied offsets by value —
+    and how many it tried.
+
+    `params.seed` must be an int: the two starts and every candidate they are
+    compared across have to share one draw, so the caller pins it (the sweep's
+    grid_search.seed) rather than letting each solve draw its own. capture=False
+    only — the single-shot paths that capture history (`mgs`, --true-mgs) go
+    through gs_reconstruct with the one start the config names. Follows
+    `params.engine` (the start phases and the scan are built on python either
+    way). `ref_freq` defaults as in gs_reconstruct, and a caller solving on a
+    subset of the run's tones passes the run-level reference just the same.
+    """
+    if params.seed is None:
+        raise ValueError("gs_reconstruct_multistart needs gerchberg_saxton.seed pinned "
+                         "to an int: its starts must share one random draw")
+    if len(starts) == 0:
+        raise ValueError("gs_reconstruct_multistart needs at least one start")
+    unknown = [name for name in starts if name not in MULTISTART_STARTS]
+    if unknown:
+        raise ValueError(f"unknown start(s) {unknown}; expected any of "
+                         f"{list(MULTISTART_STARTS)}")
+    if ref_freq is None:
+        # resolved once HERE, so every start solves in the same psi units
+        ref_freq = channels[center_freq_index([ch.freq for ch in channels])].freq
+    common = dict(tx_z=tx_z, orig_aper_amp=orig_aper_amp, x_axis=x_axis, rx_z=rx_z,
+                  channels=channels, ref_freq=ref_freq, capture=False, log=log)
+    multi_tone = len(channels) > 1
+    if multi_tone:
+        dx, rho, h_fwd, curr_aper_amp, support = _multistart_setup(
+            tx_z, orig_aper_amp, x_axis, rx_z, channels, ref_freq)
+        # the reference channel: nearest rho == 1, as every start picks it
+        c_idx = int(np.argmin(np.abs(rho - 1.0)))
+
+    best, best_name = None, None
+    for name in starts:
+        if not multi_tone:
+            # one channel: the plain solve from this start (both names are inits)
+            result = gs_reconstruct(params=params.model_copy(update={"init": name}),
+                                    **common)
+            tried = ""
+        else:
+            # the start phase WITHOUT its offset, then one descent per offset the
+            # scan could not tell apart (one, when nothing comes close to the best)
+            if name == "backprop":
+                psi0 = _backprop_start(channels[c_idx], h_fwd[c_idx], dx, support,
+                                       rho[c_idx])
+                how = "back-propagated"
+            else:
+                psi0, stage1 = _random_route_phase(
+                    tx_z, orig_aper_amp, x_axis, rx_z, channels[c_idx], rho[c_idx],
+                    params, support)
+                how = (f"reference solve loss {stage1.final_loss:.4g} after "
+                       f"{stage1.n_iters_run} iterations ({stage1.stop_reason})")
+            offsets, scan_note = _scan_comb_offset(
+                psi0, channels, rho, ref_freq, h_fwd, curr_aper_amp, dx, log=log,
+                near_ties=True)
+            if log is not None:
+                log.info(f"{name} start: {channels[c_idx].freq / 1e9:g} GHz {how}; "
+                         f"{scan_note}")
+            result, won = None, 0
+            for k, delta in enumerate(offsets):
+                psi = psi0.copy()
+                psi[support] += delta
+                # initial_phase overrides params.init, whatever it says. From the
+                # FIRST offset this is the very solve init='backprop' runs (for the
+                # "backprop" start): same phase, same descent
+                r = gs_reconstruct(params=params, initial_phase=psi, **common)
+                # strictly lower replaces: a tie keeps the higher-scoring offset
+                if result is None or r.final_loss < result.final_loss:
+                    result, won = r, k
+            tried = (f" (best of {len(offsets)} near-tied offsets: the one at "
+                     f"{offsets[won]:.3f} rad)" if len(offsets) > 1 else "")
+        if log is not None:
+            log.info(f"multistart: {name} start -> loss {result.final_loss:.6g} after "
+                     f"{result.n_iters_run} iterations ({result.stop_reason}){tried}")
+        # strictly lower replaces: a tie keeps the earlier start
+        if best is None or result.final_loss < best.final_loss:
+            best, best_name = result, name
+    if log is not None and len(starts) > 1:
+        log.info(f"multistart: keeping the {best_name} start (loss {best.final_loss:.6g})")
+    return best, best_name
 
 
 @dataclass
@@ -1116,8 +1974,10 @@ class MGS():
         or noisy receiver the solver gets BELOW the true plate, and a ratio under 1
         is the ordinary case, not a suspicious one. A ratio well above 1 means the
         solve stopped short of the true plate: cut off by max_iters (stop_reason
-        says so), or converged in another basin, which a multi-tone solve does when
-        the warm start's phase unwrap slips by 2π.
+        says so), or converged in another basin, which a multi-tone solve from the
+        legacy warm start does at some bandwidths (its offset scan does not cover
+        the comb's true period, and its reference solve is not unique where part
+        of the beam misses the RX window; see the notes above comb_period).
 
         An on-grid receiver changes what the ratio is read against. Its target IS
         the true field at the elements, so the sampling term is gone and, noiseless,
@@ -1130,10 +1990,16 @@ class MGS():
         true field to 1-2 % rel-L2: stopped short, but in the right basin. With
         receiver noise the true plate's loss is the noise it cannot fit. A SINGLE
         tone reaches that floor and the ratio is back at about 1 (0.99 to 1.04 at
-        30 dB on those configs, which solve one tone). Several tones do not get
-        there: at 30 dB the joint solve at the true TX of the caustic config comes
-        out at 1.09 to 1.66 over the frequency study's three-tone combs (±1 % to
-        ±20 %), higher for the wider ones.
+        30 dB on those configs, which solve one tone). Several tones get there or
+        not depending on the start. Over the frequency study's three-tone combs
+        (±1 % to ±20 %) at 30 dB, `init: warm_start` comes out at 1.09 to 1.66 at
+        the true TX of the caustic config, at 1.01 to 31.5 on the focus one and at
+        1.60 to 165 on the bessel one; `init: backprop` at 0.96 to 1.11 on all
+        three. Those are the configs' noise draw (seed 0). On other draws the
+        single data-driven start of this solve can still land about 2.1-2.3x up
+        on the caustic at ±13 %: that comb nearly repeats after 77 cycles, and
+        the offset scan's two best are a near-tie the noise decides (see the
+        notes above comb_period; the sweep's refinement descends from both).
 
         Positions are read off the scene grid and carry the propagator's lateral
         offset, reported as `dx_bias_m`: landing.propagator_offset, which is +dx/2

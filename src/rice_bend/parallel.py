@@ -30,12 +30,32 @@ def _init_worker(shared, setup: Optional[Callable[[], None]]) -> None:
     a serial run cannot inherit a side effect (e.g. switching matplotlib to Agg,
     which would permanently kill --show for the rest of the process)."""
     global _SHARED
-    # Precautionary and currently inert: the GS hot path is fftconvolve + ufuncs,
-    # with zero matmul/dot/linalg/einsum anywhere in src/, so there is no BLAS to
-    # oversubscribe. Kept here, and deliberately NOT in __init__.py — that is the
-    # only placement where these would take effect, which is exactly the problem:
-    # __init__.py runs for plain `mgs` too, so a serial solve would newly be pinned
-    # to one math thread as an import-time side effect.
+    # These do NOT limit the BLAS numpy has already loaded, and that is measured,
+    # not assumed: the parent imported numpy before the pool forked, OpenBLAS sized
+    # its pool to every core at that import, and a variable set afterwards does not
+    # shrink it. With these lines in place a matmul on the per-candidate path
+    # (mgs._offset_peaks' score, as first written) ran on 32 threads in every
+    # worker: a three-tone 441-candidate patch at 4 workers (rust engine) took
+    # 9 min 01 s of user and 10 min 57 s of system time, against 5 min 39 s and
+    # 9 s once the matmul was gone (the 9 s is the parent's own analysis) — the
+    # same as exporting OPENBLAS_NUM_THREADS=1 before python starts, which is the
+    # only place the variable binds.
+    #
+    # What keeps each worker on one thread is therefore the task, not this loop:
+    # the per-candidate path (gs_reconstruct, its starts, gs_reconstruct_multistart)
+    # is fftconvolve + ufuncs + explicit sums, with no `@`/dot/vdot/einsum and no
+    # linalg/polyfit on it (see mgs._offset_peaks, mgs._line_fit); the scene-
+    # rendering tasks make no such call of their own either. A BLAS or LAPACK call
+    # added to a task brings the oversubscription back at once and silently — the
+    # results do not change, only the system time. BLAS that runs in the PARENT is
+    # fine and exists (analysis.py's SVD, landing.py's norms).
+    #
+    # The variables are still set, for whatever reads them late: numexpr, a
+    # library first imported inside a worker, a process a worker starts. They are
+    # deliberately NOT set in __init__.py — the one placement where they would bind
+    # numpy's BLAS, which is exactly the problem: __init__.py runs for plain `mgs`
+    # too, so a serial solve would newly be pinned to one math thread as an
+    # import-time side effect.
     for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
                 "NUMEXPR_NUM_THREADS"):
         os.environ.setdefault(var, "1")

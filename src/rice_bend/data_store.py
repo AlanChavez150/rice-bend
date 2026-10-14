@@ -44,7 +44,10 @@ class GSHistory:
     orig_aper_amp: np.ndarray      # fixed aperture amplitude (shared across F)
     error_weighting: np.ndarray    # (F, size)
     support: np.ndarray            # bool mask (shared across F)
-    initial_phase: np.ndarray      # seeded RNG draw (shared across F)
+    # the phase the descent STARTED from (shared across F): the seeded RNG draw, the
+    # warm start, a back-propagated start or a caller's given phase -- whichever
+    # gs_reconstruct used, so no longer always the draw
+    initial_phase: np.ndarray
     rx_z: float
     seed: int
     history_stride: int

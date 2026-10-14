@@ -171,14 +171,30 @@ class RxApertureConfig(BaseModel):
 
 class GerchbergSaxtonConfig(BaseModel):
     """Hyperparameters and start/stop conditions for the modified Gerchberg-Saxton solver."""
-    init: Literal["random", "warm_start"] = Field(default="warm_start",
-        description="Initial phase for a multi-frequency solve: 'warm_start' (default) "
-                    "runs the multi-wavelength initialization — solve the reference "
-                    "frequency alone, unwrap, scan the absolute offset over one "
-                    "synthetic-wavelength period — before the joint descent (see "
-                    "docs/delay_model_warm_start.md); 'random' starts from the seeded "
-                    "random draw. A single-frequency solve always uses the random path "
-                    "(the two are the same problem there).")
+    # init has a default and names the start of every solve, so a typo (int: backprop)
+    # must not silently run the legacy warm start
+    model_config = ConfigDict(extra="forbid")
+
+    init: Literal["random", "warm_start", "backprop"] = Field(default="warm_start",
+        description="Where the descent starts. 'warm_start' (default, the legacy "
+                    "start) runs the multi-wavelength initialization on a "
+                    "multi-frequency solve — solve the reference frequency alone "
+                    "from the seeded random draw, unwrap, scan the absolute offset "
+                    "over 2π·f_ref/Δf_min — before the joint descent (see "
+                    "docs/delay_model_warm_start.md); at a single frequency it is the "
+                    "random start (the two are the same problem there). 'random' "
+                    "starts from the seeded random draw at any number of frequencies. "
+                    "'backprop' starts from the DATA at any number of frequencies: the "
+                    "reference tone's weighted measurement back-propagated to the "
+                    "candidate plane, its phase unwrapped where the plate illuminates "
+                    "the RX window and continued at constant slope where it does not, "
+                    "then (several tones) the absolute offset scanned over the comb's "
+                    "TRUE period, and the plain descent from there with no "
+                    "reference-frequency solve. The warm start's scan range is a "
+                    "period of the joint loss only when f_ref/Δf is an integer, and "
+                    "its random-start reference solve is not unique where part of the "
+                    "beam misses the RX window; 'backprop' has neither limit (see "
+                    "mgs.comb_period and mgs._backprop_start).")
     max_iters: int = Field(default=10000, gt=0, description="Max iterations before stopping")
     convergence_count: int = Field(default=10, gt=0,
         description="Window of recent losses checked for flatness")
@@ -264,8 +280,58 @@ class GridApertureConfig(BaseModel):
 class GridGSOverrides(BaseModel):
     """GS hyperparameter overrides applied only during the grid sweep (e.g. fewer
     iterations for a cheaper search). Unset fields fall back to gerchberg_saxton."""
+    # every field is optional, so a typo (max_iter) must not silently sweep at the
+    # single-run iteration cap
+    model_config = ConfigDict(extra="forbid")
+
     max_iters: Optional[int] = Field(default=None, gt=0,
         description="Override gerchberg_saxton.max_iters during the sweep")
+
+
+class GridRefineConfig(BaseModel):
+    """Second pass of the grid sweep: re-solve the candidates the sweep left near
+    its minimum, each from two starts (mgs.gs_reconstruct_multistart), and keep
+    the lower loss. Defined and validated here; the sweep is what consumes it.
+
+    The sweep ranks every candidate under limits that suit the thousands far from
+    the TX and not the few that decide the answer:
+
+    - its iteration cap (grid_search.gs_overrides.max_iters) is below what the
+      candidates near the truth need, so the ones that matter are the ones it
+      cuts off;
+    - gerchberg_saxton.convergence_threshold is an ABSOLUTE loss slope. At high
+      SNR the loss near the truth is small, and a threshold that does not scale
+      with it stops the descent short of the floor it could reach;
+    - no single start wins at every wrong location, so a ranking made from one
+      start mixes the loss of a location with the luck of its start.
+
+    The re-solve therefore has its own cap and its own stop threshold, and runs
+    both starts.
+
+    `max_candidates` bounds the cost, and it SKIPS the refinement rather than
+    truncating it. A set cut to the best N by sweep loss holds the sweep's best
+    candidate by construction and leaves out others that qualified; re-solving
+    lowers the loss of the ones kept (more iterations, the better of two starts)
+    while the ones left out keep their sweep loss — so the answer would be forced
+    into the truncated set. When more than this qualify, no candidate is
+    re-solved and the sweep's result stands."""
+    # every field has a default, so a typo (withn) must not silently refine at the
+    # default
+    model_config = ConfigDict(extra="forbid")
+
+    within: float = Field(default=10.0, gt=1.0,
+        description="Re-solve every candidate whose sweep loss is <= within x the "
+                    "sweep's minimum loss (> 1: at 1 only the best candidate itself "
+                    "would qualify)")
+    max_iters: int = Field(default=6000, gt=0,
+        description="Iteration cap of the re-solve (the sweep's own cap is "
+                    "grid_search.gs_overrides.max_iters)")
+    convergence_threshold: Optional[float] = Field(default=-1e-10,
+        description="Stop threshold of the re-solve, on mean(diff(recent loss)); "
+                    "null -> gerchberg_saxton.convergence_threshold")
+    max_candidates: int = Field(default=12000, gt=0,
+        description="If more candidates than this qualify, the refinement is SKIPPED "
+                    "for the run (never truncated to the best N)")
 
 
 class GridSearchConfig(BaseModel):
@@ -275,12 +341,19 @@ class GridSearchConfig(BaseModel):
     aperture (uniform assumed amplitude) is centered at `x_center` and placed at
     height `z`; MGS then reconstructs its phase against the single shared measured
     RX field. Each result is saved as a candidate beam."""
+    # refine and gs_overrides are optional, so a typo (refne) must not silently run
+    # the sweep without the block it was meant to carry
+    model_config = ConfigDict(extra="forbid")
+
     z: AxisSweep
     x_center: AxisSweep
     aperture: GridApertureConfig
     seed: Optional[int] = Field(default=0,
         description="Fixed GS seed reused across every candidate so residuals are comparable")
     gs_overrides: GridGSOverrides = Field(default_factory=GridGSOverrides)
+    refine: Optional[GridRefineConfig] = Field(default=None,
+        description="Re-solve the near-best candidates after the sweep (see "
+                    "GridRefineConfig); null -> the sweep's result stands")
 
 
 class ExperimentalConfig(BaseModel):
