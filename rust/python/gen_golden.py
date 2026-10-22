@@ -6,7 +6,13 @@ engine is the reference — these vectors ARE its behaviour, captured. Regenerat
 after any (approved, separately-validated) change to the reference solver, and
 note the commit recorded in tests/data/meta.json.
 
-    .venv/bin/python rust/python/gen_golden.py
+    .venv/bin/python rust/python/gen_golden.py            # every case
+    .venv/bin/python rust/python/gen_golden.py solve_descend solve_descend_joint
+    .venv/bin/python rust/python/gen_golden.py solve_level solve_level_joint
+    .venv/bin/python rust/python/gen_golden.py solve_level_penalty solve_descend_penalty
+
+Naming cases regenerates those alone and leaves meta.json as it is; each such case
+records its own provenance (generated / commit) in its manifest's scalars.
 
 Cases produced (names are pinned by rust/tests/conv_parity.rs / solve_parity.rs):
   conv_n{7,8,2399,2401}   random complex pairs — odd/even "same"-slice centering
@@ -17,6 +23,29 @@ Cases produced (names are pinned by rust/tests/conv_parity.rs / solve_parity.rs)
                           start, including the stage-2/3 intermediates (psi0, delta)
   numerics                np.add.reduce (f64/f32), the f32 convergence-window
                           mean, and np.unwrap — gates src/npmath.rs bit-exactly
+  solve_descend           amplitude: descend, F=1 at 300 GHz from the backprop
+                          start, tiny_check geometry; the start amplitude a0 is
+                          zeroed inside the window (DESCEND_HOLES), so the support
+                          handed over is not a0 > 0
+  solve_descend_joint     the same at F=2 (280/300 GHz) from the legacy warm start
+  solve_level             amplitude: level, F=1 at 300 GHz from the backprop start,
+                          tiny_check geometry: the start level A0 crosses as A0 on
+                          the support (aper_amp), with the support
+  solve_level_joint       the same at F=2 (280/300 GHz), backprop start (several
+                          tones under the legacy warm start are refused for level)
+  solve_level_penalty     solve_level with the excess-power penalty on
+                          (power_penalty 1.0): the manifest adds power_penalty,
+                          rx_power (P_rx as python hands it to rust), final_mse
+                          and power_ratio
+  solve_descend_penalty   solve_descend's holed a0 with the penalty on
+                          (power_penalty 1.0), the same added scalars, but the
+                          start scaled: a0 x DESCEND_PENALTY_START_SCALE (150, the
+                          holes staying 0) and amp_max 2 x 150 = 300, recorded as
+                          start_scale. Unscaled, the raw back-propagated a0
+                          radiates 1e-4 of P_rx on tiny_check: the ratio never
+                          lifts off its floor at 1, the solve is solve_descend's
+                          to the bit and the case would pin nothing of the
+                          penalty. Scaled, the start plate radiates ~2x P_rx
 
 The frequencies and sizes above are what a regeneration produces NOW, from the
 retargeted configs (300 GHz carrier, tiny_check.yml at 0.75 mm scene spacing). The
@@ -34,8 +63,9 @@ import numpy as np
 import scipy.fft
 import scipy.signal
 
+from rice_bend import mgs as mgs_module
 from rice_bend import rs
-from rice_bend.config import center_freq_index, load_config
+from rice_bend.config import GerchbergSaxtonConfig, center_freq_index, load_config
 from rice_bend.grid_sweep import enumerate_grid
 from rice_bend.mgs import (MGS, WARM_START_MAX_SAMPLES, WARM_START_SCAN_STEP,
                            gs_reconstruct)
@@ -255,6 +285,190 @@ def gen_solve_joint():
     save_case("solve_joint", arrays, scalars)
 
 
+# amp_max of the descend cases, in the fixed solver's amplitude units
+DESCEND_AMP_MAX = 2.0
+
+
+def _holed_backprop_amplitude(*args, **kwargs):
+    """mgs._backprop_amplitude with zeros INSIDE the window — every 5th support
+    sample and a run of 25 a third of the way in — so that the support the solve
+    keeps (|orig_aper_amp| > 0) and a0 > 0 differ, the case the engine must not
+    get wrong. Installed for the reference solve and the capture alike."""
+    amp = _REAL_BACKPROP_AMPLITUDE(*args, **kwargs)
+    idx = np.where(kwargs["support"])[0]
+    amp[idx[::5]] = 0.0
+    amp[idx[len(idx) // 3: len(idx) // 3 + 25]] = 0.0
+    return amp
+
+
+_REAL_BACKPROP_AMPLITUDE = mgs_module._backprop_amplitude
+
+
+class _Captured(Exception):
+    pass
+
+
+def _rust_boundary_inputs(solve_kwargs, params):
+    """What gs_reconstruct hands the rust engine — mgs._gs_solve_rust's arguments,
+    captured in memory without running rust. The start phase (backprop) and the
+    start amplitude (descend) are built in mgs.py, so they are taken from there
+    rather than re-derived here; so is P_rx (mgs._received_power), which crosses
+    as `rx_power` beside the penalty's gamma."""
+    seen = {}
+    real = mgs_module._gs_solve_rust
+
+    def spy(channels, params, ref_freq, seed, initial_phase, curr_aper_amp, h_fwd, dx,
+            log=None, init_mode=None, support=None, rx_power=None):
+        seen.update(initial_phase=np.asarray(initial_phase, dtype=np.float64).copy(),
+                    aper_amp=np.asarray(curr_aper_amp, dtype=np.float64).copy(),
+                    support=np.asarray(support, dtype=bool).copy(),
+                    init_mode=init_mode if init_mode is not None else params.init,
+                    power_penalty=params.power_penalty, rx_power=rx_power)
+        raise _Captured
+
+    mgs_module._gs_solve_rust = spy
+    try:
+        gs_reconstruct(params=params.model_copy(update={"engine": "rust"}), **solve_kwargs)
+    except _Captured:
+        pass
+    finally:
+        mgs_module._gs_solve_rust = real
+    assert seen, "gs_reconstruct did not reach the rust dispatch"
+    return seen
+
+
+def _penalty_scalars(crossing, result, power_penalty):
+    """The excess-power penalty's manifest scalars: gamma and P_rx as they cross
+    the rust boundary, and the reference's final plain loss and ratio (beside
+    final_loss, which is then the objective). Empty with the penalty off, so the
+    plain cases' manifests are what they were."""
+    if power_penalty is None:
+        return {}
+    assert crossing["power_penalty"] == power_penalty
+    assert crossing["rx_power"] is not None and crossing["rx_power"] > 0
+    assert result.power_ratio is not None
+    return {"power_penalty": float(crossing["power_penalty"]),
+            "rx_power": float(crossing["rx_power"]),
+            "final_mse": float(result.final_mse),
+            "power_ratio": float(result.power_ratio)}
+
+
+def _gen_descend(name, freqs, init, power_penalty=None, start_scale=None):
+    """`start_scale` (None: off) multiplies the holed start amplitude, and amp_max
+    with it, so the start plate's power can be set against P_rx (the penalty
+    case); the holes stay 0."""
+    x_axis, point, support, amp, channels, params, ref_freq, rx_z = _candidate_setup(freqs)
+    if len(freqs) == 1:
+        ref_freq = float(freqs[0])
+    amp_max = DESCEND_AMP_MAX if start_scale is None else DESCEND_AMP_MAX * start_scale
+    params = GerchbergSaxtonConfig(**{**params.model_dump(), "init": init,
+                                      "amplitude": "descend",
+                                      "amp_max": amp_max,
+                                      "power_penalty": power_penalty})
+    solve_kwargs = dict(tx_z=point.z, orig_aper_amp=amp, x_axis=x_axis, rx_z=rx_z,
+                        channels=channels, ref_freq=ref_freq, capture=False, log=None)
+    start_amplitude = _holed_backprop_amplitude
+    if start_scale is not None:
+        def start_amplitude(*args, **kwargs):
+            return start_scale * _holed_backprop_amplitude(*args, **kwargs)
+    mgs_module._backprop_amplitude = start_amplitude
+    try:
+        result = gs_reconstruct(params=params.model_copy(update={"engine": "python"}),
+                                **solve_kwargs)
+        crossing = _rust_boundary_inputs(solve_kwargs, params)
+    finally:
+        mgs_module._backprop_amplitude = _REAL_BACKPROP_AMPLITUDE
+    assert np.array_equal(crossing["support"], support)
+    assert not np.array_equal(crossing["aper_amp"] > 0, support), "a0 has no holes"
+
+    arrays, scalars = _solve_inputs(x_axis, point.z, rx_z, amp, channels, params, ref_freq)
+    arrays["initial_phase"] = crossing["initial_phase"]   # the draw, or the backprop start
+    arrays["aper_amp"] = crossing["aper_amp"]             # the start amplitude a0
+    arrays["support"] = crossing["support"].astype(np.float64)   # 0/1 (the loader has no bool)
+    scalars["init_mode"] = crossing["init_mode"]           # what rust is told
+    scalars["amp_max"] = float(params.amp_max)
+    if start_scale is not None:
+        scalars["start_scale"] = float(start_scale)
+    out_a, out_s = _result_outputs(result)
+    arrays.update(out_a)
+    scalars.update(out_s)
+    scalars.update(_penalty_scalars(crossing, result, power_penalty))
+    scalars.update(_provenance())
+    save_case(name, arrays, scalars)
+
+
+def _gen_level(name, freqs, power_penalty=None):
+    x_axis, point, support, amp, channels, params, ref_freq, rx_z = _candidate_setup(freqs)
+    if len(freqs) == 1:
+        ref_freq = float(freqs[0])
+    params = GerchbergSaxtonConfig(**{**params.model_dump(), "init": "backprop",
+                                      "amplitude": "level", "amp_max": None,
+                                      "power_penalty": power_penalty})
+    solve_kwargs = dict(tx_z=point.z, orig_aper_amp=amp, x_axis=x_axis, rx_z=rx_z,
+                        channels=channels, ref_freq=ref_freq, capture=False, log=None)
+    result = gs_reconstruct(params=params.model_copy(update={"engine": "python"}),
+                            **solve_kwargs)
+    crossing = _rust_boundary_inputs(solve_kwargs, params)
+    assert np.array_equal(crossing["support"], support)
+    a0 = crossing["aper_amp"]
+    assert np.all(a0[support] == a0[support][0]) and np.all(a0[~support] == 0), \
+        "level's start plate is A0 on the support"
+
+    arrays, scalars = _solve_inputs(x_axis, point.z, rx_z, amp, channels, params, ref_freq)
+    arrays["initial_phase"] = crossing["initial_phase"]   # the backprop start
+    arrays["aper_amp"] = a0                               # A0 * 1_support
+    arrays["support"] = crossing["support"].astype(np.float64)
+    scalars["init_mode"] = crossing["init_mode"]
+    scalars["level_start"] = float(a0[support][0])
+    out_a, out_s = _result_outputs(result)
+    arrays.update(out_a)
+    scalars.update(out_s)
+    scalars.update(_penalty_scalars(crossing, result, power_penalty))
+    scalars.update(_provenance())
+    save_case(name, arrays, scalars)
+
+
+def gen_solve_level():
+    _gen_level("solve_level", [300e9])
+
+
+def gen_solve_level_joint():
+    _gen_level("solve_level_joint", [280e9, 300e9])
+
+
+def gen_solve_descend():
+    _gen_descend("solve_descend", [300e9], "backprop")
+
+
+def gen_solve_descend_joint():
+    _gen_descend("solve_descend_joint", [280e9, 300e9], "warm_start")
+
+
+# gamma of the penalty cases: the plain product L * R, the simplest J that charges
+PENALTY_GAMMA = 1.0
+# solve_descend_penalty's start: the holed a0 (and amp_max) times this. The raw
+# back-propagated a0 on tiny_check radiates 9.9e-5 of P_rx, so unscaled the ratio
+# never leaves its floor and the case is solve_descend's; 150^2 * 9.9e-5 ~ 2.2
+DESCEND_PENALTY_START_SCALE = 150.0
+
+
+def gen_solve_level_penalty():
+    _gen_level("solve_level_penalty", [300e9], power_penalty=PENALTY_GAMMA)
+
+
+def gen_solve_descend_penalty():
+    _gen_descend("solve_descend_penalty", [300e9], "backprop",
+                 power_penalty=PENALTY_GAMMA, start_scale=DESCEND_PENALTY_START_SCALE)
+
+
+def _provenance():
+    commit = subprocess.run(["git", "describe", "--always", "--dirty", "--abbrev=40"],
+                            cwd=REPO, check=True, capture_output=True,
+                            text=True).stdout.strip()
+    return {"generated": date.today().isoformat(), "commit": commit,
+            "numpy": np.__version__, "scipy": scipy.__version__}
+
+
 def gen_numerics():
     """Ragged batches stored flat: `<name>_data` concatenated, `<name>_lens` as
     f64 (exact small integers), `<name>_expected` one value per batch."""
@@ -301,14 +515,35 @@ def gen_numerics():
               {})
 
 
+CASES = {
+    "conv": gen_conv_cases,
+    "solve_single": gen_solve_single,
+    "solve_joint": gen_solve_joint,
+    "numerics": gen_numerics,
+    "solve_descend": gen_solve_descend,
+    "solve_descend_joint": gen_solve_descend_joint,
+    "solve_level": gen_solve_level,
+    "solve_level_joint": gen_solve_level_joint,
+    "solve_level_penalty": gen_solve_level_penalty,
+    "solve_descend_penalty": gen_solve_descend_penalty,
+}
+
+
 def main():
     assert sys.byteorder == "little", "golden vectors are little-endian raw bytes"
     DATA.mkdir(parents=True, exist_ok=True)
+    names = sys.argv[1:]
+    unknown = [n for n in names if n not in CASES]
+    if unknown:
+        sys.exit(f"unknown case(s) {unknown}; known: {sorted(CASES)}")
     print(f"writing golden vectors to {DATA}")
-    gen_conv_cases()
-    gen_solve_single()
-    gen_solve_joint()
-    gen_numerics()
+    if names:
+        for n in names:
+            CASES[n]()
+        print("meta.json left as it is (the named cases carry their own provenance)")
+        return
+    for gen in CASES.values():
+        gen()
     commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, check=True,
                             capture_output=True, text=True).stdout.strip()
     meta = {

@@ -1,0 +1,30 @@
+# MEASURED ACQUISITION: the ~/Desktop/experiments raster, received on the stage row
+# z = 150 mm between x = 175 and 225 mm (101 elements at the 0.5 mm stage pitch).
+# Same as measured_rx177.yml with the RX moved to z = 150 mm (same x).
+# Laid over base.yml (scene, solver, candidate grid). The data is the spectra CSV
+# topt-parser writes from the pulse folder, so parse once, then search:
+#   topt-parser ~/Desktop/experiments -j 24          # -> ~/Desktop/experiments/topt_spectra.csv
+#   grid-search-mgs --config configs/measured/measured_rx150.yml
+#
+# Units: every point is in the STAGE frame, in mm, with named x/z keys (the order of
+# a pair is easy to swap), and the CSV's X and Z columns are in the same stage mm.
+# The run moves the RX centre to the scene origin: z_sim = (150 - z) mm,
+# x_sim = (x - 200) mm.
+#
+# NOTE: z = 150 mm is one of the rows whose capture window (start 1450 ps) begins after
+# the main pulse (arrival ~1447 ps), so the pulse is truncated on this row. It is used
+# as is (no QA, by request) until the row is recaptured.
+#
+# amplitude_scale is a PLACEHOLDER: 1 / max|V(300 GHz)| on this RX in topt_spectra.csv
+# (130.025 at x = 203 mm), which puts the RX peak at 1.0. Replace it with the
+# calibrated value.
+
+base_config: base.yml
+
+measured:
+  data_file: ~/Desktop/experiments/topt_spectra.csv
+  tx_aperture: {left: {x: 85, z: -65}, right: {x: 185, z: -65}}
+  rx_aperture: {left: {x: 175, z: 150}, right: {x: 225, z: 150}}
+  amplitude_scale: 0.0076908    # PLACEHOLDER = 1 / max|V(300 GHz)| on this RX (RX peak -> 1.0); replace
+
+output: {run_name: measured_rx150}

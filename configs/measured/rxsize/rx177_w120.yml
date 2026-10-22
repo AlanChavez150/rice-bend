@@ -1,0 +1,24 @@
+# RECEIVER-SIZE STUDY, FULL pass (2 mm grid, base.yml): how small can the RX be and still localize?
+# Row 177, the RX's right edge fixed at stage x = 215 mm, just past the curving beam
+# (peak at x = 209 mm, -10 dB at 207..211.5), growing LEFT over its side lobes:
+# this one is 120 mm wide, x = 95..215 (0.5 mm pitch). Frame: z_sim = (177 - z) mm,
+# x_sim = (x - RX centre) mm.
+#
+# Solver: the MGS with the amplitude descended too (cap 10), 6000 iterations, one tone.
+# amplitude_scale = 1 / max|V(300 GHz)| on this RX (the RX peak -> 1.0; the beam peak at
+# x = 209 is inside every width of the study, so it is the same 0.0081728 for all).
+
+base_config: ../base.yml
+
+measured:
+  data_file: ~/Desktop/experiments/topt_spectra.csv
+  tx_aperture: {left: {x: 85, z: -65}, right: {x: 185, z: -65}}
+  rx_aperture: {left: {x: 95, z: 177}, right: {x: 215, z: 177}}
+  amplitude_scale: 0.0081728    # 1 / max|V| on this RX (peak 122.356 at x = 209 mm)
+
+gerchberg_saxton:
+  amplitude: descend
+  amp_max: 10.0
+  max_iters: 6000
+
+output: {run_name: rxsize_rx177_w120}

@@ -13,8 +13,9 @@ from pydantic import ValidationError
 from rice_bend import beam_aperatures, rs
 from rice_bend.cli import setup_logging
 from rice_bend.config import (DEFAULT_CONFIG, DEFAULT_FREQ_HZ, GerchbergSaxtonConfig,
-                              SimConfig, apply_noise_overrides, center_freq_index,
-                              load_config, parse_snr_db_arg, resolve_frequencies)
+                              SimConfig, TxApertureConfig, apply_noise_overrides,
+                              center_freq_index, load_config, parse_snr_db_arg,
+                              resolve_frequencies)
 from rice_bend.interp import interp_amplitude, interp_real_imag
 from rice_bend.landing import (beam_target, field_match, landing_metrics,
                                propagator_offset)
@@ -22,7 +23,9 @@ from rice_bend.noise import add_awgn
 from rice_bend.plotting import draw_line_panel, draw_scene
 from rice_bend.data_store import GSHistory, check_run_dir, make_run_dir, save_run
 from rice_bend.exp_data import parse_oscope_heatmap_data, parse_oscope_rx_data
-from rice_bend.sim_scene import SimAperature, SimScene, sampled_axis
+from rice_bend.measured import (MeasuredGeometry, apply_measured, data_file_digest,
+                                measured_rx_profile, place_elements)
+from rice_bend.sim_scene import SimAperature, SimScene, scene_axis
 
 
 # One frequency's contribution to a joint solve: its measurement (on the scene
@@ -129,6 +132,13 @@ def _warm_start_phase(tx_z, orig_aper_amp, x_axis, rx_z, channels, params, seed,
     The unwrap assumes a CONNECTED support and a smooth profile — true for every
     shipped scene (box candidate windows; the contiguous plate aperture).
     Returns the starting psi (zero off support).
+
+    With `amplitude: descend` the start stays a PHASE start: the reference solve
+    holds the amplitude at the start amplitude (`curr_aper_amp`, the caller's
+    _backprop_amplitude) and the scan uses it too. Only the joint descent that
+    follows moves the amplitude. `amplitude: level` never gets here: with
+    several tones it is refused (check_amplitude_mode), because its start level
+    would be matched to the seeded random phase.
     """
     # 1. reference solve. Pinning the PARENT's resolved seed keeps `seed: null`
     # runs reproducible end-to-end (the parent draws once; the child must not draw
@@ -136,7 +146,15 @@ def _warm_start_phase(tx_z, orig_aper_amp, x_axis, rx_z, channels, params, seed,
     c_idx = int(np.argmin(np.abs(rho - 1.0)))
     ch_ref = channels[c_idx]
     sub_params = params.model_copy(update={"init": "random", "seed": int(seed)})
-    stage1 = gs_reconstruct(tx_z=tx_z, orig_aper_amp=orig_aper_amp, x_axis=x_axis,
+    stage1_amp = orig_aper_amp
+    if params.amplitude == "descend":
+        # phase-only, at the start amplitude: the child is a fixed-amplitude solve
+        # (and unpenalized: the penalty is a fit of the amplitude, refused at a
+        # fixed one)
+        sub_params = sub_params.model_copy(update={"amplitude": "fixed", "amp_max": None,
+                                                   "power_penalty": None})
+        stage1_amp = curr_aper_amp
+    stage1 = gs_reconstruct(tx_z=tx_z, orig_aper_amp=stage1_amp, x_axis=x_axis,
                             rx_z=rx_z, channels=[ch_ref], params=sub_params,
                             ref_freq=ch_ref.freq, capture=False, log=None)
 
@@ -648,11 +666,103 @@ def _backprop_phase(channels: Sequence[FreqChannel], rho: np.ndarray, ref_freq: 
     return psi
 
 
+def _backprop_amplitude(channels: Sequence[FreqChannel], rho: np.ndarray,
+                        h_fwd: Sequence[np.ndarray], support: np.ndarray, dx: float,
+                        amp_max: float) -> np.ndarray:
+    """The start of the descended amplitude (`amplitude: descend`): the magnitude
+    of the reference channel's back-propagated measurement (_backprop_field) on
+    the support, clipped to [0, amp_max]. float64, zero off the support.
+
+    The reference channel is _backprop_phase's, the one nearest rho == 1. The
+    magnitude is used RAW, with no rescale, by decision: _backprop_field applies
+    the adjoint kernel to w^2 * y, so its level moves with the error weighting and
+    with measured.amplitude_scale, and it is a start for the descent rather than
+    an estimate of the plate's transmission. Whatever level it starts at, the
+    descent moves it from there.
+    """
+    c_idx = int(np.argmin(np.abs(rho - 1.0)))
+    idx = np.where(support)[0]
+    amp = np.zeros(len(support))
+    amp[idx] = np.clip(np.abs(_backprop_field(channels[c_idx], h_fwd[c_idx], dx, idx)),
+                       0.0, amp_max)
+    return amp
+
+
+def _power_matched_level(channels: Sequence[FreqChannel], rho: np.ndarray,
+                         h_fwd: Sequence[np.ndarray], support: np.ndarray,
+                         psi0: np.ndarray, dx: float) -> float:
+    """The start level A0 of `amplitude: level`: the uniform level at which the
+    start phase `psi0` puts as much power on the RX elements as was measured there.
+
+    Per tone, the unit-amplitude plate 1_support * exp(1j*rho_f*psi0) is
+    predicted by the solver's own forward path (rs_apply, so complex64 like
+    every prediction the loss sees), and A0 = sqrt(sum |y_f|^2 / sum |p_f|^2),
+    both sums over every tone's RX elements (error_weighting > 0) and UNWEIGHTED:
+    plain received power, measured against predicted. The field is linear in the
+    level, so A0 is the level whose prediction carries the measured power; it
+    assumes nothing about the plate's brightness. Accumulated in float64, tone by
+    tone in channel order (np.sum within a tone).
+
+    A start that is dark on every element (the denominator is 0, the prediction
+    reaching none of them) gives no level to match: A0 falls back to 1, the
+    fixed solver's uniform amplitude, and the descent moves it from there.
+    """
+    unit = support.astype(np.float64)
+    num = 0.0
+    den = 0.0
+    for f, ch in enumerate(channels):
+        rx = np.flatnonzero(ch.error_weighting > 0)
+        p = rs.rs_apply(unit * np.exp(1j * (rho[f] * psi0)), h_fwd[f], dx)
+        num += float(np.sum(np.abs(np.asarray(ch.rx_field, dtype=np.complex128)[rx]) ** 2))
+        den += float(np.sum(np.abs(p[rx].astype(np.complex128)) ** 2))
+    if not den > 0:
+        return 1.0
+    return float(np.sqrt(num / den))
+
+
+def _received_power(channels: Sequence[FreqChannel], dx: float) -> float:
+    """P_rx of the excess-power penalty (`gerchberg_saxton.power_penalty`): the
+    power measured on the RX elements, in the units of the plate power
+    P_plate = sum a^2 dx, as the MEAN over the solve's tones.
+
+    Per tone it is sum |y|^2 over the elements (error_weighting > 0) times the
+    element pitch: stride * dx, the stride the smallest gap between element
+    samples (1 for an interpolated receiver, whose elements are every scene
+    sample of the window; grid_stride for an on-grid one, whose zeros between the
+    elements are not received power). A tone with no element contributes 0. The
+    mean, not the sum, so that a several-tone P_rx stays one tone's power, as
+    P_plate is (one amplitude shared by every tone).
+
+    Computed here, once per solve, and handed to the rust engine as a scalar, so
+    both engines charge against the identical number. Raw received power: the
+    measurement as the solve sees it (amplitude_scale applied), unweighted, like
+    _power_matched_level's numerator.
+    """
+    per_tone = []
+    for ch in channels:
+        el = ch.error_weighting > 0
+        idx = np.flatnonzero(el)
+        if idx.size == 0:
+            per_tone.append(0.0)
+            continue
+        stride = 1 if idx.size < 2 else int(np.min(np.diff(idx)))
+        per_tone.append(float(np.add.reduce(np.abs(ch.rx_field[el]) ** 2)) * (stride * dx))
+    return float(np.mean(per_tone))
+
+
 # Result of one solver run. `curr_aper_f` is the reconstructed complex aperture on the
 # math (scene) x-axis — the field at `ref_freq`; `history` is a GSHistory when
 # capture=True, else None. `final_loss`/`loss_full` are the joint
 # (mean-over-frequency) numbers; the `*_per_freq` twins carry each frequency's
 # component, aligned with `frequencies` (the input channel order).
+#
+# With the excess-power penalty on (params.power_penalty = gamma), `final_loss` and
+# `loss_full` are the OBJECTIVE the descent minimized, J = L * R**gamma — the number
+# that ranks candidates — while the `*_per_freq` twins stay the PLAIN per-tone
+# losses, so final_loss = mean(final_loss_per_freq) * power_ratio**gamma there.
+# `final_mse` is the plain joint loss L of the final iterate (penalty off: equal to
+# final_loss) and `power_ratio` its R = max(1, P_plate / P_rx) (penalty off: None).
+# Both default to None for a result built without them.
 #
 # `psi` is the solved unknown itself — the delay profile as phase at `ref_freq`, on
 # the scene x-axis, zero off the support — and it is NOT recoverable from
@@ -665,8 +775,9 @@ def _backprop_phase(channels: Sequence[FreqChannel], rho: np.ndarray, ref_freq: 
 GSResult = namedtuple(
     "GSResult",
     "curr_aper_f final_loss final_loss_per_freq n_iters_run stop_reason seed "
-    "loss_full loss_full_per_freq frequencies ref_freq history psi",
-    defaults=(None,),
+    "loss_full loss_full_per_freq frequencies ref_freq history psi final_mse "
+    "power_ratio",
+    defaults=(None, None, None),
 )
 
 
@@ -684,8 +795,70 @@ def rust_core():
     return rice_bend_core
 
 
+# The amplitude modes (gerchberg_saxton.amplitude) the rust engine runs: all three.
+# 'descend' crosses the boundary as the mode and amp_max plus the start amplitude
+# (already in curr_aper_amp) and the support, which rust cannot derive from that
+# amplitude; 'level' as the mode plus its start level, already in curr_aper_amp as
+# A0 on the support (rust reads A0 back from it), and the support
+# (_gs_solve_rust; parity in rust/README.md). A mode missing here is refused on
+# rust by check_amplitude_mode.
+RUST_AMPLITUDE_MODES = ("fixed", "descend", "level")
+
+
+def check_amplitude_mode(params: GerchbergSaxtonConfig, capture: bool = False,
+                         n_tones: Optional[int] = None) -> None:
+    """Raise ValueError when params.amplitude cannot run as this solve asks: a
+    mode the rust engine does not run (RUST_AMPLITUDE_MODES, all three today),
+    'descend' / 'level' on a solve that captures GS history (`capture`), or
+    'level' with `n_tones` > 1 under init 'warm_start'. That last start would
+    match the level to the seeded random phase, which lands it on a wrong level
+    (8.33 against a true 3.7, measured); 'level' with several tones needs init:
+    backprop. One tone under 'warm_start' is the random start and runs. `n_tones`
+    None (the caller does not know the tones yet) skips that check. The
+    capture path — GSHistory, the landing report, the `mgs` scene — records and
+    rebuilds the PHASE alone, at the fixed amplitude, so a fitted amplitude would
+    be silently missing from all of it; it is not supported in this version.
+
+    gs_reconstruct calls this before any work. The entry points call it up
+    front as well (`mgs` with `capture`, run_grid_search and grid-search-mgs
+    without), so a run is refused before it solves anything rather than after a
+    sweep. grid-search-mgs never captures at a fitted amplitude: its --true-mgs
+    under descend / level is the candidate-style solve at the TX
+    (grid_sweep.solve_at_measured_tx), on a simulated config as on a measured
+    one; only a fixed-amplitude simulated run gets the capturing baseline
+    (candidate_scenes.make_true_mgs_plot, which checks with `capture` too).
+
+    `power_penalty` with 'fixed' is refused here too, as the config refuses it:
+    a params built by model_copy(update=...) is not validated, and at a held
+    amplitude the penalty is a constant factor, not a fit."""
+    if params.amplitude == "fixed":
+        if params.power_penalty is not None:
+            raise ValueError(
+                f"gerchberg_saxton.power_penalty ({params.power_penalty}) needs a "
+                "fitted amplitude (amplitude: level or descend); 'fixed' holds the "
+                "plate's power constant")
+        return
+    if capture:
+        raise ValueError(
+            f"gerchberg_saxton.amplitude '{params.amplitude}' does not run on a solve "
+            "that captures GS history: single-run `mgs` and the plain-`mgs` --true-mgs "
+            "baseline record and rebuild the phase only, at a fixed amplitude. Use "
+            f"amplitude: fixed for those; grid-search-mgs runs '{params.amplitude}', "
+            "and its --true-mgs is then one candidate-style solve at the true (or "
+            "measured) TX (true_mgs.json)")
+    if (params.amplitude == "level" and params.init == "warm_start"
+            and n_tones is not None and n_tones > 1):
+        raise ValueError("amplitude: level with several tones needs init: backprop")
+    if params.engine == "rust" and params.amplitude not in RUST_AMPLITUDE_MODES:
+        raise ValueError(
+            f"gerchberg_saxton.amplitude '{params.amplitude}' is not supported yet on "
+            "the rust engine; run it on python (engine: python, or --engine python)")
+
+
 def _gs_solve_rust(channels, params, ref_freq, seed, initial_phase, curr_aper_amp,
-                   h_fwd, dx, log=None, init_mode: Optional[str] = None) -> "GSResult":
+                   h_fwd, dx, log=None, init_mode: Optional[str] = None,
+                   support: Optional[np.ndarray] = None,
+                   rx_power: Optional[float] = None) -> "GSResult":
     """The warm start + descent of gs_reconstruct, run by rice_bend_core.gs_solve
     from the SAME seed draw, kernels and measurements the python path would use.
     Parity with the python engine: rust/python/parity.py, rust/README.md.
@@ -697,11 +870,24 @@ def _gs_solve_rust(channels, params, ref_freq, seed, initial_phase, curr_aper_am
     — which is how the `init: backprop` start, computed in python, reaches it.
     None means params.init, the legacy behaviour, valid for 'random' and
     'warm_start' alone: 'backprop' forwarded as it stands is a mode rust
-    rejects."""
+    rejects.
+
+    `support` is gs_reconstruct's (|orig_aper_amp| > 0), passed as it is. Under
+    `amplitude: descend` curr_aper_amp is the START amplitude, which can be 0 at
+    support samples the descent still moves, so rust is never left to derive the
+    support from it (it refuses 'descend' and 'level' without one); under
+    'fixed' the two coincide. None leaves rust's legacy derivation (amp > 0),
+    fixed only. 'level' crosses as its start plate A0 * 1_support in
+    curr_aper_amp, from which rust reads A0 back exactly.
+
+    `rx_power` is gs_reconstruct's _received_power, set exactly when
+    params.power_penalty is: the penalty crosses as gamma plus that scalar, so
+    rust charges against the number python computed rather than a twin of it
+    (rice_bend_core refuses one without the other)."""
     if init_mode is None:
         init_mode = params.init
     (curr_aper_f, final_loss, final_loss_pf, n_iters_run, stop_reason, loss_full,
-     loss_full_pf) = rust_core().gs_solve(
+     loss_full_pf, final_mse, power_ratio) = rust_core().gs_solve(
         initial_phase, np.asarray(curr_aper_amp, dtype=np.float64),
         np.array([ch.freq for ch in channels], dtype=np.float64), float(ref_freq),
         np.stack([np.asarray(ch.rx_field, dtype=np.complex128) for ch in channels]),
@@ -709,7 +895,13 @@ def _gs_solve_rust(channels, params, ref_freq, seed, initial_phase, curr_aper_am
         np.stack(h_fwd).astype(np.complex128, copy=False), float(dx),
         init_mode, int(params.max_iters), int(params.convergence_count),
         float(params.convergence_threshold), float(params.lr0),
-        float(params.bt_shrink), int(params.bt_tries))
+        float(params.bt_shrink), int(params.bt_tries),
+        amplitude=str(params.amplitude),
+        amp_max=None if params.amp_max is None else float(params.amp_max),
+        support=None if support is None else np.ascontiguousarray(support, dtype=bool),
+        power_penalty=(None if params.power_penalty is None
+                       else float(params.power_penalty)),
+        rx_power=None if rx_power is None else float(rx_power))
     if log is not None:
         if stop_reason == "converged":
             log.info(f"MGS has converged after {n_iters_run} iterations")
@@ -720,7 +912,9 @@ def _gs_solve_rust(channels, params, ref_freq, seed, initial_phase, curr_aper_am
                     n_iters_run=int(n_iters_run), stop_reason=str(stop_reason),
                     seed=seed, loss_full=loss_full, loss_full_per_freq=loss_full_pf,
                     frequencies=tuple(float(ch.freq) for ch in channels),
-                    ref_freq=float(ref_freq), history=None)
+                    ref_freq=float(ref_freq), history=None,
+                    final_mse=float(final_mse),
+                    power_ratio=None if power_ratio is None else float(power_ratio))
 
 
 def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
@@ -731,7 +925,9 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
 
     Solves for ONE aperture profile psi(x) at plane `tx_z` that best reproduces
     every channel's measured RX field at once, holding the amplitude fixed at
-    `orig_aper_amp` (defined on `x_axis`; its nonzero region is the support).
+    `orig_aper_amp` (defined on `x_axis`; its nonzero region is the support) —
+    or, with `params.amplitude` 'descend' or 'level', fitting the amplitude as
+    well (see below).
     psi is a PLATE's shape — the optical-path/delay profile expressed as phase at
     `ref_freq` — and each channel's phase is (f/ref_freq)·psi, the way a physical
     plate's phase scales with wavenumber. This matches every simulated beam type
@@ -780,7 +976,46 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
     (_gs_solve_rust's init_mode). GS history exists only on the python engine,
     so a capture=True solve runs wholly on python — including its warm-start
     stage-1 recursion.
+
+    The amplitude (`params.amplitude`):
+
+    - 'fixed' (the default): held at `orig_aper_amp` throughout.
+    - 'descend': ONE amplitude a(x) on the support, shared by every tone (a
+      plate's transmission is not scaled with frequency the way its phase is),
+      fitted together with psi. It starts from _backprop_amplitude, computed
+      after the phase start and before the engine dispatch, and it moves in the
+      same backtracking step as psi: each trial is psi - step*grad_psi together
+      with clip(a - step*grad_a, 0, amp_max), accepted or shrunk as one on the
+      joint loss. The legacy warm start's reference-tone solve stays phase-only,
+      at that start amplitude. Both engines (rust: RUST_AMPLITUDE_MODES), and
+      not with capture=True (check_amplitude_mode, called first).
+    - 'level': ONE uniform level A >= 0 over the support, shared by every tone,
+      fitted together with psi; no cap and no assumed brightness. It starts at
+      the power-matched A0 (_power_matched_level, from the phase in hand at the
+      same point as descend's start), moves by the MEAN over the support of the
+      per-sample amplitude gradient, and takes the same joint backtracking step:
+      each trial is psi - step*grad_psi with max(A - step*grad_A, 0) on the
+      support. Both engines (rust: RUST_AMPLITUDE_MODES); not with capture=True,
+      and not with several tones under init 'warm_start' (check_amplitude_mode:
+      it needs init: backprop).
+
+    The excess-power penalty (`params.power_penalty` = gamma, with 'descend' or
+    'level'; refused with 'fixed'): the descent minimizes J = L * R**gamma, L the
+    plain joint loss above and R = max(1, P_plate / P_rx), P_plate the power
+    leaving the plate (sum a^2 dx over the support) and P_rx the power measured
+    on the RX elements (_received_power, once per solve). A plate that radiates
+    more than the receiver caught is charged for the excess, which L alone does
+    not see where part of the beam misses the RX window; the floor at 1 is what
+    keeps J from preferring dark plates. J is what the loss history, the
+    backtracking accept test and `final_loss` carry; `final_loss_per_freq` stays
+    the plain per-tone losses, and `final_mse` / `power_ratio` record L and R of
+    the final iterate. The descent direction is grad J scaled by 1/R**gamma: the
+    phase gradient as without the penalty, the amplitude gradient with one more
+    term, (gamma L / R) dR/da in the solver's gradient convention, added only
+    where R > 1. Both engines; rust receives P_rx as computed here. Off (None),
+    not one operation of the loop changes.
     """
+    check_amplitude_mode(params, capture=capture, n_tones=len(channels))
     if capture and params.engine == "rust":
         if log is not None:
             log.info("engine 'rust' does not capture GS history; this solve runs on python")
@@ -853,12 +1088,59 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
             channels=channels, rho=rho, ref_freq=ref_freq, h_fwd=h_fwd,
             support=support, curr_aper_amp=curr_aper_amp, dx=dx, log=log)
 
+    # `amplitude: descend`: the start amplitude replaces the fixed one HERE — after
+    # the phase start (a several-tone backprop start has scanned its offset at the
+    # aperture's own amplitude) and before the engine dispatch, so that the rust
+    # port can take it over as it takes the phase. orig_aper_amp still defines the
+    # support. The legacy warm start below runs at this amplitude.
+    descend = params.amplitude == "descend"
+    amp_max = params.amp_max
+    if descend:
+        curr_aper_amp = _backprop_amplitude(channels=channels, rho=rho, h_fwd=h_fwd,
+                                            support=support, dx=dx, amp_max=amp_max)
+    # `amplitude: level`, at the same point: ONE level A on the support, started
+    # where the phase in hand (the backprop start, offset scan included; else, at
+    # one tone, the seeded draw: several tones under warm_start are refused above)
+    # predicts the measured RX power. amp_level is the unknown; curr_aper_amp is
+    # always amp_level * unit_support, the plate every prediction is made from.
+    level = params.amplitude == "level"
+    if level:
+        unit_support = support.astype(np.float64)
+        amp_level = _power_matched_level(channels=channels, rho=rho, h_fwd=h_fwd,
+                                         support=support, psi0=curr_aper_phase, dx=dx)
+        curr_aper_amp = amp_level * unit_support
+    fit_amp = descend or level
+
+    # The excess-power penalty (`power_penalty` = gamma; check_amplitude_mode has
+    # refused it at a fixed amplitude). P_rx is a constant of the solve, computed
+    # once HERE and handed to rust as it is, so both engines charge against the one
+    # number. n_scene / n_sup are the convention constants of the amplitude
+    # gradient (grad_amp_j = 2N dL/da_j; the level's mean over the support adds
+    # 1/n_sup), cast once
+    gamma = params.power_penalty
+    penalized = gamma is not None
+    rx_power = None
+    if penalized:
+        rx_power = _received_power(channels, dx)
+        if not (math.isfinite(rx_power) and rx_power > 0):
+            raise ValueError(
+                f"power_penalty needs the power received on the RX elements, and it "
+                f"is {rx_power} (no element with error_weighting > 0, or a zero or "
+                "non-finite measurement there)")
+        n_scene = float(size)
+        n_sup = float(np.count_nonzero(support))
+
     if params.engine == "rust":
         # the backprop start goes over as the phase to descend from ('random': used
-        # unchanged); a legacy start goes over as the draw plus its own mode
+        # unchanged); a legacy start goes over as the draw plus its own mode. A
+        # descended amplitude goes over as its start (curr_aper_amp) plus the mode,
+        # amp_max and THIS support, which a start amplitude with zeros inside the
+        # window would not reproduce. A level goes over as its start plate (A0 on
+        # the support, in curr_aper_amp) plus the mode and the support
         return _gs_solve_rust(channels, params, ref_freq, seed, curr_aper_phase,
                               curr_aper_amp, h_fwd, dx, log=log,
-                              init_mode="random" if backprop else None)
+                              init_mode="random" if backprop else None,
+                              support=support, rx_power=rx_power)
 
     # Multi-wavelength warm start: replace the random start with a point inside the
     # true basin (reference-frequency solve -> unwrap -> absolute-offset scan). A
@@ -901,6 +1183,7 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
         # shared plate profile: phase = rho_f * psi.
         loss_pf = np.empty(n_freq, dtype=np.float64)
         grad_theta = np.zeros(size, dtype=np.float64)
+        grad_amp = np.zeros(size, dtype=np.float64) if fit_amp else None
         prop_fields = [] if history is not None else None
         for f, ch in enumerate(channels):
             u0 = curr_aper_amp * np.exp(1j * (rho[f] * curr_aper_phase))
@@ -913,13 +1196,57 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
             g_u0 = rs.rs_apply(r_cx, h_adj[f], dx)
             # chain rule: d(theta_f)/d(psi) = rho_f
             grad_theta += rho[f] * (2.0 * np.imag(g_u0 * np.conj(u0)))
+            if fit_amp:
+                # the amplitude's gradient from the SAME back-propagated residual:
+                # u0 = a * exp(1j*theta_f), so d/da takes the real part against the
+                # unit phasor where d/dtheta took the imaginary part against u0. No
+                # rho_f: the amplitude is one array shared by every tone. g_u0 carries
+                # ONE factor of the error weighting (r_cx = w*(prop - y)) where the
+                # exact gradient of the weighted loss has w^2; the amplitude keeps the
+                # phase's convention on purpose, so the two halves of the step stay
+                # scaled alike (with a 0/1 weighting both are exact, up to one constant)
+                grad_amp += 2.0 * np.real(
+                    g_u0 * np.conj(np.exp(1j * (rho[f] * curr_aper_phase))))
         # gradient of the MEAN loss: the divisor is n_freq, not 1. Summing instead
         # would silently rescale the effective lr0 by n_freq and change backtracking
         # accept rates, breaking step-size comparability with single-frequency runs.
         grad_theta /= float(n_freq)
         grad_theta[~support] = 0.0
+        if fit_amp:
+            grad_amp /= float(n_freq)
+            grad_amp[~support] = 0.0
+        if level:
+            # The level's gradient is the MEAN of the per-sample one over the support,
+            # not its sum (the exact d(loss)/dA). That is a preconditioning, chosen:
+            # the sum is n_support times larger, so the shared lr0 would throw A by
+            # hundreds of per-sample steps at once and the backtracking (bt_tries
+            # halvings) could not shrink it back into range. With the mean, A moves by
+            # the average of what the per-sample amplitudes of 'descend' would move,
+            # on the same step as the phase.
+            grad_level = float(np.mean(grad_amp[support]))
 
-        loss = loss_pf.mean()
+        if penalized:
+            # The objective J = L * R**gamma of the CURRENT iterate. Its descent
+            # direction is grad J / R**gamma: the phase's gradient unchanged, the
+            # amplitude's plus (gamma L / R) dR/da in the convention above, which is
+            # 2 gamma L / A (level) and 2 gamma L a_j dx / P_plate (descend), times
+            # 2N (and 1/n_sup for the level's mean). Nothing to add where R == 1:
+            # the floor is flat. Evaluated in this order on both engines
+            loss_plain = loss_pf.mean()
+            if level:
+                p_plate = (amp_level * amp_level) * float(n_sup) * dx
+            else:
+                p_plate = np.add.reduce(curr_aper_amp[support] ** 2) * dx
+            ratio = max(1.0, p_plate / rx_power)
+            if ratio > 1.0:
+                if level:
+                    grad_level += (4.0 * gamma * loss_plain * n_scene) / (amp_level * n_sup)
+                else:
+                    coef = (4.0 * gamma * loss_plain * n_scene * dx) / p_plate
+                    grad_amp[support] += coef * curr_aper_amp[support]
+            loss = loss_plain * ratio ** gamma
+        else:
+            loss = loss_pf.mean()
         hist_error[iter_idx] = loss
         hist_error_pf[iter_idx] = loss_pf
         if history is not None:
@@ -928,18 +1255,47 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
         step = lr0
         for _ in range(bt_tries):
             theta_trial = curr_aper_phase - step * grad_theta
+            # one JOINT step: the descended amplitude takes the same step as the
+            # phase, is clipped back into [0, amp_max] and zeroed off the support,
+            # and the pair is accepted or shrunk together. Fixed: the held array.
+            amp_trial = curr_aper_amp
+            if descend:
+                amp_trial = np.clip(curr_aper_amp - step * grad_amp, 0.0, amp_max)
+                amp_trial[~support] = 0.0
+            elif level:
+                # the level takes the same step, kept >= 0 by descend's clip with no
+                # upper bound (numpy's clip: a NaN passes through, as in descend)
+                level_trial = float(np.clip(amp_level - step * grad_level, 0.0, np.inf))
+                amp_trial = level_trial * unit_support
             trial_pf = np.empty(n_freq, dtype=np.float64)
             for f, ch in enumerate(channels):
-                u0_trial = curr_aper_amp * np.exp(1j * (rho[f] * theta_trial))
+                u0_trial = amp_trial * np.exp(1j * (rho[f] * theta_trial))
                 um_trial = rs.rs_apply(u0_trial, h_fwd[f], dx)
                 r_trial = ch.error_weighting * (um_trial - ch.rx_field)
                 trial_pf[f] = 0.5 * np.mean(np.abs(r_trial)**2)
             loss_trial = trial_pf.mean()
+            if penalized:
+                # the trial's objective, from the trial's own amplitude
+                trial_plain = loss_trial
+                if level:
+                    p_plate_trial = (level_trial * level_trial) * float(n_sup) * dx
+                else:
+                    p_plate_trial = np.add.reduce(amp_trial[support] ** 2) * dx
+                ratio_trial = max(1.0, p_plate_trial / rx_power)
+                loss_trial = trial_plain * ratio_trial ** gamma
             if loss_trial < loss:  # sufficient decrease of the JOINT loss
                 curr_aper_phase = theta_trial.copy()
                 curr_aper_phase[~support] = 0.0
+                if descend:
+                    curr_aper_amp = amp_trial
+                elif level:
+                    amp_level = level_trial
+                    curr_aper_amp = amp_trial
                 loss = loss_trial
                 loss_pf = trial_pf
+                if penalized:
+                    loss_plain = trial_plain
+                    ratio = ratio_trial
                 break
             step *= bt_shrink
         curr_aper_f = curr_aper_amp * np.exp(1j * curr_aper_phase)
@@ -976,7 +1332,9 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
                     frequencies=tuple(float(ch.freq) for ch in channels),
                     ref_freq=float(ref_freq),
                     history=history,
-                    psi=curr_aper_phase.copy() if capture else None)
+                    psi=curr_aper_phase.copy() if capture else None,
+                    final_mse=float(loss_plain) if penalized else float(loss),
+                    power_ratio=float(ratio) if penalized else None)
 
 
 @dataclass
@@ -1099,8 +1457,89 @@ def landing_lines(report: dict) -> List[str]:
     return lines
 
 
+def _measured_rx_aperture(x_min: float, x_max: float, scene_x_axis: np.ndarray,
+                          grid_idx: np.ndarray, stride: int) -> SimAperature:
+    """The on-grid receiver of a measured row: SimAperature.on_grid's layout, with
+    the elements at `grid_idx` (measured.place_elements: where the stage
+    measured) instead of the ones grid_element_indices would pick from the window.
+    `aper_axis` is scene_x_axis[grid_idx], the same floats, so measure() reads and
+    places the profile by index as it does on the simulated on-grid path."""
+    grid_idx = np.asarray(grid_idx, dtype=np.intp)
+    if not np.all(np.diff(grid_idx) == stride):
+        raise ValueError(
+            f"the measured RX elements are not every {stride}th scene sample "
+            f"(steps {sorted(set(np.diff(grid_idx).tolist()))}): the receiver weighting "
+            "assumes one pitch of rx_aperture.grid_stride scene steps")
+    rx = SimAperature.__new__(SimAperature)
+    rx.x_min = x_min
+    rx.x_max = x_max
+    rx.z = 0
+    rx.grid_idx = grid_idx
+    rx.grid_stride = int(stride)
+    rx.dx = float(rx.grid_stride * (scene_x_axis[1] - scene_x_axis[0]))
+    rx.aper_axis = np.array(scene_x_axis[grid_idx], dtype=np.float64)
+    rx.num_points = len(rx.aper_axis)
+    rx.aper_profile = np.zeros(len(rx.aper_axis), dtype=np.complex128)
+    return rx
+
+
+def _measured_provenance(geom: MeasuredGeometry, mcfg, grid_idx: np.ndarray,
+                         stride: int, reports: List[dict]) -> dict:
+    """The `measured` block of a measured run's manifest: where the measurement
+    came from and how it was turned into the solver's, in plain JSON values.
+
+    The data file is named by its absolute path, size and sha256 (hashed here,
+    once per run: topt-parser rewrites the file under the same name), with the
+    column read for each frequency. One per_freq entry per frequency for what
+    depends on it (the raw |V| statistics). The TX is recorded as a POSITION (the
+    bench's, put in the simulation frame); its beam is not known and is said so."""
+    size, sha256 = data_file_digest(geom.data_file)
+    scale = float(mcfg.amplitude_scale)
+    return {
+        "data_file": str(geom.data_file),
+        "data_file_bytes": int(size),
+        "data_file_sha256": sha256,
+        "columns": [str(r["column"]) for r in reports],
+        "frame": {
+            "z_sim_m": f"({geom.z_rx_mm:g} mm - z_stage) * 1e-3",
+            "x_sim_m": f"(x_stage - {geom.x_center_mm:g} mm) * 1e-3",
+            "z_rx_mm": float(geom.z_rx_mm),
+            "x_center_mm": float(geom.x_center_mm),
+            "x_mirrored": False,
+        },
+        "stage_mm": {"tx_aperture": geom.tx_stage_mm, "rx_aperture": geom.rx_stage_mm},
+        "tx": {"beam": "unknown", "z_m": float(geom.tx_z),
+               "x_min_m": float(geom.tx_x_min), "x_max_m": float(geom.tx_x_max),
+               "width_m": float(geom.tx_width_m)},
+        "rx": {"row_mm": float(geom.z_rx_mm),
+               "n_elements": int(len(geom.rx_x_mm)), "pitch_m": float(geom.pitch_m),
+               "grid_stride": int(stride), "width_m": float(geom.rx_width_m),
+               "x_mm": [float(x) for x in geom.rx_x_mm],
+               "scene_idx": [int(i) for i in grid_idx]},
+        "phasor": ("amplitude_scale * V(f), V(f) the data_file cell at the element's "
+                   "(X, Z) in the frequency's column, as topt-parser writes it: "
+                   "conj(sum_n s_n * exp(-2j*pi*f*t_n)) over topt-parser's frame "
+                   "(every sample of the trace but its last, the window's closing "
+                   "endpoint), Signal 1 (nA), t_n the absolute sample time; no dt "
+                   "factor, gate or taper"),
+        "amplitude_scale": scale,
+        "per_freq": [{"freq_hz": float(r["freq"]),
+                      "raw_abs_max": float(r["raw_abs_max"]),
+                      "raw_abs_median": float(r["raw_abs_median"]),
+                      "scaled_abs_max": scale * float(r["raw_abs_max"])}
+                     for r in reports],
+    }
+
+
 class MGS():
     def __init__(self, freqs, config: SimConfig):
+        if config.measured is not None:
+            # this constructor SYNTHESIZES the measurement from config.tx_aperture's
+            # beam, and a measured config's beam is a stand-in that only lets the
+            # block validate: the real plate's profile is the unknown
+            raise ValueError(
+                "a `measured:` config has no simulated TX beam to synthesize a "
+                "measurement from; build it with MGS.from_measured(freqs, config)")
         self._init_common(freqs, config)
 
         # Convention: the RX aperture sits at the origin (z=0), the bottom of the
@@ -1113,7 +1552,8 @@ class MGS():
         # but an on-grid receiver (rx_aperture.grid_stride) takes its elements FROM
         # the scene x-axis. So the axis is laid out here first, with the exact call
         # SimScene makes; the assert below holds the two to the same floats.
-        scene_x_axis = sampled_axis(scene_cfg.x_min, scene_cfg.x_max, scene_cfg.spacing)
+        scene_x_axis = scene_axis(scene_cfg.x_min, scene_cfg.x_max, scene_cfg.spacing,
+                                  scene_cfg.exact_step)
         for freq in self.freqs:
             wl = rs.wavelength(freq)
             self.freq_states.append(FreqState(
@@ -1130,16 +1570,81 @@ class MGS():
             x_min=scene_cfg.x_min, x_max=scene_cfg.x_max,
             z_min=scene_cfg.z_min, z_max=scene_cfg.z_max,
             spacing=scene_cfg.spacing, rx_ap=primary.rx_ap, tx_ap=tx,
+            exact_step=scene_cfg.exact_step,
         )
         # an on-grid receiver's elements must BE samples of the axis the solver
         # runs on, to the last bit: measure() reads and scores the field by index,
         # and an index into any other axis would be a silently shifted array
+        self._check_on_grid_rx()
+        self._log_geometry()
+        # the TX power, once, now that every tone's plate exists and the scene can
+        # propagate them, and before measure(): everything downstream then sees one
+        # plate
+        self._apply_tx_amplitude(config.tx_aperture.amplitude)
+
+    def _apply_tx_amplitude(self, setting) -> None:
+        """Multiply every tone's simulated TX plate by ONE real factor s > 0
+        (tx_aperture.amplitude): s is the number itself, or for 'rx_peak' 1 / P, P
+        the largest |clean RX element| over every tone as _synthesize_rx gives it
+        from the UNSCALED plate, so the clean RX peak element is then 1 (to the
+        propagator's complex64 rounding). The default 1.0 does nothing at all: no
+        multiply, no propagation, no log line, so such a run is bit-for-bit what it
+        was before the setting existed.
+
+        The plate itself is scaled, here, once, so every consumer reads the same
+        scaled TX: measure() synthesizes from it (and stays idempotent: it never
+        scales anything), the noise is drawn on that clean field (peak-referenced,
+        so with one seed the noisy profile is s times the unscaled run's), and the
+        scene illumination, plot_scene, the landing report, run.npz and the grid
+        sweep's saved real_tx profiles all read these same objects. The scene's
+        tx_ap IS freq_states[0].tx_ap (the scene holds the primary tone's
+        aperture as a view, not a copy), so the plates are scaled by object, each
+        once: scaling the scene's too would apply s twice to the primary tone.
+        gs_tx is geometry only (the solver writes its profile) and is not touched.
+
+        No grid candidate is told s: its amplitude is the uniform box, or what
+        amplitude descend / level fit to the data. The capturing `mgs` solve holds
+        this scaled plate's own amplitude, as it always holds the real plate's."""
+        if setting == 1.0:
+            return
+        assert self.scene.tx_ap is self.freq_states[0].tx_ap, \
+            "the scene's TX must be the primary tone's own aperture object"
+        plates = list({id(fs.tx_ap): fs.tx_ap for fs in self.freq_states}.values())
+        if setting == TxApertureConfig.AMPLITUDE_RX_PEAK:
+            # rs() would refuse an undersampled tone too, but name only the first;
+            # measure()'s check names them all
+            self._check_rs_sampling()
+            peak = max(float(np.max(np.abs(self._synthesize_rx(fs))))
+                       for fs in self.freq_states)
+            # _synthesize_rx kept each tone's UNSCALED RX-plane row; measure()
+            # re-synthesizes it from the scaled plate, and until then a stale row
+            # must not be there to read (it was None before this, as on any run)
+            for fs in self.freq_states:
+                fs.rx_plane_row = None
+            if not (np.isfinite(peak) and peak > 0):
+                raise ValueError(
+                    f"tx_aperture.amplitude 'rx_peak': the clean RX peak element is "
+                    f"{peak:g}, so no scale puts it at 1 (the beam misses every RX "
+                    "element?)")
+            scale = 1.0 / peak
+            self.log.info(f"TX amplitude rx_peak: plate x {scale:.5g} (clean RX peak "
+                          f"element {peak:.4g} -> 1)")
+        else:
+            peak = None
+            scale = float(setting)
+            self.log.info(f"TX amplitude {scale:g} (config)")
+        for tx in plates:
+            tx.aper_profile = tx.aper_profile * scale
+        self.tx_amplitude_scale = scale
+        self.tx_amplitude_report = {"setting": setting, "scale": scale,
+                                    "clean_rx_peak_unscaled": peak}
+
+    def _check_on_grid_rx(self) -> None:
         for fs in self.freq_states:
             rx = fs.rx_ap
             if rx.grid_idx is not None:
                 assert np.array_equal(self.scene.x_axis[rx.grid_idx], rx.aper_axis), \
                     "on-grid RX elements are not samples of the scene x-axis"
-        self._log_geometry()
 
     def _init_common(self, freqs, config: SimConfig) -> None:
         """State every MGS has, whatever built its scene.
@@ -1166,6 +1671,12 @@ class MGS():
         self.tx_cfg = None             # the simulated constructor sets it: the beam's
         #   geometric landing target (landing_report) is read from the TX config, and
         #   an experimental capture has no configured beam to aim
+        # tx_aperture.amplitude as applied to the simulated plate (_apply_tx_amplitude):
+        # the factor s every tone's TX profile carries, and the JSON-safe record a
+        # run's manifest keeps of it. 1.0 / None on the experimental and measured
+        # paths, which have no simulated plate to scale, and at the default 1.0
+        self.tx_amplitude_scale: float = 1.0
+        self.tx_amplitude_report: Optional[dict] = None
         self.gs_history = None
         self.gs_result = None
         self.freq_states: List[FreqState] = []   # filled by the constructor path
@@ -1236,6 +1747,84 @@ class MGS():
 
         self.has_real_aper = False   # the experimental TX aperture is unknown
         self.beam_type = "directional"
+        self._log_geometry()
+        return self
+
+    @classmethod
+    def from_measured(cls, freqs, config: SimConfig) -> "MGS":
+        """Build an MGS whose RX measurement is a measured THz-TDS row
+        (config.measured; rice_bend/measured.py) instead of a simulated one.
+
+        The scene is the config's (an exact-step axis: sim_scene.exact_step is
+        required), and the receiver is the on-grid one of the simulated campaign
+        configs, with two differences that come from the data: its elements are the
+        scene samples the measured stage positions ARE (measured.place_elements,
+        not grid_element_indices' window rule), and its profile at each frequency
+        is amplitude_scale times those positions' cells in the data file's column
+        of that frequency (measured.measured_rx_profile). measure() then runs
+        unchanged: has_real_aper is False, so it synthesizes nothing and adds no
+        noise, and its on-grid branch places and weights the profile exactly as it
+        does a simulated one.
+
+        The TX aperture is GEOMETRY ONLY: the measured window, where the plate sat
+        on the bench, which is the ground truth the search is scored against. Its
+        profile is the unknown, so aper_profile is None: anything that would read
+        it (a synthesis, landing_report, plot_scene) fails loudly rather than
+        reading zeros. The beam config.tx_aperture carries is a stand-in that only
+        lets the block validate and is never read here: beam_type is "unknown",
+        and tx_cfg stays None, so no landing target is aimed from it.
+
+        apply_measured is called here, at `freqs` (it is idempotent, and the data
+        file is read once per process: measured._read_rx_row), so the config holds
+        the derived tx_aperture / rx_aperture / grid aperture width whatever the
+        caller did. self.measured_geometry keeps the derived geometry and
+        self.measured_report the JSON-safe provenance a run manifest carries
+        (_measured_provenance).
+        """
+        if config.measured is None:
+            raise ValueError("MGS.from_measured needs a config with a `measured:` block")
+        if np.isscalar(freqs):
+            freqs = [freqs]
+        # before _init_common, whose rs.wavelength would meet a frequency <= 0
+        # first: derive_geometry refuses one with the reason
+        geom = apply_measured(config, freqs)
+        self = cls.__new__(cls)
+        self._init_common(freqs, config)
+        mcfg, scene_cfg = config.measured, config.sim_scene
+        rx_cfg, tx_cfg = config.rx_aperture, config.tx_aperture
+
+        # laid out before the SimScene, as in __init__, with the call SimScene makes
+        scene_x_axis = scene_axis(scene_cfg.x_min, scene_cfg.x_max, scene_cfg.spacing,
+                                  scene_cfg.exact_step)
+        grid_idx = place_elements(scene_x_axis, geom.rx_x_sim)
+        profiles, reports = measured_rx_profile(geom, self.freqs, mcfg.amplitude_scale,
+                                                log=self.log)
+        for freq, profile in zip(self.freqs, profiles):
+            rx = _measured_rx_aperture(rx_cfg.x_center - rx_cfg.width / 2.0,
+                                       rx_cfg.x_center + rx_cfg.width / 2.0,
+                                       scene_x_axis, grid_idx, rx_cfg.grid_stride)
+            rx.aper_profile = profile.copy()
+            tx = SimAperature(x_min=tx_cfg.x_min, x_max=tx_cfg.x_max, z=tx_cfg.z,
+                              dx=tx_cfg.dx)
+            tx.aper_profile = None   # the unknown (see the docstring)
+            self.freq_states.append(FreqState(freq=freq, wavelength=rs.wavelength(freq),
+                                              rx_ap=rx, tx_ap=tx))
+        self.beam_type = "unknown"
+        self.has_real_aper = False
+
+        primary = self.freq_states[0]
+        tx = primary.tx_ap
+        self.gs_tx = SimAperature(x_min=tx.x_min, x_max=tx.x_max, z=tx.z, dx=tx.dx)
+        self.scene = SimScene(
+            x_min=scene_cfg.x_min, x_max=scene_cfg.x_max,
+            z_min=scene_cfg.z_min, z_max=scene_cfg.z_max,
+            spacing=scene_cfg.spacing, rx_ap=primary.rx_ap, tx_ap=tx,
+            exact_step=scene_cfg.exact_step,
+        )
+        self._check_on_grid_rx()
+        self.measured_geometry: MeasuredGeometry = geom
+        self.measured_report = _measured_provenance(
+            geom, mcfg, grid_idx, int(rx_cfg.grid_stride), reports)
         self._log_geometry()
         return self
 
@@ -1386,14 +1975,36 @@ class MGS():
             return np.asarray(row[fs.rx_ap.grid_idx], dtype=np.complex128)
         return interp_real_imag(scene.x_axis, row, fs.rx_ap.aper_axis)
 
+    def _check_rs_sampling(self) -> None:
+        """Fail fast, naming EVERY undersampled frequency at once — rs() would raise
+        on only the first it meets, and the highest frequency binds, so "which
+        frequencies are the problem" is exactly the question the error must answer.
+        Simulated path only (measure(), and _apply_tx_amplitude's 'rx_peak', which
+        propagates the plate before measure() does)."""
+        rx_plane = np.array([self.scene.rx_ap.z])
+        bad = []
+        for fs in self.freq_states:
+            q = rs.sampling_quality(self.scene.x_axis, rx_plane, fs.wavelength,
+                                    z_src=self.scene.tx_ap.z, forward_dir=-1.0)
+            if q < 1:
+                bad.append(f"{fs.freq / 1e9:g} GHz (quality {q:.3f})")
+        if bad:
+            raise RuntimeError(
+                f"RS undersampled for {len(bad)} of {len(self.freq_states)} "
+                f"frequencies at the TX plane: {', '.join(bad)}. Use a finer "
+                f"sim_scene.spacing or drop the highest frequencies.")
+
     def measure(self) -> None:
         """Put the measured RX field on the scene grid and build the error
         weighting used by phase retrieval, once per frequency. Idempotent.
 
         On the simulated path each frequency's measurement is synthesized here, by
-        propagating that frequency's known TX aperture to the RX plane. On the
-        experimental path there is no known TX aperture (has_real_aper is False)
-        and rx_ap.aper_profile already holds the measured data. The results
+        propagating that frequency's known TX aperture to the RX plane (which
+        already carries tx_aperture.amplitude: the constructor scaled the plate,
+        _apply_tx_amplitude, and nothing here scales anything). On the
+        experimental and measured paths (from_experiment, from_measured) there is
+        no known TX aperture (has_real_aper is False) and rx_ap.aper_profile
+        already holds the measured data. The results
         (FreqState.rx_field / .error_weighting) are the single measurement set
         shared across every hypothesized TX location.
 
@@ -1432,22 +2043,8 @@ class MGS():
         config. On the experimental path noise.snr_db is ignored (with a warning):
         the capture carries its own receiver noise.
         """
-        # Fail fast, naming EVERY undersampled frequency at once — rs() would raise
-        # on only the first it meets, and the highest frequency binds, so "which
-        # frequencies are the problem" is exactly the question the error must answer.
         if self.has_real_aper:
-            rx_plane = np.array([self.scene.rx_ap.z])
-            bad = []
-            for fs in self.freq_states:
-                q = rs.sampling_quality(self.scene.x_axis, rx_plane, fs.wavelength,
-                                        z_src=self.scene.tx_ap.z, forward_dir=-1.0)
-                if q < 1:
-                    bad.append(f"{fs.freq / 1e9:g} GHz (quality {q:.3f})")
-            if bad:
-                raise RuntimeError(
-                    f"RS undersampled for {len(bad)} of {len(self.freq_states)} "
-                    f"frequencies at the TX plane: {', '.join(bad)}. Use a finer "
-                    f"sim_scene.spacing or drop the highest frequencies.")
+            self._check_rs_sampling()
 
         x_axis = self.scene.x_axis
         snr_db = self.noise_cfg.snr_db
@@ -1973,6 +2570,21 @@ def main():
     log = setup_logging(args.debug)
 
     config = load_config(args.config)
+    if config.measured is not None:
+        # refused before any override or output: there is no known TX to solve at,
+        # nor a beam to synthesize a measurement or draw a real scene from
+        parser.error(
+            f"{args.config} is a measured-data config (it has a `measured:` block). "
+            "`mgs` solves one KNOWN TX beam against a measurement simulated from it, "
+            "and a measured TX's beam is unknown; localize the TX with "
+            f"`grid-search-mgs --config {args.config}` (add --true-mgs for the solve "
+            "at the measured TX position)")
+    try:
+        # `mgs` always captures GS history, which a descended amplitude cannot use:
+        # refused here, before any override, solve or output
+        check_amplitude_mode(config.gerchberg_saxton, capture=True)
+    except ValueError as e:
+        parser.error(f"{args.config}: {e}")
 
     # apply CLI overrides onto the config
     if args.out is not None:

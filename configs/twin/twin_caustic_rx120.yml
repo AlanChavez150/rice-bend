@@ -1,0 +1,86 @@
+# SIMULATED TWIN of the measured 120 mm receiver-size run
+# (configs/measured/rxsize/rx177_w120.yml): the same geometry, receiver and solver, with
+# a known caustic TX in place of the measured one, so the power-free search can be
+# tested where the truth is exact.
+#
+# Geometry, in that run's solver frame (z_sim = (177 - z) mm, x_sim = (x - 155) mm):
+# - TX: a 100 mm plate at x -70..30 mm (stage 85..185), z 242 mm (stage z -65).
+# - RX: 120 mm at x -60..60 mm (stage 95..215), 241 elements at exactly 0.5 mm
+#   (grid_stride 2 on the exact-step 0.25 mm scene; 2401 x samples, odd, as measured).
+#
+# Beam: an ideal caustic curving toward +x, x(d) = a*d^2 + b*d + c, designed over the
+# 242 mm to the RX plane. a = 0.1 / 0.242^2 makes its plate exactly the 100 mm TX window
+# (c - a*L^2 .. c = -70..30 mm); b = -0.299 lands the RX-plane intensity peak at
+# x_sim +54 mm (stage 209), where the measured beam peaks. Checked at 300 GHz before
+# noise: peak 2.62 at stage 209.0, -3 dB width 6 mm (measured 2 mm), 96 % of the
+# RX-plane energy inside the 120 mm RX (measured: 89 % of row 50..250), 90 % of the
+# energy over stage 154..214 (measured 88..211). It is far more concentrated than the
+# measured beam, so this twin is the easier case.
+#
+# Unknown TX power: tx_aperture.amplitude: rx_peak scales the plate so the CLEAN RX peak
+# element is 1, the counterpart of the measured run's amplitude_scale (1/max|V|, peak
+# -> 1). The solver fits the amplitude (descend, cap 10) and is never told the scale.
+# Receiver noise 30 dB re that peak (the measured row-177 floor is about 37 dB,
+# estimated from the 800-1000 GHz bins).
+
+sim_scene:
+  x_min: -0.3
+  x_max: 0.3
+  z_min: 0.0
+  z_max: 0.40
+  spacing: 0.00025
+  exact_step: true         # x at exactly k * 0.25 mm: 2401 samples, the RX elements at 0.5 mm
+
+tx_aperture:
+  x_min: -0.070
+  x_max: 0.030
+  z: 0.242
+  dx: 0.0000499654         # lambda/20 at 300 GHz, as the campaign scenarios
+  amplitude: rx_peak       # the TX power is unknown: clean RX peak element -> 1
+  beam:
+    type: caustic
+    trajectory: [1.707533638, -0.299, 0.030]   # x(d) = a*d^2 + b*d + c
+
+rx_aperture:
+  x_center: 0.0
+  width: 0.120
+  grid_stride: 2           # 241 elements ON the solver grid, 0.5 mm pitch (lambda/2)
+
+plot_path: twin_caustic_rx120.png
+
+# What the residual plots and --scenes show, as the measured run.
+plot_window: {x_min: -0.15, x_max: 0.15, z_min: 0.0, z_max: 0.40}
+
+frequencies: [300.0e9]
+
+gerchberg_saxton:
+  init: backprop
+  amplitude: descend       # the amplitude is fitted too (cap 10), as the measured run
+  amp_max: 10.0
+  max_iters: 6000
+  convergence_count: 10
+  convergence_threshold: -1.0e-10
+  lr0: 0.05
+  bt_shrink: 0.5
+  bt_tries: 8
+  seed: 0
+  history_stride: 50
+
+output:
+  output_dir: results/twin
+  run_name: twin_caustic_rx120
+  save_run: true
+  save_scene_fields: false
+  save_gs_history: false
+
+noise:
+  snr_db: 30.0
+  seed: 0
+
+# The measured run's grid: 2 mm in z and x over the whole field (the z = 0 row and any
+# row too close to the RX for the RS sampling are skipped automatically).
+grid_search:
+  z:        {min: 0.0, max: 0.40, num: 201}
+  x_center: {min: -0.15, max: 0.15, num: 151}
+  aperture: {width: 0.1, dx: 0.00025}
+  seed: 0

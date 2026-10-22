@@ -326,9 +326,16 @@ def _check_resume_noise(study: StudyDef, base_cfg: SimConfig, root: Path, log) -
 
 # the gerchberg_saxton fields that decide what a solve produces. Left out:
 # engine (python and rust are parity-checked implementations of one solver) and
-# history_stride (it only thins what a capturing solve records)
+# history_stride (it only thins what a capturing solve records). power_penalty is
+# left out of a dump while off, and a missing key reads as null: off, as it was
 _GS_IDENTITY_FIELDS = ("init", "max_iters", "seed", "convergence_count",
-                       "convergence_threshold", "lr0", "bt_shrink", "bt_tries")
+                       "convergence_threshold", "lr0", "bt_shrink", "bt_tries",
+                       "amplitude", "amp_max", "power_penalty")
+# what a gerchberg_saxton field missing from a dump stands for, where that is not
+# null: a fixed-amplitude config dumps without amplitude / amp_max (config.py's
+# GerchbergSaxtonConfig._dump), as every snapshot saved before they existed does,
+# and both read as the fixed solve they were
+_GS_IDENTITY_DEFAULTS = {"amplitude": "fixed"}
 # floats are matched, not compared: a tone is the product center * (1 ± pct/100)
 # (338999999999.99994 Hz for +13 % of 300 GHz), so a value that reaches the two
 # sides by different arithmetic can differ in its last bit
@@ -367,15 +374,24 @@ def _fingerprint(cfg: dict, freqs: List[float]) -> dict:
     compared (_check_resume_identity)."""
     grid = cfg.get("grid_search") or {}
     gs = cfg.get("gerchberg_saxton") or {}
+    tx = cfg.get("tx_aperture")
+    if isinstance(tx, dict):
+        # tx_aperture.amplitude (the simulated plate's power) shapes the
+        # measurement, so it is part of the identity. A dump leaves it out at its
+        # default 1.0 (TxApertureConfig._dump) and every snapshot saved before it
+        # existed lacks it, so a missing key is 1.0 -- not null, which
+        # _identity_diffs would otherwise read it as -- on both sides alike
+        tx = {**tx, "amplitude": tx.get("amplitude", 1.0)}
     return {
         "frequencies": freqs,
         "sim_scene": cfg.get("sim_scene"),
-        "tx_aperture": cfg.get("tx_aperture"),      # the whole beam block included
+        "tx_aperture": tx,                          # the whole beam block included
         "rx_aperture": cfg.get("rx_aperture"),
         "grid_search": {
             "z": grid.get("z"), "x_center": grid.get("x_center"),
             "aperture": {"width": (grid.get("aperture") or {}).get("width")}},
-        "gerchberg_saxton": {k: gs.get(k) for k in _GS_IDENTITY_FIELDS},
+        "gerchberg_saxton": {k: gs.get(k, _GS_IDENTITY_DEFAULTS.get(k))
+                             for k in _GS_IDENTITY_FIELDS},
     }
 
 
@@ -885,6 +901,13 @@ def main():
                   "dB). --noise-seed is allowed and applies to every point.")
         raise SystemExit(2)
     base_cfg = load_config(args.config)
+    if base_cfg.measured is not None:
+        # a study varies a SIMULATED experiment point by point; measured data is
+        # one fixed acquisition, with no beam or receiver to vary
+        log.error(f"{args.config} is a measured-data config (it has a `measured:` "
+                  "block); mgs-study sweeps the parameters of a simulated experiment. "
+                  f"Localize the measured TX with `grid-search-mgs --config {args.config}`")
+        raise SystemExit(2)
     if args.engine is not None:
         base_cfg.gerchberg_saxton.engine = args.engine
     if study.sweeps_noise and base_cfg.noise.snr_db is not None:

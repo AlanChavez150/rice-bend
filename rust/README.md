@@ -44,7 +44,84 @@ back-propagated phase and, for several tones, the offset scan over the comb's
 true period are built in `src/rice_bend/mgs.py` for either engine, and Rust runs
 the descent from the result.
 
-`python/parity.py` runs seven slices under the same bar:
+**The descended amplitude** (`gerchberg_saxton.amplitude: descend`, with
+`amp_max`; added 2026-10-20) runs on both engines. The descent then fits ONE
+amplitude a(x), shared by every tone, together with psi. Its gradient is
+2·Re(g·conj(e^{iρψ})) from the same back-propagated residual g, averaged over the
+tones and zeroed off the support. Every backtracking trial takes the same step on
+both halves, with `clip(a − step·∇a, 0, amp_max)` (`npmath::np_clip`, numpy's NaN
+semantics), and the pair is accepted or shrunk as one (`src/solve.rs`). The start
+amplitude a0 (`mgs._backprop_amplitude`) is built in Python and crosses as
+`aper_amp`. `gs_solve` takes three trailing arguments, `amplitude` ('fixed' |
+'descend' | 'level'), `amp_max` and `support`, whose defaults are the legacy behaviour, so
+older positional callers run unchanged. **The support must cross explicitly**
+under 'descend', and `gs_solve` refuses 'descend' without it. Python's support
+is `|orig_aper_amp| > 0`, the window, while a0 can be 0 inside the window. The
+legacy derivation (`aper_amp > 0`) would then drop samples Python still descends.
+With a0 zeroed at 78 of 288 window samples, that one change moves the final loss
+by 7e-6 rel and the field by 8e-3. Real a0 is nonzero across the window on the
+measured row, but the clip drives 14 to 35 window samples to exactly 0 by the
+end of a solve. Those samples keep descending because rust fixes the support
+once, on entry. Under the legacy warm start, stage 1 stays phase-only at a0
+(`AmplitudeMode::Fixed`). It runs on `|a0| > 0`, the support of Python's child
+`gs_reconstruct`, and the scan uses a0 (`src/warm_start.rs`). The 'fixed' path
+is unchanged bit for bit. 455 result arrays (curr_aper_f, the losses, the loss
+curves, n_iters, stop) are byte-equal between the builds before and after the
+change. They come from slices 1, 2, 5, 6 and 7 below, a 3-tone legacy warm start
+on the slice-5 config, and five measured candidates with the amplitude forced to
+'fixed'. The slice cases ran through both `gs_reconstruct` and the hand-marshaled
+call.
+
+**The uniform level** (`gerchberg_saxton.amplitude: level`, no cap; added
+2026-10-20) runs on both engines too (`AmplitudeMode::Level`). The plate is ONE
+level A ≥ 0 on the support, shared by every tone. The per-sample amplitude
+gradient is built as under 'descend'; A moves by its mean over the support
+(`np_mean_f64`, support samples in order), clipped at 0 with no upper bound
+(`np_clip(A − step·∇A, 0, ∞)`), in the same joint backtracking step as psi. The
+start A0 (`mgs._power_matched_level`) is computed in Python before the dispatch
+and crosses exactly as a0 does, as `aper_amp`: A0 on the support and 0 off it.
+Rust reads A0 back from any support sample, since A0·1.0 is A0 bit for bit, and
+the boundary checks that the plate is one value there. It also needs the support,
+as 'descend' does. **Several tones under `init: warm_start` are refused** on both
+engines with "amplitude: level with several tones needs init: backprop". The
+check is `mgs.check_amplitude_mode`, which `grid-search-mgs` and
+`run_grid_search` call before the sweep with the run's tone count, with a second
+guard in `gs_solve`. That start would match A0 to the seeded random phase, which
+lands it on a wrong level (8.33 against a true 3.7). One tone under `warm_start`
+is the random start and runs. 'fixed' and 'descend' are unchanged bit for bit
+by this port: 637 result arrays from the builds before and after it are
+byte-equal. They are the fixed set above plus descend from the backprop and
+warm starts, with and without zeros in a0, and the five measured candidates
+under both modes.
+
+**The excess-power penalty** (`gerchberg_saxton.power_penalty`, the exponent γ;
+added 2026-10-22) runs on both engines under 'level' and 'descend'
+(`SolveParams::power_penalty`, `types::PowerPenalty`). The descent then minimizes
+J = L·R^γ with R = max(1, P_plate/P_rx), instead of the joint loss L. P_plate is
+the power the candidate plate sends out, Σ a_j²·dx over the support: (A·A)·n_sup·dx
+for a level, and `np_sum_f64` of the squared support samples, in order, times dx
+under 'descend'. P_rx is the power on the RX elements. The floor at 1 is what
+makes it a penalty: an unfloored L·R collapses onto dark plates. P_rx is a
+constant of the solve, computed once in Python (`mgs._received_power`), and
+crosses as a scalar, so the two engines divide by the same number. `gs_solve`
+takes it with γ as two more trailing keywords, `power_penalty` and `rx_power`.
+They go together (both or neither), must be finite and > 0, and are refused under
+'fixed', where R is a constant of the grid (the config refuses that too). The
+phase gradient is untouched. The amplitude gradient gains one term when R > 1,
+added after the mean over the tones (and, for the level, after the mean over the
+support); the expressions and their evaluation order are in the `src/solve.rs`
+module doc. Each backtracking trial takes R from its own amplitude and is accepted
+on a strict decrease of J. `loss_full` and `final_loss` are then J, while
+`final_loss_per_freq` and `loss_full_per_freq` stay the plain per-tone losses.
+The return tuple grows by two at the end: `final_mse`, the post-accept L (equal
+to `final_loss` with the penalty off), and `power_ratio`, the post-accept R (None
+with it off). With the penalty off the loop does not change: `gs_core` branches
+on it and never multiplies by a factor of 1.0. The legacy warm start's phase-only
+stage 1 runs unpenalized on both engines. Python drops the penalty from its child
+solve, and `gs_core` ignores it under `AmplitudeMode::Fixed`, which is what
+`warm_start.rs` hands stage 1.
+
+`python/parity.py` runs sixteen slices under the same bar:
 
 | Slice | Config | Tones (GHz) | Noise | Receiver | Start |
 |---|---|---|---|---|---|
@@ -55,6 +132,22 @@ the descent from the result.
 | 5 | `scenario_caustic_hit_1f_grid2l.yml`, 6 candidates | 300 | the config's 30 dB | on-grid, λ/2 | legacy, forced in memory |
 | 6 | the same | 300 | the config's 30 dB | on-grid, λ/2 | `backprop` |
 | 7 | the same | 270, 300, 330 (±10 %) | the config's 30 dB | on-grid, λ/2 | `backprop`, with the offset scan in front |
+| 8 | the same, `amplitude: descend`, `amp_max` 2 | 300 | the config's 30 dB | on-grid, λ/2 | `backprop` |
+| 9 | the same | 270, 300, 330 | the config's 30 dB | on-grid, λ/2 | legacy warm start (stage 1 phase-only at a0) |
+| 10 | slice 9, a0 zeroed inside the window | 270, 300, 330 | the config's 30 dB | on-grid, λ/2 | legacy warm start |
+| 11 | `measured/measured_rx177_wide_amp.yml` as written (descend, `amp_max` 10, 6000 iterations), 6 candidates spread over the grid; skipped without its data file | 300 | measured | measured row, 401 elements | `backprop` |
+| 12 | slice 5's config, `amplitude: level`, 6 candidates spread over the grid | 300 | the config's 30 dB | on-grid, λ/2 | `backprop` |
+| 13 | the same | 270, 300, 330 | the config's 30 dB | on-grid, λ/2 | `backprop` |
+| 14 | `measured/rxsize/rx177_level_w200_coarse.yml` as written (level, 6000 iterations), 6 candidates spread over its 4 mm grid; skipped without its data file | 300 | measured | measured row, 401 elements | `backprop` |
+| 15 | slice 5's config, `amplitude: level`, `power_penalty` 1, 6 candidates spread over the grid | 300 | the config's 30 dB | on-grid, λ/2 | `backprop` |
+| 16 | the same, `amplitude: descend`, `amp_max` 2, `power_penalty` 1 | 300 | the config's 30 dB | on-grid, λ/2 | `backprop` |
+
+Results (2026-10-20, with the level port; slice 11 at 6000 iterations): all
+fourteen pass, and n_iters_run and stop_reason are identical on every candidate
+of every slice. The worst rel Δloss is 1.2e-10 on slices 8-11 (on the measured
+slice) and 2.5e-10 on slices 12-14 (on the measured slice; 1.8e-14 on the
+simulated ones). Slices 15 and 16 came with the power penalty (2026-10-22) and
+are not in these results.
 
 The scenario configs carry a 30 dB noise block of their own, so the noiseless
 slices force the noise off explicitly (`SNR_OFF`, what `--snr-db off` passes)
@@ -65,7 +158,11 @@ slices 6 and 7 pass `backprop` explicitly. For the legacy starts `rust_solve`
 marshals the candidate for `gs_solve` by hand, an independent second copy of
 what `mgs._gs_solve_rust` does. For `backprop` it is `gs_reconstruct` with the
 engine forced to Rust, the path a sweep takes, so slices 6 and 7 check the
-descent from one identical, structured start.
+descent from one identical, structured start. The descend slices go the same
+way, because a0 is built in `mgs.py`, and so do the level slices (A0 is built
+there too). Slice 10 wraps `mgs._backprop_amplitude`
+in memory, for both engines, to zero a0 at every fifth window sample and over one
+run of 25.
 
 ## Build / dev loop
 
@@ -76,8 +173,16 @@ cd rust && cargo build && cargo test
 # golden vectors (already committed; regenerate only after an approved change
 # to the reference solver — meta.json records the generating commit):
 .venv/bin/python rust/python/gen_golden.py
+# ...or named cases alone, leaving the rest and meta.json as they are:
+.venv/bin/python rust/python/gen_golden.py solve_descend solve_descend_joint
+.venv/bin/python rust/python/gen_golden.py solve_level solve_level_joint
+.venv/bin/python rust/python/gen_golden.py solve_level_penalty solve_descend_penalty
 
-# extension module into the project venv (Python 3.8.10):
+# extension module into the project venv (Python 3.8.10). Rebuild after any
+# change under src/: mgs._gs_solve_rust passes amplitude=/amp_max=/support= and
+# power_penalty=/rx_power= by keyword and unpacks a 9-tuple, which a build older
+# than the penalty port refuses (a TypeError, under 'fixed' and with the penalty
+# off too):
 uv pip install maturin
 VIRTUAL_ENV=$PWD/.venv .venv/bin/maturin develop --release -m rust/Cargo.toml
 
@@ -95,7 +200,31 @@ The golden vectors committed under `tests/data/` predate the 300 GHz retarget
 pin is the solver's arithmetic, which does not care which carrier produced its
 inputs. `gen_golden.py` run today would not reproduce them: from the retargeted
 `tiny_check.yml` it generates 300 GHz and 280/300 GHz vectors of a different
-size (N=800).
+size (N=800). The exceptions are `solve_descend` (F=1, backprop start) and
+`solve_descend_joint` (F=2, legacy warm start). They were generated 2026-10-20
+at 300 and 280/300 GHz, N=800, with `amplitude: descend`, `amp_max` 2 and a0
+zeroed inside the window, and their manifests carry their own provenance. The
+golden support crosses as stored, and the test asserts that it differs from
+a0 > 0. Rust matches Python on both: final loss rel 1.5e-16 and 0, n_iters 12/12,
+max |field − python| 2e-16. `solve_level` (F=1) and `solve_level_joint` (F=2,
+280/300 GHz), both from the backprop start with `amplitude: level`, were added
+the same day. Their start plate is A0 on the support, which the test reads from
+the binary array: serde_json's parse of the manifest scalar is 1 ulp off. Final
+loss rel 1.9e-16 and 0, n_iters 12/12, max |field − python| 0.
+`solve_level_penalty` and `solve_descend_penalty` (2026-10-22) are `solve_level`
+and `solve_descend` again (F=1 at 300 GHz, backprop start; descend with `amp_max`
+2 and a0 zeroed inside the window) under `power_penalty` 1. Their manifests add
+the scalars `power_penalty`, `rx_power`, `final_mse` and `power_ratio`. The tests
+run `gs_core` with that penalty and keep the bars above, on J (first-iteration
+loss rtol 1e-6, final_loss rtol 1e-3), plus final_mse and power_ratio at rtol 1e-3.
+They also check the result against itself, bit for bit: final_mse is the mean of
+the plain per-tone losses, and final_loss = final_mse·power_ratio^γ. P_rx is read
+from the manifest scalar, so serde_json's parse can move R by 1 ulp, far below
+these bars. `penalty_floor_is_the_plain_solve` needs no new data. On the
+`solve_level` and `solve_descend` inputs, a P_rx far above any plate's power
+(R = 1 throughout) reproduces the unpenalized solve bit for bit. A P_rx at a
+quarter of the start plate's power, γ 2, raises the first objective above L, moves
+the solve and keeps the same identities.
 
 Version pins: **pyo3 0.22 + numpy(rust) 0.22, abi3-py38, maturin ≥1.4,<2** — the
 verified pairing for CPython 3.8.10. Do not bump without revisiting the floor.
@@ -106,8 +235,8 @@ verified pairing for CPython 3.8.10. Do not bump without revisiting the floor.
 |---|---|---|---|
 | FFT/convolution | `src/fft.rs`, `src/conv.rs` | `cargo test --test conv_parity` | green — 100% post-downcast bit-equal |
 | numpy mirrors | `src/npmath.rs` | `cargo test --test numerics_parity` | green — bit-exact |
-| Solver core | `src/solve.rs`, `src/warm_start.rs` | `cargo test --test solve_parity` | green — final loss bit-identical |
-| PyO3 boundary | `src/py.rs` | `maturin develop` + `python/parity.py` | green — worst rel Δloss 5e-14 |
+| Solver core | `src/solve.rs`, `src/warm_start.rs` | `cargo test --test solve_parity` | green — final loss bit-identical (descend and level cases: 1 ulp or 0) |
+| PyO3 boundary | `src/py.rs` | `maturin develop` + `python/parity.py` | green — worst rel Δloss 5e-14 (descend slices: 1.2e-10; level slices: 2.5e-10) |
 
 Alan wrote `next_fast_len`; Claude wrote the harness and, at Alan's request,
 the rest of the implementation. Every module's doc comment carries its
@@ -121,6 +250,9 @@ the source of truth. The load-bearing traps, in one place:
   `iter_idx > convergence_count`, window excludes the current index.
 - **`loss_full` holds PRE-step losses**; `final_loss` is the last iteration's
   POST-accept loss — they differ whenever the last iteration accepted a step.
+- **Under the power penalty the "loss" is J = L·R^γ**: the accept test,
+  `loss_full` and `final_loss` run on it, while the per-tone losses stay plain and
+  `final_mse` carries L. Off, the loop branches around it (no factor of 1.0).
 - **Warm-start δ grid** derived from `freqs`/`ref_freq` with the exact op
   sequence in `warm_start.rs` (sort → positive gaps → min → `2π·f_ref/gap`;
   `n = ceil(period/(2π/64))` capped at 100 000; `δ_k = k·(period/n)`).
@@ -148,7 +280,93 @@ the source of truth. The load-bearing traps, in one place:
 > forced off. That config is kept as the benchmark's input and keeps the legacy
 > start for it: workload A times the engine's own warm start, which a config with
 > `init: backprop` would replace by a start computed in Python for both engines.
-> `python/parity.py` runs the seven slices listed above.
+> `python/parity.py` runs the sixteen slices listed above.
+
+## Amplitude descend on the measured row (2026-10-20)
+
+`configs/measured/measured_rx177_wide_amp.yml` as it stood for these runs: 300 GHz,
+backprop start, `amplitude: descend`, `amp_max` 10, 3000 iterations, N=2401. (It
+now sets `max_iters: 6000`; the runs below are at 3000.)
+
+**Parity, Python against Rust** (`gs_reconstruct` on each engine). The five
+candidates are the measured TX window (z 0.242, x −0.015) and the grid points
+(0.24, −0.012), (0.10, 0), (0.01, 0) and (0.35, −0.01). Every one runs to the
+3000-iteration cap on both engines. The worst rel Δloss is 3.6e-9, at
+(0.10, 0); two candidates are bit-equal. The worst max |Δcurr_aper_f| is
+6.6e-9, at (0.01, 0).
+
+**`grid-search-mgs --limit 40 -j 4 --true-mgs --scenes --scene-top 3`.**
+Against the Python run of the same 40 candidates:
+
+- worst rel Δloss 2.7e-10, and 10 of the 40 losses bit-equal;
+- n_iters and stop_reason identical on all 40;
+- the same argmin cell;
+- the stored complex64 apertures within 1 f32 ulp;
+- the measured-TX solve bit-equal.
+
+Wall time 6.1 s against 17.1 s.
+
+**Timing.** Single process, single thread, 24 random grid candidates: Python
+1.445 s per candidate, Rust 0.296 s per candidate (**4.9×**; 4.0× to 5.0× per
+candidate). Through the sweep's own `map_workers` at `-j 24` on this 16-core,
+32-thread machine:
+
+| Engine | Sample | Wall | Per worker | Full grid (30 200) |
+|---|---|---|---|---|
+| Rust | 960 random candidates | 15.3 s | 0.38 s/cand | **≈ 8 min** |
+| Python | 480 random candidates | 39.4 s | 1.97 s/cand | ≈ 41 min |
+
+SMT contention costs about 1.7× per worker against the single-thread figures.
+The full-grid figures add no setup, persistence or plots.
+
+## Uniform level on the measured row (2026-10-20)
+
+`configs/measured/rxsize/rx177_level_w200_coarse.yml` (the whole row) and
+`rx177_level_w120_coarse.yml` (x 95–215 mm, so x_sim = x − 155 mm) as written:
+300 GHz, backprop start, `amplitude: level`, 6000 iterations, N=2401.
+
+**Parity, Python against Rust** (`gs_reconstruct` on each engine). Five points
+per config: the measured TX window, and (0.24, −0.012), (0.10, 0), (0.01, 0) and
+(0.35, −0.01) in the w200 frame, the same physical points in w120's (x 5 mm
+lower). Those four are off the 4 mm grid, so they are built as windows of the
+grid's aperture width, the way the measured `--true-mgs` point is. Every one of
+the ten runs to the 6000-iteration cap on both engines, and the fitted level
+agrees to the digits printed (0.48 to 0.76). The worst rel Δloss is 5.9e-11
+(w120 at (0.01, −0.005)), and eight of the ten are bit-equal or within 2 ulp.
+The worst max |Δcurr_aper_f| is 3.0e-9.
+
+**One tone from the random start** (`init: warm_start` at one tone, allowed) is
+the loosest case found. On 24 spread candidates of the simulated on-grid config,
+two drift past 1e-9: to rel 7.4e-8 (n_iters 3000/3000) and 4.9e-5 (2690/2655).
+A third, outside that set at (0.585, −0.15), reaches 5.9e-5 (2323/2339). The
+fixed and descend solves of the same 24 candidates from the same start stay
+within 5e-11. On the 4.9e-5 candidate the two engines are bit-identical through
+iteration 63. At iteration 64 the loss differs by 1 ulp with the aperture still
+identical, which is numpy's unmirrored complex abs/exp. The strict-decrease line
+search flips on such near-ties, and the one shared level carries the difference
+to the whole plate. Every backprop case, the configured start, stays at 2.5e-10
+or below.
+
+**`grid-search-mgs --limit 40 -j 4 --true-mgs`** on the w200 config, against the
+Python run of the same 40 candidates:
+
+- worst rel Δloss 5.0e-13, and 27 of the 40 losses bit-equal;
+- n_iters and stop_reason identical on all 40;
+- the same argmin cell;
+- the stored apertures within 1 f32 ulp;
+- the measured-TX solve within 4.1e-11.
+
+Wall time 3.9 s against 11.4 s.
+
+**Timing** (w200 config, 7 600 usable candidates). Single thread, 24 random
+candidates (13 of them at the 6000 cap): Python 1.689 s per candidate, Rust
+0.369 s per candidate (**4.6×**; 4.0× to 4.6× per candidate). At `-j 24`
+through `map_workers`:
+
+| Engine | Sample | Wall | Per worker | Full grid (7 600) |
+|---|---|---|---|---|
+| Rust | 960 random candidates | 19.1 s | 0.48 s/cand | **≈ 2.5 min** |
+| Python | 480 random candidates | 50.0 s | 2.50 s/cand | ≈ 13 min |
 
 ## Baseline timings (M0, this machine, 2026-09-19, python engine)
 

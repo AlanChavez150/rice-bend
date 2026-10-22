@@ -21,7 +21,7 @@ import numpy as np
 import yaml
 
 from rice_bend import __version__
-from rice_bend.config import SimConfig
+from rice_bend.config import BASE_CONFIG_KEY, SimConfig
 
 
 @dataclass
@@ -231,10 +231,29 @@ def _drop_removed_refine(raw, run_dir: Path, log: logging.Logger):
     return raw
 
 
+def _refuse_measured_run(raw, run_dir: Path) -> None:
+    """Raise ValueError when `raw` (a saved run's config, as read) is a measured
+    one. Such a run does not load back: its snapshot holds the tx_aperture /
+    rx_aperture blocks derived from the data, which a `measured:` config must not
+    set, and its source is the thin file whose base_config is relative to where it
+    was run from. Nor would a loaded one serve the reader this exists for (the
+    true-TX replay): it needs the real beam, and a measured TX's is unknown."""
+    if isinstance(raw, dict) and raw.get("measured") is not None:
+        raise ValueError(
+            f"{run_dir} is a measured-data run (its config has a `measured:` block), "
+            "and its config cannot be loaded back to rebuild it: there is no real "
+            "beam to replay, and the saved files hold the derived TX/RX blocks. "
+            "Re-run grid-search-mgs with the measured config instead")
+
+
 def load_run_config(run_dir: Path, log: logging.Logger) -> Optional[SimConfig]:
     """Read a saved run's config back: prefer the verbatim source .yml, fall back to
     the effective snapshot JSON. None if neither is present. A grid_search.refine
     block in either is dropped (_drop_removed_refine).
+
+    A source laid over a base_config is skipped for the snapshot, which holds the
+    merged config: the base path is relative to the source's original directory,
+    not to the run's. A measured run raises ValueError (_refuse_measured_run).
 
     This is the reader for the format save_config_snapshot writes; the two halves
     used to live in different modules.
@@ -244,11 +263,14 @@ def load_run_config(run_dir: Path, log: logging.Logger) -> Optional[SimConfig]:
     if src.exists():
         with open(src) as f:
             raw = yaml.safe_load(f)
-        return SimConfig(**_drop_removed_refine(raw, run_dir, log))
+        _refuse_measured_run(raw, run_dir)
+        if not (isinstance(raw, dict) and BASE_CONFIG_KEY in raw):
+            return SimConfig(**_drop_removed_refine(raw, run_dir, log))
     snap = run_dir / "config_snapshot.json"
     if snap.exists():
         with open(snap) as f:
             raw = json.load(f)
+        _refuse_measured_run(raw, run_dir)
         return SimConfig.model_validate(_drop_removed_refine(raw, run_dir, log))
     log.warning(f"No config_source.yml/config_snapshot.json in {run_dir}; "
                 "cannot build the true MGS run")
@@ -410,6 +432,11 @@ def _collect_metadata(mgs, run_dir: Path,
             "npz_keys": sorted(npz_keys),
         },
     }
+    if getattr(mgs, "tx_amplitude_report", None) is not None:
+        # tx_aperture.amplitude as applied to the simulated plate (setting, factor,
+        # rx_peak's unscaled clean peak); only when it is not the default 1.0, so a
+        # default run's run.json is what it always was
+        meta["tx_amplitude"] = mgs.tx_amplitude_report
     if hist is not None:
         gs_result = getattr(mgs, "gs_result", None)
         meta["gs_result"] = {

@@ -41,6 +41,82 @@
 //! never affects any computed value because amp is 0 off support — but preserve
 //! the behaviour so the returned phase matches.
 //!
+//! ## Descended amplitude (`amplitude: descend`, SolveParams::amplitude)
+//!
+//! The amplitude `a` becomes an unknown too: ONE array shared by every tone,
+//! starting from the `aper_amp` handed in (mgs._backprop_amplitude, computed in
+//! Python). Per channel f, from the SAME back-propagated residual g:
+//!
+//!   e[j]         = exp(i * rho[f] * psi[j])     // the unit phasor u0 was built from
+//!   grad_a[j]   += 2.0 * Re(g[j] * conj(e[j]))  // no rho: a is shared by every tone
+//!
+//! then grad_a /= F; grad_a[!support] = 0, like grad. Each backtracking trial
+//! moves both halves with the same step:
+//!
+//!   a_trial = np.clip(a - step * grad_a, 0, amp_max); a_trial[!support] = 0
+//!
+//! (npmath::np_clip — NaN passes through, as in numpy), the trial field is built
+//! from a_trial, and an accepted trial sets a = a_trial along with psi. The
+//! support is the CALLER's: the original aperture's nonzero region, NOT a > 0.
+//! The start amplitude can be 0 at window samples, and the clip drives samples
+//! to 0 during the descent; every support sample keeps being descended.
+//!
+//! ## Uniform level (`amplitude: level`)
+//!
+//! ONE level A >= 0 over the support, shared by every tone. The plate is always
+//! A * 1_support; its start A0 (mgs._power_matched_level, computed in Python)
+//! arrives as aper_amp = A0 on the support, and A is read back from any support
+//! sample (A0 * 1.0 is A0 exactly). The per-sample grad_a is built exactly as for
+//! Descend (/= F, zeroed off the support), then
+//!
+//!   grad_A  = np.mean(grad_a[support])         // np_mean_f64, support in order
+//!   A_trial = np.clip(A - step * grad_A, 0, inf)   // NaN passes through
+//!   a_trial = A_trial on the support, 0 off it
+//!
+//! and an accepted trial sets A = A_trial and a = a_trial along with psi.
+//!
+//! ## Excess-power penalty (`power_penalty`, SolveParams::power_penalty)
+//!
+//! With PowerPenalty { gamma, rx_power } (types.rs) and a fitted amplitude, the
+//! backtracking descends the OBJECTIVE
+//!
+//!   J = L * R^gamma,   R = max(1, P_plate / P_rx)
+//!
+//! where L is the joint loss above, P_rx = rx_power (computed once in Python) and
+//! the plate power comes from the amplitude the loss was computed at:
+//!
+//!   level:    P_plate = (A * A) * (n_sup as f64) * dx
+//!   descend:  P_plate = np_sum_f64([a[j] * a[j] for j in support, in order]) * dx
+//!   R         = (P_plate / rx_power).max(1.0)   // Python's max(1.0, .); NaN -> 1
+//!   J         = L * R.powf(gamma)
+//!
+//! Per iteration, after the gradient: L = mean(loss_pf) and R from the CURRENT
+//! amplitude, then loss = J. loss_full records J (pre-step) and the convergence
+//! window runs on it unchanged; loss_full_per_freq keeps the plain loss_pf. The
+//! descent direction is J's scaled by 1 / R^gamma, so the phase gradient is
+//! untouched and the amplitude's gains ONE term, only when R > 1, added after
+//! grad_a /= F (and, for the level, after grad_A = mean(grad_a[support])),
+//! evaluated in exactly this order:
+//!
+//!   level:    grad_A += (4.0 * gamma * L * N) / (A * n_sup)
+//!   descend:  coef = (4.0 * gamma * L * N * dx) / P_plate
+//!             grad_a[j] += coef * a[j]                      // support samples
+//!
+//! with N = conv.n_signal. (grad_a is 2N * dL/da_j in the solver's convention,
+//! and (gamma L / R) dR/da_j = 2 gamma L a_j dx / P_plate; grad_A is
+//! (2N / n_sup) dL/dA, and (gamma L / R) dR/dA = 2 gamma L / A.) Each trial
+//! computes trial_plain = mean(trial_pf), R_trial from ITS amplitude (a_trial /
+//! A_trial) and J_trial = trial_plain * R_trial^gamma; accept iff J_trial < J
+//! (strict, first win), and the accept also carries trial_plain and R_trial over
+//! as the current L and R.
+//!
+//! Off (None): not one operation added or reordered. The loop branches on the
+//! Option; it never multiplies by a factor of 1.0. Under AmplitudeMode::Fixed the
+//! penalty is ignored: the boundary refuses it there (R would be a constant of the
+//! grid), and the one Fixed solve that can still carry it, the legacy warm start's
+//! phase-only stage 1 (warm_start.rs builds its params as `..params.clone()`),
+//! runs the plain loss.
+//!
 //! ## Convergence test (mgs.py:308-316) — the f32 trap
 //!
 //! Checked only when iter_idx > convergence_count (STRICTLY greater). Window =
@@ -60,7 +136,11 @@
 //! final_loss / final_loss_per_freq are the POST-accept values of the last
 //! iteration; loss_full holds the PRE-step values (so loss_full[last] !=
 //! final_loss whenever the last iteration accepted a step). aper_phase is psi
-//! after the last iteration.
+//! after the last iteration, aper_amp the amplitude (the input one under Fixed).
+//! Under the power penalty final_loss is the post-accept J, final_mse the
+//! post-accept L and power_ratio the post-accept R (so final_loss = final_mse *
+//! R^gamma, and final_loss_per_freq stays the plain per-tone losses); off, final_mse
+//! is final_loss and power_ratio is None.
 //!
 //! ## Performance notes (why this is worth writing in Rust)
 //!
@@ -77,8 +157,8 @@
 use num_complex::Complex64;
 
 use crate::conv::{Convolver, KernelSpectrum};
-use crate::npmath::{np_mean_f64, np_sum_f32};
-use crate::types::{ChannelData, CoreResult, KernelPair, SolveParams, StopReason};
+use crate::npmath::{np_clip, np_mean_f64, np_sum_f32, np_sum_f64};
+use crate::types::{AmplitudeMode, ChannelData, CoreResult, KernelPair, SolveParams, StopReason};
 
 /// Preallocated per-solve work buffers: the loop body allocates nothing.
 struct Work {
@@ -106,6 +186,25 @@ fn build_u0(u0: &mut [Complex64], aper_amp: &[f64], support_idx: &[usize], rho: 
     }
 }
 
+/// build_u0 that also keeps the unit phasor exp(i * rho * psi) in `phasor` (on
+/// the support), which the descended amplitude's gradient takes Re(g * conj(.))
+/// against. The same sin_cos feeds both, as one np.exp feeds both in numpy.
+fn build_u0_phasor(
+    u0: &mut [Complex64],
+    phasor: &mut [Complex64],
+    aper_amp: &[f64],
+    support_idx: &[usize],
+    rho: f64,
+    psi: &[f64],
+) {
+    for &j in support_idx {
+        let (s, c) = (rho * psi[j]).sin_cos();
+        phasor[j] = Complex64::new(c, s);
+        let a = aper_amp[j];
+        u0[j] = Complex64::new(a * c, a * s);
+    }
+}
+
 /// Forward-propagate the current u0 for one channel and return its loss
 /// 0.5 * mean(|w (prop - rx)|^2), leaving the weighted residual in `work.r`.
 fn channel_loss(work: &mut Work, ch: &ChannelData, fwd: &KernelSpectrum, dx: f64, conv: &mut Convolver) -> f64 {
@@ -120,12 +219,28 @@ fn channel_loss(work: &mut Work, ch: &ChannelData, fwd: &KernelSpectrum, dx: f64
     0.5 * np_mean_f64(&work.abs2)
 }
 
+/// The plate power P_plate of a descended amplitude: np.add.reduce(a[support] ** 2)
+/// * dx, the squares in support order into `sq` (capacity n_sup, so no allocation).
+fn descend_power(amp: &[f64], support_idx: &[usize], sq: &mut Vec<f64>, dx: f64) -> f64 {
+    sq.clear();
+    sq.extend(support_idx.iter().map(|&j| amp[j] * amp[j]));
+    np_sum_f64(sq) * dx
+}
+
+/// The plate power P_plate of a uniform level A over n_sup support samples, in
+/// mgs.py's order: (A * A) * float(n_sup) * dx.
+fn level_power(amp_level: f64, n_sup: usize, dx: f64) -> f64 {
+    (amp_level * amp_level) * (n_sup as f64) * dx
+}
+
 /// Run the descent from `initial_phase`. Inputs are on the full scene x-axis
 /// (length N == conv.n_signal); `channels` and `kernels` are index-aligned.
 ///
-/// `support[j]` == (aper_amp[j] > 0) — computed by the caller from the SAME amp
-/// array (mgs.py:219 uses |orig_aper_amp| > 0 and amp = |orig_aper_amp|, so the
-/// two are consistent by construction).
+/// `support[j]` is mgs.gs_reconstruct's `support = |orig_aper_amp| > 0`. Under
+/// AmplitudeMode::Fixed that equals aper_amp > 0 (amp = |orig_aper_amp|); under
+/// Descend it does NOT — the start amplitude can be 0 inside the window — so the
+/// caller passes Python's support itself. `aper_amp` must be 0 off the support
+/// (u0 is built on the support only).
 #[allow(clippy::too_many_arguments)]
 pub fn gs_core(
     initial_phase: &[f64],
@@ -144,6 +259,37 @@ pub fn gs_core(
     assert!(initial_phase.len() == n && aper_amp.len() == n && support.len() == n);
 
     let support_idx: Vec<usize> = (0..n).filter(|&j| support[j]).collect();
+    let (amp_max, level) = match params.amplitude {
+        AmplitudeMode::Fixed => (None, false),
+        AmplitudeMode::Descend { amp_max } => (Some(amp_max), false),
+        AmplitudeMode::Level => (None, true),
+    };
+    // Descend or Level: the amplitude is fitted (mgs.py's fit_amp)
+    let fit_amp = amp_max.is_some() || level;
+    // the amplitude the solve runs at: held under Fixed, fitted otherwise
+    let mut amp = aper_amp.to_vec();
+    // Level's unknown A, read back from its start plate A0 * 1_support (an empty
+    // support has no sample to read, and no sample for A to move: 1.0 then)
+    let mut amp_level = support_idx.first().map_or(1.0, |&j| aper_amp[j]);
+    let mut grad_level = f64::NAN;
+    let mut support_grad = Vec::with_capacity(if level { support_idx.len() } else { 0 });
+    // the excess-power penalty, with a fitted amplitude only (see the module doc:
+    // ignored under Fixed). `loss` is then the objective J, the plain joint loss L
+    // and the ratio R are kept beside it, and descend's plate power sums its squares
+    // in `power_sq`
+    let penalty = params.power_penalty.filter(|_| fit_amp);
+    let n_scene = n as f64;
+    let n_sup = support_idx.len();
+    let mut power_sq = Vec::with_capacity(if penalty.is_some() && !level { n_sup } else { 0 });
+    let mut loss_plain = f64::NAN;
+    let mut ratio = f64::NAN;
+    // the fitted modes' buffers (empty under Fixed). amp_trial is never written off
+    // the support, so it stays 0 there: a_trial[!support] = 0, as in mgs.py
+    let (mut grad_amp, mut amp_trial, mut phasor) = if fit_amp {
+        (vec![0.0; n], vec![0.0; n], vec![Complex64::new(0.0, 0.0); n])
+    } else {
+        (Vec::new(), Vec::new(), Vec::new())
+    };
     let mut work = Work::new(n);
     let mut psi = initial_phase.to_vec();
     let mut off_support_zeroed = false;
@@ -162,8 +308,15 @@ pub fn gs_core(
     for iter_idx in 0..params.max_iters {
         // forward + adjoint per channel; gradient of the MEAN loss
         grad.fill(0.0);
+        if fit_amp {
+            grad_amp.fill(0.0);
+        }
         for (f, (ch, kp)) in channels.iter().zip(kernels).enumerate() {
-            build_u0(&mut work.u0, aper_amp, &support_idx, ch.rho, &psi);
+            if fit_amp {
+                build_u0_phasor(&mut work.u0, &mut phasor, &amp, &support_idx, ch.rho, &psi);
+            } else {
+                build_u0(&mut work.u0, &amp, &support_idx, ch.rho, &psi);
+            }
             loss_pf[f] = channel_loss(&mut work, ch, &kp.fwd, dx, conv);
             conv.rs_apply_into(&work.r, &kp.adj, dx, &mut work.g);
             for &j in &support_idx {
@@ -172,28 +325,99 @@ pub fn gs_core(
                 let im = g.re * (-u.im) + g.im * u.re;
                 grad[j] += ch.rho * (2.0 * im);
             }
+            if fit_amp {
+                for &j in &support_idx {
+                    // real(g * conj(e)), in numpy's complex-multiply operand order
+                    let (g, e) = (work.g[j], phasor[j]);
+                    let re = g.re * e.re - g.im * (-e.im);
+                    grad_amp[j] += 2.0 * re;
+                }
+            }
         }
         for &j in &support_idx {
             grad[j] /= n_freq as f64;
         }
+        if fit_amp {
+            for &j in &support_idx {
+                grad_amp[j] /= n_freq as f64;
+            }
+        }
+        if level {
+            // np.mean(grad_amp[support]): the support samples, in order
+            support_grad.clear();
+            support_grad.extend(support_idx.iter().map(|&j| grad_amp[j]));
+            grad_level = np_mean_f64(&support_grad);
+        }
 
         loss = np_mean_f64(&loss_pf);
+        if let Some(pp) = penalty {
+            // the objective J = L * R^gamma at the CURRENT amplitude; `loss` was L.
+            // The gradient term comes after grad /= F and grad_level (the module doc;
+            // mgs.gs_reconstruct's `if penalized:` block after grad_level)
+            loss_plain = loss;
+            let p_plate = if level {
+                level_power(amp_level, n_sup, dx)
+            } else {
+                descend_power(&amp, &support_idx, &mut power_sq, dx)
+            };
+            ratio = (p_plate / pp.rx_power).max(1.0);
+            if ratio > 1.0 {
+                if level {
+                    grad_level += (4.0 * pp.gamma * loss_plain * n_scene) / (amp_level * n_sup as f64);
+                } else {
+                    let coef = (4.0 * pp.gamma * loss_plain * n_scene * dx) / p_plate;
+                    for &j in &support_idx {
+                        grad_amp[j] += coef * amp[j];
+                    }
+                }
+            }
+            loss = loss_plain * ratio.powf(pp.gamma);
+        }
         hist[iter_idx] = loss as f32;
         for f in 0..n_freq {
             hist_pf[iter_idx * n_freq + f] = loss_pf[f] as f32;
         }
 
-        // backtracking line search on the joint loss (strict decrease, first win)
+        // backtracking line search on the joint loss, or on J under the power
+        // penalty (strict decrease, first win)
         let mut step = params.lr0;
         for _ in 0..params.bt_tries {
             for &j in &support_idx {
                 theta[j] = psi[j] - step * grad[j];
             }
+            // one JOINT step: the descended amplitude takes the same step, clipped
+            // back into [0, amp_max]; the pair is accepted or shrunk together
+            let mut level_trial = f64::NAN;
+            if let Some(cap) = amp_max {
+                for &j in &support_idx {
+                    amp_trial[j] = np_clip(amp[j] - step * grad_amp[j], 0.0, cap);
+                }
+            } else if level {
+                // the level's step, kept >= 0 with no cap (level_trial * 1_support)
+                level_trial = np_clip(amp_level - step * grad_level, 0.0, f64::INFINITY);
+                for &j in &support_idx {
+                    amp_trial[j] = level_trial;
+                }
+            }
+            let trial_amp: &[f64] = if fit_amp { &amp_trial } else { &amp };
             for (f, (ch, kp)) in channels.iter().zip(kernels).enumerate() {
-                build_u0(&mut work.u0, aper_amp, &support_idx, ch.rho, &theta);
+                build_u0(&mut work.u0, trial_amp, &support_idx, ch.rho, &theta);
                 trial_pf[f] = channel_loss(&mut work, ch, &kp.fwd, dx, conv);
             }
-            let loss_trial = np_mean_f64(&trial_pf);
+            let mut loss_trial = np_mean_f64(&trial_pf);
+            let (mut trial_plain, mut ratio_trial) = (f64::NAN, f64::NAN);
+            if let Some(pp) = penalty {
+                // J_trial from the trial's OWN amplitude: a_trial, or A_trial
+                // (mgs.gs_reconstruct's `if penalized:` block after loss_trial)
+                trial_plain = loss_trial;
+                let p_trial = if level {
+                    level_power(level_trial, n_sup, dx)
+                } else {
+                    descend_power(&amp_trial, &support_idx, &mut power_sq, dx)
+                };
+                ratio_trial = (p_trial / pp.rx_power).max(1.0);
+                loss_trial = trial_plain * ratio_trial.powf(pp.gamma);
+            }
             if loss_trial < loss {
                 for &j in &support_idx {
                     psi[j] = theta[j];
@@ -206,7 +430,18 @@ pub fn gs_core(
                     }
                     off_support_zeroed = true;
                 }
+                if fit_amp {
+                    // whole array: amp_trial is 0 off the support
+                    amp.copy_from_slice(&amp_trial);
+                }
+                if level {
+                    amp_level = level_trial;
+                }
                 loss = loss_trial;
+                if penalty.is_some() {
+                    loss_plain = trial_plain;
+                    ratio = ratio_trial;
+                }
                 loss_pf.copy_from_slice(&trial_pf);
                 break;
             }
@@ -231,8 +466,11 @@ pub fn gs_core(
     hist_pf.truncate(n_iters_run * n_freq);
     CoreResult {
         aper_phase: psi,
+        aper_amp: amp,
         final_loss: loss,
         final_loss_per_freq: loss_pf,
+        final_mse: if penalty.is_some() { loss_plain } else { loss },
+        power_ratio: penalty.map(|_| ratio),
         n_iters_run,
         stop_reason,
         loss_full: hist,

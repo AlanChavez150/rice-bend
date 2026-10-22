@@ -1,0 +1,40 @@
+# MEASURED ACQUISITION, WIDE RX, AMPLITUDE DESCENDED: the ~/Desktop/experiments
+# raster, received on the WHOLE stage row z = 177 mm, x = 50 to 250 mm (401 elements
+# at the 0.5 mm stage pitch): one wide RX covering about 95 % of the beam's power. The
+# solve fits the plate's amplitude as well as its phase (gerchberg_saxton.amplitude:
+# descend), at one tone (300 GHz, base.yml's), with the amplitude capped at 10.
+# Laid over base.yml (scene, solver, candidate grid). The data is the spectra CSV
+# topt-parser writes from the pulse folder, so parse once, then search:
+#   topt-parser ~/Desktop/experiments -j 24          # -> ~/Desktop/experiments/topt_spectra.csv
+#   grid-search-mgs --config configs/measured/measured_rx177_wide_amp.yml
+#
+# Units: every point is in the STAGE frame, in mm, with named x/z keys (the order of
+# a pair is easy to swap), and the CSV's X and Z columns are in the same stage mm.
+# The run moves the RX centre to the scene origin: z_sim = (177 - z) mm,
+# x_sim = (x - 150) mm. The TX (x 85..185 mm at z -65 mm) lands at x -0.065..+0.035 m
+# (centre -0.015 m), z 0.242 m.
+#
+# amplitude_scale: the 2D energy rule on this row, sqrt(0.1 / (sum |V(300 GHz)|^2 *
+# 0.5e-3)) over x 50..250 mm, which gives the row the power (|y|^2 integrated over x)
+# of a unit-amplitude plate 0.1 m wide. The RX is the whole row here, so this is the
+# RX's own power, not a calibration.
+#
+# amp_max: the cap on the descended amplitude, in the units of the fixed solver's
+# uniform amplitude 1 (so relative to the data as amplitude_scale scales it). The
+# descent starts from the raw back-propagated magnitude and clips to [0, 10] after
+# every step. Runs on both engines (--engine rust is about 5x faster, parity-checked).
+
+base_config: base.yml
+
+measured:
+  data_file: ~/Desktop/experiments/topt_spectra.csv
+  tx_aperture: {left: {x: 85, z: -65}, right: {x: 185, z: -65}}
+  rx_aperture: {left: {x: 50, z: 177}, right: {x: 250, z: 177}}   # the whole row
+  amplitude_scale: 0.01831156    # 2D energy rule over the whole row (the RX's own power)
+
+gerchberg_saxton:          # deep-merged over base.yml: the amplitude is descended too
+  amplitude: descend
+  amp_max: 10.0
+  max_iters: 20000         # the 6000 run (measured_rx177_wide_amp) left every near-best candidate at the limit
+
+output: {run_name: measured_rx177_wide_amp_20k}

@@ -2,6 +2,8 @@
 exp_data.py, and the beams an aperture emits are built in
 beam_aperatures.py."""
 
+from typing import Optional
+
 import numpy as np
 
 
@@ -17,6 +19,57 @@ def sampled_axis(lo: float, hi: float, spacing: float) -> np.ndarray:
     a refactor.
     """
     return np.linspace(lo, hi, int((hi - lo) / spacing))
+
+
+# How close span / spacing must come to an integer for an exact-step axis. Relative,
+# because 0.3 / 0.00025 is 1199.9999999999998 in floats, not 1200.
+EXACT_STEP_RTOL = 1e-9
+
+
+def whole_steps(span: float, spacing: float) -> Optional[int]:
+    """`span / spacing` as an int when it is a whole number >= 1 (to EXACT_STEP_RTOL,
+    relative), else None. The one integrality rule shared by scene_axis and the
+    sim_scene.exact_step config check, so the config never accepts a scene the
+    axis builder would refuse."""
+    ratio = span / spacing
+    n = round(ratio)
+    if n >= 1 and abs(ratio - n) <= EXACT_STEP_RTOL * abs(ratio):
+        return int(n)
+    return None
+
+
+def scene_axis(lo: float, hi: float, spacing: float,
+               exact_step: bool = False) -> np.ndarray:
+    """A scene axis over [lo, hi]. Every axis built from a SimSceneConfig goes
+    through here, so the scene, the candidate grid and the receiver agree on it.
+
+    `exact_step` False is sampled_axis, unchanged: the linspace whose step is not
+    `spacing`. Every simulated config uses it and its saved numbers depend on it.
+
+    `exact_step` True steps by exactly `spacing`, for measured data: the receiver
+    elements sit at whole multiples of the stage pitch, and only an axis whose
+    samples are whole multiples of `spacing` has samples at those positions. A
+    centred axis (lo == -hi) is built as spacing * arange(-N, N + 1), so its middle
+    sample is exactly 0.0 and the axis is exactly antisymmetric: the RS kernel is
+    evaluated on the scene x axis itself, so it is centred only when the axis is.
+    Any other axis is lo + spacing * arange(n). The last sample matches `hi` to
+    rounding, not bit for bit. Raises ValueError unless (hi - lo) / spacing (and
+    hi / spacing for a centred axis) is a whole number."""
+    if not exact_step:
+        return sampled_axis(lo, hi, spacing)
+    if lo == -hi:
+        half = whole_steps(hi, spacing)
+        if half is None:
+            raise ValueError(
+                f"an exact-step axis needs hi / spacing to be a whole number, got "
+                f"{hi} / {spacing} = {hi / spacing:.12g}")
+        return spacing * np.arange(-half, half + 1, dtype=np.float64)
+    steps = whole_steps(hi - lo, spacing)
+    if steps is None:
+        raise ValueError(
+            f"an exact-step axis needs (hi - lo) / spacing to be a whole number, got "
+            f"({hi} - {lo}) / {spacing} = {(hi - lo) / spacing:.12g}")
+    return lo + spacing * np.arange(steps + 1, dtype=np.float64)
 
 
 def grid_element_indices(scene_x_axis: np.ndarray, x_min: float, x_max: float,
@@ -124,9 +177,11 @@ class SimAperature():
 class SimScene():
     """
     Simple class used to keep track of the parameters of the simulation.
-    All units are in meters.
+    All units are in meters. `exact_step` picks the axis rule (see scene_axis);
+    it is False for every simulated config.
     """
-    def __init__(self, x_min: float, x_max: float, z_min: float, z_max: float, spacing: float, tx_ap: SimAperature, rx_ap: SimAperature):
+    def __init__(self, x_min: float, x_max: float, z_min: float, z_max: float, spacing: float, tx_ap: SimAperature, rx_ap: SimAperature,
+                 exact_step: bool = False):
         assert x_max > x_min
         assert z_max > z_min
         self.x_min = x_min
@@ -134,9 +189,10 @@ class SimScene():
         self.z_min = z_min
         self.z_max = z_max
         self.spacing = spacing
+        self.exact_step = exact_step
 
-        self.x_axis = sampled_axis(self.x_min, self.x_max, spacing)
-        self.z_axis = sampled_axis(self.z_min, self.z_max, spacing)
+        self.x_axis = scene_axis(self.x_min, self.x_max, spacing, exact_step)
+        self.z_axis = scene_axis(self.z_min, self.z_max, spacing, exact_step)
 
         self.tx_ap = tx_ap
         self.rx_ap = rx_ap

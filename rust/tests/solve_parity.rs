@@ -6,6 +6,20 @@
 //!   solve_joint/  — the same candidate at F=2 with init="warm_start": gates
 //!                   delta_scan (isolated via the golden psi0) and the full
 //!                   warm start + joint descent.
+//!   solve_descend/, solve_descend_joint/ — amplitude: descend at F=1 (from the
+//!                   backprop start, init_mode "random") and F=2 (legacy warm
+//!                   start), with the start amplitude a0 zeroed inside the window:
+//!                   the support crosses explicitly and is NOT a0 > 0. Same bars,
+//!                   plus the final amplitude |curr_aper_f| reported.
+//!   solve_level/, solve_level_joint/ — amplitude: level at F=1 and F=2, both from
+//!                   the backprop start (init_mode "random"): the start plate is
+//!                   A0 on the support, the support crosses explicitly. Same bars.
+//!   solve_level_penalty/, solve_descend_penalty/ — solve_level / solve_descend
+//!                   (F=1, backprop start; descend with amp_max 2 and a0 holed)
+//!                   under the excess-power penalty, gamma `power_penalty` against
+//!                   the case's `rx_power`. loss_full / final_loss are then the
+//!                   objective J; the same bars, plus final_mse and power_ratio
+//!                   rtol <= 1e-3 against the manifest scalars.
 //!
 //! Bars (from the approved plan):
 //!   - first-iteration loss rtol <= 1e-6 (one conv round-trip, minimal drift);
@@ -23,8 +37,9 @@ mod common;
 use common::Case;
 use num_complex::Complex64;
 use rice_bend_core::conv::Convolver;
+use rice_bend_core::npmath::np_mean_f64;
 use rice_bend_core::solve::gs_core;
-use rice_bend_core::types::{ChannelData, KernelPair, SolveParams};
+use rice_bend_core::types::{AmplitudeMode, ChannelData, CoreResult, KernelPair, PowerPenalty, SolveParams};
 use rice_bend_core::warm_start::{delta_scan, warm_start_psi};
 
 struct Inputs {
@@ -87,10 +102,109 @@ fn load_inputs(case: &Case) -> Inputs {
             lr0: case.scalar_f64("lr0"),
             bt_shrink: case.scalar_f64("bt_shrink"),
             bt_tries: case.scalar_usize("bt_tries"),
+            amplitude: AmplitudeMode::Fixed,
+            power_penalty: None,
         },
         conv,
         n,
     }
+}
+
+/// load_inputs for a descend case: the support is the case's own (|orig_aper_amp|
+/// > 0, stored as 0/1 f64), never aper_amp > 0, and the amplitude descends.
+fn load_descend_inputs(case: &Case) -> Inputs {
+    let mut inp = load_inputs(case);
+    inp.support = case.f64s("support").iter().map(|&m| m != 0.0).collect();
+    let derived: Vec<bool> = inp.aper_amp.iter().map(|&a| a > 0.0).collect();
+    assert_ne!(inp.support, derived, "the case must have a0 == 0 inside the support");
+    inp.params.amplitude = AmplitudeMode::Descend { amp_max: case.scalar_f64("amp_max") };
+    inp
+}
+
+/// load_inputs for a level case: the case's own support, and the start plate
+/// aper_amp must be one level A0 on it (0 off it), which gs_core reads back.
+fn load_level_inputs(case: &Case) -> Inputs {
+    let mut inp = load_inputs(case);
+    inp.support = case.f64s("support").iter().map(|&m| m != 0.0).collect();
+    // A0 from the binary array (the manifest's JSON scalar is for reading: serde_json
+    // does not promise a round-trip parse, and is 1 ulp off on this one)
+    let j0 = inp.support.iter().position(|&s| s).expect("non-empty support");
+    let a0 = inp.aper_amp[j0];
+    assert!(rel(a0, case.scalar_f64("level_start")) <= 1e-15);
+    for (&a, &s) in inp.aper_amp.iter().zip(&inp.support) {
+        assert_eq!(a.to_bits(), if s { a0.to_bits() } else { 0.0f64.to_bits() });
+    }
+    inp.params.amplitude = AmplitudeMode::Level;
+    inp
+}
+
+/// The fitted-amplitude gates (descend, level): first-iteration loss rtol 1e-6,
+/// final_loss rtol 1e-3 (gated), n_iters/stop and the final amplitude/field
+/// (reported).
+fn check_fitted(case: &Case, label: &str, res: &rice_bend_core::types::CoreResult) {
+    let gold_loss_full = case.f32s("loss_full");
+    let first = rel(res.loss_full[0] as f64, gold_loss_full[0] as f64);
+    assert!(first <= 1e-6, "{label}: first-iteration loss rel err {first:.3e} > 1e-6");
+    let gold_final = case.scalar_f64("final_loss");
+    let fin = rel(res.final_loss, gold_final);
+    assert!(
+        fin <= 1e-3,
+        "{label}: final_loss rel err {fin:.3e} > 1e-3 (got {}, want {gold_final})",
+        res.final_loss
+    );
+    let gold_f = case.c128s("curr_aper_f");
+    let (mut d_amp, mut d_field) = (0.0f64, 0.0f64);
+    for ((&a, &phase), g) in res.aper_amp.iter().zip(&res.aper_phase).zip(&gold_f) {
+        let field = Complex64::from_polar(1.0, phase) * a;
+        d_amp = d_amp.max((a - g.norm()).abs());
+        d_field = d_field.max((field - g).norm());
+    }
+    eprintln!(
+        "{label}: first-iter rel {first:.3e}, final rel {fin:.3e}; n_iters {} vs {} (python), \
+         stop {} vs {}; max |amp - python| {d_amp:.3e}, max |field - python| {d_field:.3e}",
+        res.n_iters_run,
+        case.scalar_usize("n_iters_run"),
+        res.stop_reason.as_str(),
+        case.scalar_str("stop_reason"),
+    );
+}
+
+/// The case's penalty: gamma and the received power P_rx, both manifest scalars
+/// (P_rx is computed once in Python, mgs._received_power, as gs_solve receives it).
+fn penalty_of(case: &Case) -> PowerPenalty {
+    PowerPenalty { gamma: case.scalar_f64("power_penalty"), rx_power: case.scalar_f64("rx_power") }
+}
+
+/// The power-penalty gates: check_fitted's (the first-iteration loss and final_loss
+/// are J here), plus final_mse and power_ratio rtol 1e-3 (gated), and the result's
+/// own identities, bit for bit: final_mse is the mean of the plain per-tone losses,
+/// final_loss = final_mse * power_ratio^gamma.
+fn check_penalty(case: &Case, label: &str, pp: PowerPenalty, res: &CoreResult) {
+    check_fitted(case, label, res);
+    let ratio = res.power_ratio.unwrap_or_else(|| panic!("{label}: the penalty is on but power_ratio is None"));
+    let gold_mse = case.scalar_f64("final_mse");
+    let mse = rel(res.final_mse, gold_mse);
+    assert!(
+        mse <= 1e-3,
+        "{label}: final_mse rel err {mse:.3e} > 1e-3 (got {}, want {gold_mse})",
+        res.final_mse
+    );
+    let gold_ratio = case.scalar_f64("power_ratio");
+    let r = rel(ratio, gold_ratio);
+    assert!(r <= 1e-3, "{label}: power_ratio rel err {r:.3e} > 1e-3 (got {ratio}, want {gold_ratio})");
+    assert_eq!(
+        res.final_mse.to_bits(),
+        np_mean_f64(&res.final_loss_per_freq).to_bits(),
+        "{label}: final_mse is not the mean of the plain per-tone losses"
+    );
+    assert_eq!(
+        res.final_loss.to_bits(),
+        (res.final_mse * ratio.powf(pp.gamma)).to_bits(),
+        "{label}: final_loss is not final_mse * power_ratio^gamma"
+    );
+    eprintln!(
+        "{label}: final_mse rel {mse:.3e}; power_ratio {ratio} vs {gold_ratio} (python), rel {r:.3e}"
+    );
 }
 
 fn rel(a: f64, b: f64) -> f64 {
@@ -233,4 +347,197 @@ fn joint_warm_start_solve() {
         res.stop_reason.as_str(),
         case.scalar_str("stop_reason"),
     );
+}
+
+#[test]
+fn descend_single_freq_solve() {
+    let case = Case::load("solve_descend");
+    let mut inp = load_descend_inputs(&case);
+    assert_eq!(inp.channels.len(), 1, "solve_descend must be F=1");
+    assert_eq!(case.scalar_str("init_mode"), "random", "the backprop start crosses as 'random'");
+
+    let res = gs_core(
+        &inp.initial_phase,
+        &inp.aper_amp,
+        &inp.support,
+        &inp.channels,
+        &inp.kernels,
+        inp.dx,
+        &inp.params,
+        &mut inp.conv,
+    );
+    check_fitted(&case, "solve_descend", &res);
+}
+
+#[test]
+fn descend_joint_warm_start_solve() {
+    let case = Case::load("solve_descend_joint");
+    let mut inp = load_descend_inputs(&case);
+    assert!(inp.channels.len() > 1, "solve_descend_joint must be F>1");
+    assert_eq!(case.scalar_str("init_mode"), "warm_start");
+
+    // what py.rs does: the warm start (stage 1 phase-only at a0), then the descent
+    let psi = warm_start_psi(
+        &inp.initial_phase,
+        &inp.aper_amp,
+        &inp.support,
+        &inp.channels,
+        &inp.kernels,
+        inp.ref_freq,
+        inp.dx,
+        &inp.params,
+        &mut inp.conv,
+    );
+    let res = gs_core(
+        &psi,
+        &inp.aper_amp,
+        &inp.support,
+        &inp.channels,
+        &inp.kernels,
+        inp.dx,
+        &inp.params,
+        &mut inp.conv,
+    );
+    check_fitted(&case, "solve_descend_joint", &res);
+}
+
+#[test]
+fn level_single_freq_solve() {
+    let case = Case::load("solve_level");
+    let mut inp = load_level_inputs(&case);
+    assert_eq!(inp.channels.len(), 1, "solve_level must be F=1");
+    assert_eq!(case.scalar_str("init_mode"), "random", "the backprop start crosses as 'random'");
+    let res = gs_core(
+        &inp.initial_phase,
+        &inp.aper_amp,
+        &inp.support,
+        &inp.channels,
+        &inp.kernels,
+        inp.dx,
+        &inp.params,
+        &mut inp.conv,
+    );
+    check_fitted(&case, "solve_level", &res);
+}
+
+#[test]
+fn level_joint_solve() {
+    let case = Case::load("solve_level_joint");
+    let mut inp = load_level_inputs(&case);
+    assert!(inp.channels.len() > 1, "solve_level_joint must be F>1");
+    assert_eq!(case.scalar_str("init_mode"), "random", "the backprop start crosses as 'random'");
+    let res = gs_core(
+        &inp.initial_phase,
+        &inp.aper_amp,
+        &inp.support,
+        &inp.channels,
+        &inp.kernels,
+        inp.dx,
+        &inp.params,
+        &mut inp.conv,
+    );
+    check_fitted(&case, "solve_level_joint", &res);
+}
+
+#[test]
+fn level_penalty_solve() {
+    let case = Case::load("solve_level_penalty");
+    let mut inp = load_level_inputs(&case);
+    assert_eq!(inp.channels.len(), 1, "solve_level_penalty must be F=1");
+    assert_eq!(case.scalar_str("init_mode"), "random", "the backprop start crosses as 'random'");
+    let pp = penalty_of(&case);
+    inp.params.power_penalty = Some(pp);
+    let res = gs_core(
+        &inp.initial_phase,
+        &inp.aper_amp,
+        &inp.support,
+        &inp.channels,
+        &inp.kernels,
+        inp.dx,
+        &inp.params,
+        &mut inp.conv,
+    );
+    check_penalty(&case, "solve_level_penalty", pp, &res);
+}
+
+#[test]
+fn descend_penalty_solve() {
+    let case = Case::load("solve_descend_penalty");
+    let mut inp = load_descend_inputs(&case);
+    assert_eq!(inp.channels.len(), 1, "solve_descend_penalty must be F=1");
+    assert_eq!(case.scalar_str("init_mode"), "random", "the backprop start crosses as 'random'");
+    let pp = penalty_of(&case);
+    inp.params.power_penalty = Some(pp);
+    let res = gs_core(
+        &inp.initial_phase,
+        &inp.aper_amp,
+        &inp.support,
+        &inp.channels,
+        &inp.kernels,
+        inp.dx,
+        &inp.params,
+        &mut inp.conv,
+    );
+    check_penalty(&case, "solve_descend_penalty", pp, &res);
+}
+
+/// No golden data needed: on the solve_level / solve_descend inputs, a penalty whose
+/// floor never lifts (P_rx far above any plate's power, so R == 1 throughout) must
+/// reproduce the unpenalized solve bit for bit (1^gamma is 1, L * 1 is L, and no
+/// gradient term is added), while a P_rx under the start plate's power must lift
+/// the first iteration's objective to L * R0^gamma, change the solve and keep the
+/// result's identities. (Its final R is reported, not gated: the descent may pull
+/// the plate's power down onto the floor, R == 1.)
+#[test]
+fn penalty_floor_is_the_plain_solve() {
+    for (name, descend) in [("solve_level", false), ("solve_descend", true)] {
+        let case = Case::load(name);
+        let solve = |penalty: Option<PowerPenalty>| {
+            let mut inp = if descend { load_descend_inputs(&case) } else { load_level_inputs(&case) };
+            inp.params.power_penalty = penalty;
+            let res = gs_core(
+                &inp.initial_phase,
+                &inp.aper_amp,
+                &inp.support,
+                &inp.channels,
+                &inp.kernels,
+                inp.dx,
+                &inp.params,
+                &mut inp.conv,
+            );
+            let p0: f64 = inp.aper_amp.iter().map(|&a| a * a).sum::<f64>() * inp.dx;
+            (res, p0)
+        };
+        let (plain, p0) = solve(None);
+        assert_eq!(plain.final_mse.to_bits(), plain.final_loss.to_bits());
+        assert_eq!(plain.power_ratio, None);
+
+        let (floor, _) = solve(Some(PowerPenalty { gamma: 1.0, rx_power: 1e6 * p0 }));
+        assert_eq!(floor.power_ratio, Some(1.0), "{name}: the floor lifted");
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&floor.aper_phase), bits(&plain.aper_phase), "{name}: phase");
+        assert_eq!(bits(&floor.aper_amp), bits(&plain.aper_amp), "{name}: amplitude");
+        assert_eq!(floor.final_loss.to_bits(), plain.final_loss.to_bits(), "{name}: final_loss");
+        assert_eq!(floor.final_mse.to_bits(), plain.final_loss.to_bits(), "{name}: final_mse");
+        assert_eq!(floor.loss_full, plain.loss_full, "{name}: loss_full");
+        assert_eq!(floor.n_iters_run, plain.n_iters_run);
+
+        let gamma = 2.0;
+        let (on, _) = solve(Some(PowerPenalty { gamma, rx_power: 0.25 * p0 }));
+        let ratio = on.power_ratio.expect("penalty on");
+        assert!(
+            on.loss_full[0] > 10.0 * plain.loss_full[0],
+            "{name}: R0 = 4, gamma 2, yet J0 {} against L0 {}",
+            on.loss_full[0],
+            plain.loss_full[0]
+        );
+        assert_ne!(on.final_loss.to_bits(), plain.final_loss.to_bits(), "{name}: the penalty changed nothing");
+        assert_eq!(on.final_mse.to_bits(), np_mean_f64(&on.final_loss_per_freq).to_bits());
+        assert_eq!(on.final_loss.to_bits(), (on.final_mse * ratio.powf(gamma)).to_bits());
+        eprintln!(
+            "{name}: floor == plain bit for bit; P_rx = P0/4, gamma 2: R {ratio:.4}, \
+             final_mse {:.4e} (plain {:.4e}), n_iters {}",
+            on.final_mse, plain.final_loss, on.n_iters_run
+        );
+    }
 }

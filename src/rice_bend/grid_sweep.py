@@ -7,9 +7,11 @@ ever solves MGS paid for the entire plotting stack.
 
 The real TX location/trajectory from the config is used only to synthesize the
 shared RX measurement set (one per frequency); the search itself treats the TX
-location as unknown. At each usable grid point a fixed-width aperture (uniform
-assumed amplitude) is placed and MGS reconstructs ONE phase for it jointly against
-every frequency's measurement the point is valid for.
+location as unknown. A `measured:` config replaces the synthesis with a measured
+THz-TDS row (MGS.from_measured): the TX's position is then the bench's, and its
+beam, the plate's profile, is not known at all. At each usable grid point a
+fixed-width aperture (uniform assumed amplitude) is placed and MGS reconstructs ONE
+phase for it jointly against every frequency's measurement the point is valid for.
 
 Every usable point is solved ONCE, from the start the config names
 (gerchberg_saxton.init), under gerchberg_saxton's settings with
@@ -28,13 +30,14 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 from rice_bend import rs
-from rice_bend.config import (GridSearchConfig, SimConfig, SimSceneConfig,
-                              center_freq_index)
+from rice_bend.config import (GerchbergSaxtonConfig, GridSearchConfig, SimConfig,
+                              SimSceneConfig, center_freq_index)
 from rice_bend.data_store import (c64, f64, provenance, save_config_snapshot,
                                   write_json)
-from rice_bend.mgs import MGS, gs_reconstruct, rust_core
+from rice_bend.mgs import (MGS, FreqChannel, check_amplitude_mode, gs_reconstruct,
+                           rust_core)
 from rice_bend.parallel import map_workers, worker_shared
-from rice_bend.sim_scene import sampled_axis
+from rice_bend.sim_scene import scene_axis
 
 # Tolerance for inclusive bounds checks, to absorb float round-off in the sweep
 # endpoints (e.g. an aperture edge landing exactly on the scene boundary).
@@ -61,6 +64,27 @@ class GridPoint:
         return self.skip_reason is None
 
 
+def window_samples(x_axis: np.ndarray, x_center: float, width: float) -> Tuple[int, int]:
+    """The candidate window as scene sample indices (i_lo, i_hi), both inclusive:
+    the sample nearest `x_center` plus round(width / (2 dx)) samples on each side,
+    so every window is the same 2*half + 1 samples and is centred on a grid sample.
+    The indices can fall outside the axis (a window that leaves the scene); the
+    caller decides what that means.
+
+    Defined by index rather than by comparing the axis against x_center +- width/2
+    because that comparison is decided by float noise: a linspace x_center of
+    -0.011999999999999983 puts the left edge a few ulp above the sample at -0.062
+    and drops it, while the next x_center keeps both edges. On the measured 2 mm
+    grid half the candidates got a 400-sample plate 0.25 mm narrower and 0.125 mm
+    off-centre, the other half the 401-sample one, and ill-conditioned off-bearing
+    solves moved by up to 63% between two sweeps that should have been identical
+    (2026-10-22)."""
+    dx = float(x_axis[1] - x_axis[0])
+    i_c = int(round((float(x_center) - float(x_axis[0])) / dx))
+    half = int(round(float(width) / (2.0 * dx)))
+    return i_c - half, i_c + half
+
+
 def enumerate_grid(grid_cfg: GridSearchConfig, scene_cfg: SimSceneConfig,
                    wavelengths: List[float]) -> List[GridPoint]:
     """Enumerate the (z, x_center) grid, flagging out-of-bounds / undersampled points.
@@ -72,10 +96,16 @@ def enumerate_grid(grid_cfg: GridSearchConfig, scene_cfg: SimSceneConfig,
     are stricter, so high frequencies drop out first as z approaches the RX
     plane); a point valid at only a subset stays usable, with the subset recorded
     in `freq_ok` so the joint solve runs over exactly those frequencies.
+
+    The window is a run of scene samples chosen by index (window_samples): the
+    point's x_min / x_max are the exact axis values of its first and last sample,
+    so a float comparison of the axis against them downstream recovers exactly
+    those samples; x_center stays the grid's nominal coordinate.
     """
-    half = grid_cfg.aperture.width / 2.0
     dx = grid_cfg.aperture.dx
-    x_axis = sampled_axis(scene_cfg.x_min, scene_cfg.x_max, scene_cfg.spacing)
+    # the scene's own axis (SimScene builds it with the same call)
+    x_axis = scene_axis(scene_cfg.x_min, scene_cfg.x_max, scene_cfg.spacing,
+                        scene_cfg.exact_step)
     rx_plane = np.array([scene_cfg.z_min])  # RX/origin plane the field propagates to
 
     points: List[GridPoint] = []
@@ -87,11 +117,15 @@ def enumerate_grid(grid_cfg: GridSearchConfig, scene_cfg: SimSceneConfig,
                      for wl in wavelengths]
         freq_ok_row = [q >= 1.0 for q in qualities]
         for x_center in grid_cfg.x_center.values():
-            x_min = x_center - half
-            x_max = x_center + half
+            i_lo, i_hi = window_samples(x_axis, x_center, grid_cfg.aperture.width)
+            inside = 0 <= i_lo and i_hi < len(x_axis)
+            # the exact sample values at the window's ends (the nominal edges only
+            # in the skip message, where there is no sample to name)
+            x_min = float(x_axis[i_lo]) if inside else x_center - grid_cfg.aperture.width / 2.0
+            x_max = float(x_axis[i_hi]) if inside else x_center + grid_cfg.aperture.width / 2.0
             reason: Optional[str] = None
             freq_ok: Optional[List[bool]] = None
-            if x_min < scene_cfg.x_min - _BOUNDS_TOL or x_max > scene_cfg.x_max + _BOUNDS_TOL:
+            if not inside:
                 reason = (f"aperture window [{x_min:.3f}, {x_max:.3f}] leaves scene x "
                           f"[{scene_cfg.x_min}, {scene_cfg.x_max}]")
             elif z <= scene_cfg.z_min or z > scene_cfg.z_max + _BOUNDS_TOL:
@@ -142,8 +176,13 @@ def _reconstruct_candidate(p: "GridPoint", shared: "SharedMeasurement") -> "Cand
     per-cell nanmean the old per-frequency layout computed after the fact.
     """
     x_axis = shared.x_axis
-    # uniform assumed amplitude over the hypothesized window (support = window)
-    support = (x_axis >= p.x_min) & (x_axis <= p.x_max)
+    # uniform assumed amplitude over the hypothesized window (support = window).
+    # With amplitude descend or level it is the support alone: the solve fits the
+    # amplitude. p.x_min / p.x_max are the exact axis values of the window's end
+    # samples (window_samples), and the half-sample slack makes the comparison
+    # immune to the last-bit noise that used to drop an edge sample (see there)
+    slack = 0.5 * float(x_axis[1] - x_axis[0])
+    support = (x_axis >= p.x_min - slack) & (x_axis <= p.x_max + slack)
     assumed_amp = np.where(support, 1.0, 0.0)
     n_freq = len(shared.channels)
     freq_ok = p.freq_ok if p.freq_ok is not None else [True] * n_freq
@@ -175,6 +214,8 @@ def _reconstruct_candidate(p: "GridPoint", shared: "SharedMeasurement") -> "Cand
         stop_reason=str(result.stop_reason),
         seed=int(result.seed),
         loss_full=np.asarray(result.loss_full, dtype=np.float32),
+        final_mse=float(result.final_mse),
+        power_ratio=None if result.power_ratio is None else float(result.power_ratio),
     )
 
 
@@ -194,10 +235,18 @@ class CandidateResult:
     One aperture per candidate: the solved profile is one delay plate shared
     across all frequencies (stored as its reference-frequency field) and the
     assumed amplitude is the same uniform box at every frequency, so there is
-    exactly one complex profile whatever F is.
+    exactly one complex profile whatever F is. With amplitude: descend the
+    amplitude is the solve's own, still one array for every frequency, and
+    `aper_profile` carries it with the phase; with amplitude: level it is the
+    solve's one uniform level.
     `final_loss` is the joint (mean-over-valid-frequencies) residual;
     `per_freq_losses` aligns with the run's frequency list, NaN where the
-    candidate failed that frequency's RS sampling check (`freq_valid`)."""
+    candidate failed that frequency's RS sampling check (`freq_valid`).
+    With gerchberg_saxton.power_penalty on, `final_loss` (and `loss_full`) is
+    the penalized objective J = L * power_ratio**gamma the solve minimized and
+    that ranks the candidates, `final_mse` the plain joint residual L and
+    `per_freq_losses` its plain components; off, `final_mse` equals
+    `final_loss` and `power_ratio` is None (mgs.GSResult)."""
     point: GridPoint
     aper_axis: np.ndarray        # hypothesized aperture x axis
     aper_profile: np.ndarray     # complex reconstructed aperture (shared across F)
@@ -208,6 +257,10 @@ class CandidateResult:
     stop_reason: str
     seed: int
     loss_full: np.ndarray        # per-iteration JOINT loss curve
+    # the plain joint residual L and R = max(1, P_plate/P_rx) of the final iterate
+    # (gerchberg_saxton.power_penalty); NaN / None when not set by a solve
+    final_mse: float = float("nan")
+    power_ratio: Optional[float] = None
 
 
 @dataclass
@@ -238,9 +291,11 @@ class GridSearchRun:
     rx_z: float                      # the RX/measurement plane
     rx_aper_axes: List[np.ndarray]   # ragged: per-frequency element axes
     rx_aper_profiles: List[np.ndarray]
-    # ground truth, for later evaluation of how well candidates localize the TX
-    real_tx_aper_axis: np.ndarray    # geometry-only, shared across frequencies
-    real_tx_aper_profiles: np.ndarray  # (F, nt): beam phase ∝ k
+    # ground truth, for later evaluation of how well candidates localize the TX.
+    # The plate itself (axis + profiles) is None on a measured run, where the beam
+    # is the unknown: its truth is the position below alone.
+    real_tx_aper_axis: Optional[np.ndarray]    # geometry-only, shared across frequencies
+    real_tx_aper_profiles: Optional[np.ndarray]  # (F, nt): beam phase ∝ k
     real_tx_z: float
     real_tx_x_min: float
     real_tx_x_max: float
@@ -250,6 +305,20 @@ class GridSearchRun:
     # solver saw and these are the noiseless element profiles beside it.
     rx_aper_profiles_clean: Optional[List[np.ndarray]] = None
     noise: Optional[dict] = None     # MGS.noise_report: the JSON-safe noise block
+    # MGS.measured_report on a measured run (the manifest's `measured` block), None
+    # on a simulated one
+    measured: Optional[dict] = None
+    # gerchberg_saxton.amplitude / amp_max of every solve ('fixed' / None: the
+    # uniform box held). Recorded in the manifest's gs block only when descended
+    amplitude: str = "fixed"
+    amp_max: Optional[float] = None
+    # gerchberg_saxton.power_penalty (gamma) of every solve; None when off. Recorded
+    # in the manifest's gs block only when set
+    power_penalty: Optional[float] = None
+    # MGS.tx_amplitude_report: tx_aperture.amplitude as applied to the simulated
+    # plate ({setting, scale, clean_rx_peak_unscaled}); None at the default 1.0
+    # and on a measured run. The manifest's top-level tx_amplitude, only when set
+    tx_amplitude: Optional[dict] = None
 
 
 def run_grid_search(config: SimConfig, freqs: List[float], *, limit: Optional[int] = None,
@@ -265,17 +334,30 @@ def run_grid_search(config: SimConfig, freqs: List[float], *, limit: Optional[in
     worker processes; results are identical to the serial path (each candidate
     uses the same fixed seed) regardless of `jobs` or completion order. Each
     candidate's result is its one solve.
+
+    With config.measured set, the measurement is the measured RX row instead
+    (MGS.from_measured, which applies the measured geometry to `config`), and
+    everything after it is the simulated on-grid path unchanged. The ground
+    truth is then the measured TX POSITION alone: the run's real_tx_aper_axis /
+    real_tx_aper_profiles are None, and `measured` holds the provenance.
     """
     grid_cfg = config.grid_search
     if grid_cfg is None:
         raise ValueError("config.grid_search is required for grid-search-mgs")
+    # an amplitude mode the engine cannot run (or level on several tones under
+    # init: warm_start) is refused before the measurement is built, not by the
+    # first candidate's solve after it (no capture: a candidate solve never captures)
+    check_amplitude_mode(config.gerchberg_saxton, n_tones=len(freqs))
     log = log or logging.getLogger()
 
     # 1. the shared RX measurement set (one per frequency). measure() synthesizes
     #    each by propagating to the RX plane alone -- the sweep never reads
     #    mgs.scene.data, so illuminating all 3400 planes here cost 1.71 s and
     #    +190 MB RSS, held in the parent for the whole sweep, to keep one row.
-    mgs = MGS(freqs, config)
+    #    A measured run reads it from the data file instead, and measure() only puts
+    #    it on the grid.
+    measured = config.measured is not None
+    mgs = MGS.from_measured(freqs, config) if measured else MGS(freqs, config)
     mgs.measure()
 
     # 2. Apply the grid-only GS overrides (cheaper sweep + one fixed seed so residuals
@@ -372,9 +454,11 @@ def run_grid_search(config: SimConfig, freqs: List[float], *, limit: Optional[in
         rx_z=float(mgs.scene.rx_ap.z),
         rx_aper_axes=[fs.rx_ap.aper_axis.copy() for fs in mgs.freq_states],
         rx_aper_profiles=[fs.rx_ap.aper_profile.copy() for fs in mgs.freq_states],
-        real_tx_aper_axis=mgs.scene.tx_ap.aper_axis.copy(),
-        real_tx_aper_profiles=np.stack([fs.tx_ap.aper_profile.copy()
-                                        for fs in mgs.freq_states]),
+        real_tx_aper_axis=None if measured else mgs.scene.tx_ap.aper_axis.copy(),
+        real_tx_aper_profiles=(None if measured else
+                               np.stack([fs.tx_ap.aper_profile.copy()
+                                         for fs in mgs.freq_states])),
+        # config.tx_aperture: on a measured run, the window apply_measured derived
         real_tx_z=float(real_tx.z),
         real_tx_x_min=float(real_tx.x_min),
         real_tx_x_max=float(real_tx.x_max),
@@ -383,7 +467,152 @@ def run_grid_search(config: SimConfig, freqs: List[float], *, limit: Optional[in
                                 else [fs.rx_aper_profile_clean.copy()
                                       for fs in mgs.freq_states]),
         noise=mgs.noise_report,
+        measured=mgs.measured_report if measured else None,
+        amplitude=str(mgs.gs_cfg.amplitude),
+        amp_max=mgs.gs_cfg.amp_max,
+        power_penalty=mgs.gs_cfg.power_penalty,
+        tx_amplitude=mgs.tx_amplitude_report,
     )
+
+
+def solve_at_measured_tx(run: GridSearchRun, params: GerchbergSaxtonConfig
+                         ) -> Tuple[Optional[CandidateResult], dict]:
+    """--true-mgs as a candidate: ONE solve at the TX position the run was made
+    from, made exactly the way every candidate is -- that TX window (run.real_tx_z,
+    real_tx_x_min..real_tx_x_max: the measured window on a measured run, the
+    configured tx_aperture on a simulated one) with the uniform assumed amplitude
+    (or, with amplitude descend or level, the fitted one the candidates get),
+    against the run's own measurement, under the sweep's solver settings
+    (`params`: the effective gerchberg_saxton, i.e. gs_overrides and the grid seed
+    applied, and its engine) and the run's reference frequency, through
+    _reconstruct_candidate itself. Its loss therefore compares directly with the
+    candidates': does the TX position fit the data as well as the best candidate
+    does, and if not, by how much.
+
+    Two runs make it. A measured run, whose plate is unknown: the plain `mgs`
+    baseline (candidate_scenes.make_true_mgs_plot, the solve under the real
+    plate's own amplitude with its scene and LANDING block) needs the plate. And a
+    simulated run with amplitude descend or level: that baseline is a solve that
+    captures GS history, which runs only at a fixed amplitude
+    (mgs.check_amplitude_mode), so the solve at the true TX is this one, as the
+    candidates fit the amplitude. A simulated fixed-amplitude run keeps
+    make_true_mgs_plot. The name says "measured" for the run it was written for;
+    the report's `kind` says which TX it was.
+
+    Returns (result, report): `result` is the CandidateResult (None when the TX
+    plane fails the RS sampling check at every frequency, as enumerate_grid would
+    skip it) and `report` the JSON-safe record (true_mgs.json), which sets the
+    result's loss beside the best candidate's. The keys are the same on both runs.
+    """
+    x_axis = run.scene_x_axis
+    tx_z = float(run.real_tx_z)
+    # the measured (or true) window as a run of scene samples, as every candidate's
+    # window is (window_samples): the configured edges are not axis values to the
+    # last bit, and the solve must get the same plate a candidate there would
+    nom_min, nom_max = float(run.real_tx_x_min), float(run.real_tx_x_max)
+    i_lo, i_hi = window_samples(np.asarray(x_axis), 0.5 * (nom_min + nom_max),
+                                nom_max - nom_min)
+    i_lo, i_hi = max(i_lo, 0), min(i_hi, len(x_axis) - 1)
+    x_min, x_max = float(x_axis[i_lo]), float(x_axis[i_hi])
+    # enumerate_grid's per-frequency check, at the TX plane
+    qualities = [rs.sampling_quality(x_axis, np.array([run.rx_z]), wl, z_src=tx_z,
+                                     forward_dir=-1.0)
+                 for wl in run.wavelengths]
+    freq_ok = [q >= 1.0 for q in qualities]
+    point = GridPoint(index=-1, z=tx_z, x_center=0.5 * (x_min + x_max),
+                      x_min=x_min, x_max=x_max, dx=float(run.grid_cfg.aperture.dx),
+                      skip_reason=None if any(freq_ok) else
+                      f"RS undersampled at every frequency (best quality "
+                      f"{max(qualities):.3f} < 1)",
+                      freq_ok=freq_ok)
+
+    finite = [c for c in run.candidates if np.isfinite(c.final_loss)]
+    best = min(finite, key=lambda c: c.final_loss) if finite else None
+    which = "measured" if run.measured is not None else "true"
+    report = {
+        "kind": f"solve at the {which} TX position (grid-search-mgs --true-mgs)",
+        "tx": {"z": point.z, "x_center": point.x_center, "x_min": x_min, "x_max": x_max,
+               "width": x_max - x_min},
+        "amplitude": _measured_tx_amplitude_text(params),
+        "gs": {"engine": str(params.engine), "init": str(params.init),
+               "effective_max_iters": int(params.max_iters), "seed": params.seed,
+               "ref_freq_hz": float(run.ref_freq)},
+        "skip_reason": point.skip_reason,
+        "solve": None,
+        "best_candidate": None if best is None else {
+            "index": best.point.index, "z": best.point.z,
+            "x_center": best.point.x_center, "final_loss": float(best.final_loss),
+            "dist_to_tx_m": float(np.hypot(best.point.z - point.z,
+                                           best.point.x_center - point.x_center))},
+        "loss_ratio_to_best": None,
+    }
+    if params.amplitude != "fixed":
+        # only on a fitted-amplitude run, so a fixed run's report is what it always
+        # was; amp_max only where there is a cap ('descend')
+        report["gs"]["amplitude"] = str(params.amplitude)
+        if params.amp_max is not None:
+            report["gs"]["amp_max"] = float(params.amp_max)
+        # likewise only when the penalty is on (it needs a fitted amplitude)
+        if params.power_penalty is not None:
+            report["gs"]["power_penalty"] = float(params.power_penalty)
+    if not point.ok:
+        return None, report
+
+    shared = SharedMeasurement(
+        x_axis=np.asarray(x_axis).copy(),
+        rx_z=float(run.rx_z),
+        # rebuilt from the run's own arrays: the same values the candidates got
+        channels=[FreqChannel(freq=f, wavelength=wl, rx_field=y, error_weighting=w)
+                  for f, wl, y, w in zip(run.freqs, run.wavelengths, run.rx_fields,
+                                         run.error_weightings)],
+        params=params.model_copy(),
+        ref_freq=float(run.ref_freq),
+    )
+    result = _reconstruct_candidate(point, shared)
+    report["solve"] = {"final_loss": float(result.final_loss),
+                       "final_mse": float(result.final_mse),
+                       "power_ratio": result.power_ratio,
+                       "per_freq_losses": _json_losses(result.per_freq_losses),
+                       "freq_valid": result.freq_valid,
+                       "n_iters_run": result.n_iters_run,
+                       "stop_reason": result.stop_reason, "seed": result.seed}
+    if best is not None and best.final_loss > 0:
+        report["loss_ratio_to_best"] = float(result.final_loss / best.final_loss)
+    return result, report
+
+
+def _measured_tx_amplitude_text(params: GerchbergSaxtonConfig) -> str:
+    """true_mgs.json's `amplitude`: what the solve at the measured (or, simulated,
+    true) TX did with the plate's amplitude, which is what every candidate did.
+    'fixed' reaches here on a measured run only: a simulated fixed run's --true-mgs
+    is make_true_mgs_plot. With power_penalty on, the text says so: the loss the
+    report compares is then the penalized objective."""
+    if params.amplitude == "fixed":
+        return ("uniform over the TX window, the candidates' assumption (the "
+                "plate's own amplitude and beam are unknown)")
+    penalty = ("" if params.power_penalty is None else
+               "; loss = plain loss x max(1, P_plate/P_rx)^"
+               f"{params.power_penalty:g} (excess-power penalty)")
+    if params.amplitude == "level":
+        return ("uniform level descended from the power-matched start, over the TX "
+                "window, as for every candidate (one level shared by every tone, "
+                f"fitted with the phase; no cap{penalty})")
+    return ("descended from the back-propagated magnitude, capped at amp_max = "
+            f"{params.amp_max:g}, over the TX window, as for every candidate (one "
+            f"amplitude shared by every tone, fitted with the phase{penalty})")
+
+
+def save_measured_tx_solve(run_dir: Path, result: Optional[CandidateResult],
+                           report: dict) -> Path:
+    """Write solve_at_measured_tx's output: true_mgs.json (the report) and, when
+    the solve ran, true_mgs.npz (aperture + loss curve, a candidate npz's keys)."""
+    run_dir = Path(run_dir)
+    if result is not None:
+        np.savez_compressed(run_dir / "true_mgs.npz",
+                            aper_axis=f64(result.aper_axis),
+                            aper_profile=c64(result.aper_profile),
+                            loss_full=np.asarray(result.loss_full, dtype=np.float32))
+    return write_json(run_dir / "true_mgs.json", report)
 
 
 def _json_losses(per_freq_losses: np.ndarray) -> List[Optional[float]]:
@@ -414,6 +643,23 @@ def save_grid_run(run: GridSearchRun, run_dir: Path, config: SimConfig,
     and measurement.npz additionally carries rx_aper_profile_clean_NN; a noiseless
     run's key set is unchanged.
 
+    With tx_aperture.amplitude set (anything but the default 1.0) the manifest
+    gains a top-level `tx_amplitude` block (MGS.tx_amplitude_report): the setting,
+    the factor the simulated plate carried and, for rx_peak, the clean RX peak it
+    was set from. A default run's key set is unchanged.
+
+    Every candidate entry, and its cand_####.json gs_result, carries `final_mse`
+    (the plain joint residual) and `power_ratio` (null without the penalty).
+    With gerchberg_saxton.power_penalty on, the manifest's gs block gains
+    `power_penalty` and each `final_loss` is the penalized objective
+    final_mse * power_ratio**power_penalty that ranks the candidates.
+
+    A measured run (run.measured set) writes the same layout with two differences:
+    measurement.npz has no real_tx_aper_axis / real_tx_aper_profile (the plate's
+    profile is the unknown; ground_truth is its measured position, as on every run),
+    and the manifest gains a `measured` block, the provenance of the measurement.
+    Its config_snapshot.json records tx_aperture.beam as null (_save_measured_snapshot).
+
     The manifest is schema 3. Schema 4 (gs.refine, and refined / start /
     sweep_loss per candidate) is what the removed refinement pass wrote; no run
     writes it now, and the readers still read it (the extra keys are ignored).
@@ -429,9 +675,10 @@ def save_grid_run(run: GridSearchRun, run_dir: Path, config: SimConfig,
         "wavelength_m": f64(run.wavelengths),
         "rx_field": c64(run.rx_fields),                    # (F, nx) on the scene axis
         "error_weighting": f64(run.error_weightings),      # (F, nx)
-        "real_tx_aper_axis": f64(run.real_tx_aper_axis),
-        "real_tx_aper_profile": c64(run.real_tx_aper_profiles),  # (F, nt)
     }
+    if run.real_tx_aper_profiles is not None:   # None: a measured run's unknown plate
+        meas["real_tx_aper_axis"] = f64(run.real_tx_aper_axis)
+        meas["real_tx_aper_profile"] = c64(run.real_tx_aper_profiles)  # (F, nt)
     # RX element arrays are the one genuinely ragged set (dx = wavelength/20), so
     # they get indexed keys instead of a stack — object arrays would break the
     # content hash and need allow_pickle.
@@ -474,6 +721,8 @@ def save_grid_run(run: GridSearchRun, run_dir: Path, config: SimConfig,
                          "x_min": cand.point.x_min, "x_max": cand.point.x_max,
                          "dx": cand.point.dx},
             "gs_result": {"final_loss": cand.final_loss,
+                          "final_mse": cand.final_mse,
+                          "power_ratio": cand.power_ratio,
                           "per_freq_losses": _json_losses(cand.per_freq_losses),
                           "freq_valid": cand.freq_valid,
                           "n_iters_run": cand.n_iters_run,
@@ -487,6 +736,8 @@ def save_grid_run(run: GridSearchRun, run_dir: Path, config: SimConfig,
             "index": cand.point.index, "z": cand.point.z, "x_center": cand.point.x_center,
             "x_min": cand.point.x_min, "x_max": cand.point.x_max,
             "final_loss": cand.final_loss,
+            "final_mse": cand.final_mse,
+            "power_ratio": cand.power_ratio,
             "per_freq_losses": _json_losses(cand.per_freq_losses),
             "freq_valid": cand.freq_valid,
             "n_iters_run": cand.n_iters_run,
@@ -520,18 +771,59 @@ def save_grid_run(run: GridSearchRun, run_dir: Path, config: SimConfig,
                "init": run.init, "ref_freq_hz": run.ref_freq},
         "provenance": provenance(args_dict),
         "noise": run.noise,          # receiver-noise block; null when noiseless
+    }
+    if run.amplitude != "fixed":
+        # only on a fitted-amplitude run, so a fixed manifest is what it always was;
+        # amp_max only where there is a cap ('descend')
+        manifest["gs"]["amplitude"] = run.amplitude
+        if run.amp_max is not None:
+            manifest["gs"]["amp_max"] = run.amp_max
+        # likewise only when the penalty is on (it needs a fitted amplitude): the
+        # candidates' final_loss is then J, and their final_mse the plain residual
+        if run.power_penalty is not None:
+            manifest["gs"]["power_penalty"] = run.power_penalty
+    if run.measured is not None:
+        # only on a measured run, so a simulated manifest is what it always was
+        manifest["measured"] = run.measured
+    if run.tx_amplitude is not None:
+        # only when tx_aperture.amplitude is not the default 1.0, likewise: the
+        # setting, the factor s the simulated plate carried, and (rx_peak) the
+        # clean RX peak element of the unscaled plate that s was set from
+        manifest["tx_amplitude"] = run.tx_amplitude
+    if config.plot_window is not None:
+        # only when set, likewise: the window the plots were drawn with, which
+        # --replot uses again unless --plot-window overrides it
+        manifest["plot_window"] = config.plot_window.model_dump()
+    manifest.update({
         "counts": {"total": len(run.grid_points), "usable": n_usable,
                    "ran": len(run.candidates), "skipped": len(skipped_entries),
                    "ran_per_freq": ran_per_freq},
         "candidates": cand_entries,
         "skipped": skipped_entries,
-    }
+    })
     write_json(run_dir / "candidate_beams.json", manifest)
-    save_config_snapshot(run_dir, config, config_path)
+    if run.measured is None:
+        save_config_snapshot(run_dir, config, config_path)
+    else:
+        _save_measured_snapshot(run_dir, config, config_path)
 
     # logged, not persisted (a 49,377-candidate run writes ~10^5 files here)
     logging.getLogger().info(f"Saved grid run to {run_dir} in "
                              f"{time.perf_counter() - t0:.1f} s")
+
+
+def _save_measured_snapshot(run_dir: Path, config: SimConfig, config_path: Path) -> None:
+    """save_config_snapshot for a measured run, with tx_aperture.beam written as
+    null. The config holds a stand-in beam there only so the block validates
+    (config.py's _default_tx_aperture); it was never used, and a snapshot that
+    named it would read as the TX's beam, which is the one thing a measured run
+    does not know. The derived window (x_min, x_max, z) stays: it is where the
+    plate sat. Neither file loads back (data_store.load_run_config refuses a
+    measured run), so the snapshot is a record only."""
+    save_config_snapshot(run_dir, config, config_path)
+    snap = config.model_dump(mode="json")
+    snap["tx_aperture"]["beam"] = None
+    write_json(Path(run_dir) / "config_snapshot.json", snap)
 
 
 # Retired layout's index file. New runs never write it; it survives only as the

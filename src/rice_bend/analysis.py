@@ -75,8 +75,9 @@ def cell_edges(values: np.ndarray) -> np.ndarray:
 
 def _energy_dict(x_axis, rows, freqs, x_min, x_max) -> Optional[dict]:
     """Per-frequency + mean fraction of RX-plane power inside the RX window.
-    None when any ingredient is unavailable (experimental captures, runs saved
-    before rx_plane_row was persisted)."""
+    None when any ingredient is unavailable (experimental captures, measured runs,
+    whose RX plane was only ever sampled at the elements, runs saved before
+    rx_plane_row was persisted)."""
     if rows is None or x_axis is None or not freqs or x_min is None or x_max is None:
         return None
     x = np.asarray(x_axis, dtype=float)
@@ -132,7 +133,8 @@ def _n_dof_dict(scene_x_axis, tx_axis, tx_profiles, freqs, wavelengths,
 
     TX profiles are cast to complex64 first so the save-time and replot-time
     computations see bit-identical inputs (measurement.npz stores complex64).
-    None when any ingredient is unavailable (experimental captures, legacy runs).
+    None when any ingredient is unavailable (experimental captures, measured runs,
+    whose TX beam is the unknown, legacy runs).
     """
     if (tx_profiles is None or tx_axis is None or scene_x_axis is None
             or not freqs or tx_z is None or rx_z is None

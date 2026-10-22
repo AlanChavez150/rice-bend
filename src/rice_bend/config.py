@@ -4,14 +4,21 @@ and configs/scenario_caustic_hit_1f_grid2l.yml for a campaign config with the
 on-grid receiver and the data-driven start. The general
 configs of the other three beam types are archived and not maintained:
 configs/archive/directional_config.yml, configs/archive/bessel_config.yml and
-configs/archive/focus_config.yml."""
+configs/archive/focus_config.yml. configs/measured/ holds the measured THz-TDS
+data configs: a shared base.yml and one thin file per acquisition laid over it
+(see load_config's base_config and MeasuredConfig)."""
 
 import argparse
+import math
 from pathlib import Path
-from typing import List, Literal, Optional, Union
+from typing import ClassVar, List, Literal, Optional, Union
 
+import numpy as np
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
+from pydantic import (BaseModel, ConfigDict, Field, StrictInt, field_validator,
+                      model_serializer, model_validator)
+
+from rice_bend.sim_scene import whole_steps
 
 
 class SimSceneConfig(BaseModel):
@@ -21,6 +28,13 @@ class SimSceneConfig(BaseModel):
     z_min: float
     z_max: float
     spacing: float = Field(gt=0, description="Grid spacing in meters")
+    exact_step: bool = Field(default=False,
+        description="Step the scene axes by exactly `spacing` (sim_scene.scene_axis) "
+                    "instead of the historical linspace, whose step is not `spacing`. "
+                    "Needs x_min == -x_max and whole numbers of steps in x_max and "
+                    "z_max - z_min. Required by a `measured` config, whose elements "
+                    "sit at whole multiples of the stage pitch; false for every "
+                    "simulated config, whose saved numbers depend on the linspace")
 
     @model_validator(mode="after")
     def _check_bounds(self) -> "SimSceneConfig":
@@ -29,6 +43,42 @@ class SimSceneConfig(BaseModel):
         if self.z_max <= self.z_min:
             raise ValueError(f"z_max ({self.z_max}) must be greater than z_min ({self.z_min})")
         return self
+
+    @model_validator(mode="after")
+    def _check_exact_step(self) -> "SimSceneConfig":
+        if not self.exact_step:
+            return self
+        # exactly, not to a tolerance: the RS kernel is evaluated on the scene x axis
+        # itself, so it is centred only when the axis has its middle sample at 0.0
+        if self.x_min != -self.x_max:
+            raise ValueError(
+                f"sim_scene.exact_step needs an x axis centred on 0: x_min "
+                f"({self.x_min}) must be exactly -x_max ({-self.x_max})")
+        if whole_steps(self.x_max, self.spacing) is None:
+            raise ValueError(
+                f"sim_scene.exact_step needs x_max / spacing to be a whole number, got "
+                f"{self.x_max} / {self.spacing} = {self.x_max / self.spacing:.12g}; "
+                "pick a spacing that divides x_max")
+        span = self.z_max - self.z_min
+        if whole_steps(span, self.spacing) is None:
+            raise ValueError(
+                f"sim_scene.exact_step needs (z_max - z_min) / spacing to be a whole "
+                f"number, got ({self.z_max} - {self.z_min}) / {self.spacing} = "
+                f"{span / self.spacing:.12g}; pick z bounds a whole number of "
+                "spacings apart")
+        return self
+
+    @model_serializer(mode="wrap")
+    def _dump(self, handler):
+        # exact_step is left out of a dump while it is false, so every simulated
+        # config dumps exactly as it did before the field existed: config_snapshot.json
+        # is unchanged, and mgs-study's resume check (which compares sim_scene with a
+        # saved snapshot, a missing key counting as null) still accepts the roots
+        # saved before. Loading such a dump gives false again
+        data = handler(self)
+        if not self.exact_step:
+            data.pop("exact_step", None)
+        return data
 
 
 class BeamConfig(BaseModel):
@@ -103,6 +153,10 @@ class TxApertureConfig(BaseModel):
     z=0; move it around by editing `z` (height) and `x_min`/`x_max` (lateral span).
     The emitted beam (caustic, directional, bessel or focus) is configured in the
     `beam` block."""
+    # The setting that asks the plate's power to be found from the clean measurement
+    # (amplitude: rx_peak); any other string is refused
+    AMPLITUDE_RX_PEAK: ClassVar[str] = "rx_peak"
+
     x_min: float = -0.35
     x_max: float = 0.35
     z: float = Field(default=2.0, description="TX plane height (beam travels -Z to the RX at z=0)")
@@ -110,12 +164,70 @@ class TxApertureConfig(BaseModel):
     beam: BeamConfig = Field(default_factory=BeamConfig,
         description="The emitted beam (type: caustic | directional | bessel | focus) "
                     "and its parameters")
+    amplitude: Union[Literal["rx_peak"], float] = Field(default=1.0,
+        description="One real factor s > 0 on the SIMULATED plate of every tone: the "
+                    "TX power, unknown to the solver (a jammer). A number is s itself, "
+                    "finite and > 0. 'rx_peak' sets s = 1 / P, P the largest |clean RX "
+                    "element| over every tone from the unscaled plate, so the clean RX "
+                    "peak element is 1: the simulated counterpart of "
+                    "measured.amplitude_scale (1/max|V|). Applied once to the plate "
+                    "when the simulated MGS is built, before measure(); the noise is "
+                    "then drawn on the scaled field. Not used on the experimental and "
+                    "measured paths, which have no simulated plate. Default 1.0 (the "
+                    "beam generators' unit amplitude)")
+
+    @field_validator("amplitude", mode="before")
+    @classmethod
+    def _check_amplitude(cls, v):
+        # Checked BEFORE pydantic's union, which would quietly take a YAML boolean
+        # (`amplitude: true`) as 1.0: a file that asks for something other than what
+        # it gets. A string is 'rx_peak' exactly or a number: PyYAML loads `5e-1`,
+        # `1e0` and `2.0e3` (no dot, or no signed exponent) as strings, which every
+        # other float field takes as numbers, so this one does too (and so a quoted
+        # "0.5"). numpy real scalars (np.float32, np.int64) are numbers. One message
+        # for 0, negatives, nan and inf alike (as measured.amplitude_scale)
+        if isinstance(v, (bool, np.bool_)):
+            raise ValueError(
+                f"tx_aperture.amplitude must be a finite number > 0 or "
+                f"'{cls.AMPLITUDE_RX_PEAK}', got the boolean {v}")
+        if isinstance(v, str):
+            if v == cls.AMPLITUDE_RX_PEAK:
+                return v
+            try:
+                v = float(v)
+            except ValueError:
+                raise ValueError(
+                    f"tx_aperture.amplitude must be a finite number > 0 or "
+                    f"'{cls.AMPLITUDE_RX_PEAK}' (the clean RX peak element -> 1), got "
+                    f"the string {v!r}") from None
+        if isinstance(v, (int, float, np.integer, np.floating)):
+            if not (math.isfinite(v) and v > 0):
+                raise ValueError(
+                    f"tx_aperture.amplitude must be a finite number > 0 or "
+                    f"'{cls.AMPLITUDE_RX_PEAK}', got {v}: it multiplies the simulated "
+                    "plate of every tone")
+            return float(v)
+        raise ValueError(
+            f"tx_aperture.amplitude must be a finite number > 0 or "
+            f"'{cls.AMPLITUDE_RX_PEAK}', got {v!r} ({type(v).__name__})")
 
     @model_validator(mode="after")
     def _check(self) -> "TxApertureConfig":
         if self.x_max <= self.x_min:
             raise ValueError(f"x_max ({self.x_max}) must be greater than x_min ({self.x_min})")
         return self
+
+    @model_serializer(mode="wrap")
+    def _dump(self, handler):
+        # amplitude is left out of a dump while it is the default 1.0, for the reason
+        # given at SimSceneConfig._dump: every config that does not set it dumps
+        # exactly as it did before the field existed (config_snapshot.json, and
+        # mgs-study's resume identity, which compares the whole tx_aperture block),
+        # and loading such a dump gives 1.0 again
+        data = handler(self)
+        if self.amplitude == 1.0:
+            data.pop("amplitude", None)
+        return data
 
 
 class RxApertureConfig(BaseModel):
@@ -216,6 +328,96 @@ class GerchbergSaxtonConfig(BaseModel):
                     "rice_bend_core extension, ~5x faster, parity-checked against the "
                     "reference; see rust/README.md). Solves that capture GS history "
                     "(single-run mgs, --true-mgs) always run on python.")
+    amplitude: Literal["fixed", "descend", "level"] = Field(default="fixed",
+        description="What the solve does with the plate's amplitude. 'fixed' (default) "
+                    "holds it at the aperture's own amplitude (the candidates' uniform "
+                    "box). 'descend' fits it too: one amplitude a(x) on the support, "
+                    "shared by every tone, started from the raw magnitude of the "
+                    "reference tone's back-propagated measurement and moved in the same "
+                    "backtracking step as the phase, clipped to [0, amp_max] after "
+                    "every step. Both engines (python and rust). 'level' fits ONE "
+                    "uniform level A >= 0 over the support, shared by every tone: it "
+                    "starts where the start phase's predicted RX power matches the "
+                    "measured one, and moves in the same backtracking step as the "
+                    "phase, with no cap and no assumed brightness. Both engines; with "
+                    "several tones it needs init: backprop (the legacy warm start would "
+                    "match the level to a random phase). Neither 'descend' nor 'level' "
+                    "runs on a solve that captures GS history (single-run mgs); "
+                    "grid-search-mgs --true-mgs then solves at the true (or measured) "
+                    "TX as a candidate (true_mgs.json) instead of the plain-mgs "
+                    "baseline")
+    amp_max: Optional[float] = Field(default=None,
+        description="The cap on the descended amplitude, in the units of the fixed "
+                    "solver's uniform amplitude 1 (so relative to the data as "
+                    "measured.amplitude_scale scales it). Finite and > 0; required with "
+                    "amplitude 'descend', refused with 'fixed' and 'level' (no cap)")
+    power_penalty: Optional[float] = Field(default=None,
+        description="The excess-power penalty's exponent gamma (null = off). With it "
+                    "set, the descent minimizes J = L * max(1, P_plate/P_rx)**gamma "
+                    "instead of the plain joint loss L: P_plate is the power leaving "
+                    "the candidate plate (sum of a^2 dx over the support), P_rx the "
+                    "power measured on the RX elements (mean over the tones). A plate "
+                    "that radiates more than the receiver caught is charged for it; one "
+                    "that radiates less is not (the floor at 1: unfloored, the product "
+                    "would favour dark plates). Finite and > 0; needs a fitted "
+                    "amplitude (amplitude 'level' or 'descend'), refused with 'fixed', "
+                    "where P_plate is the same for every solve. Both engines")
+
+    @field_validator("amp_max", mode="after")
+    @classmethod
+    def _check_amp_max(cls, v: Optional[float]) -> Optional[float]:
+        # one message for 0, negatives, nan and inf alike (as amplitude_scale)
+        if v is not None and not (math.isfinite(v) and v > 0):
+            raise ValueError(f"amp_max must be a finite number > 0, got {v}")
+        return v
+
+    @field_validator("power_penalty", mode="after")
+    @classmethod
+    def _check_power_penalty(cls, v: Optional[float]) -> Optional[float]:
+        # one message for 0, negatives, nan and inf alike (as amp_max)
+        if v is not None and not (math.isfinite(v) and v > 0):
+            raise ValueError(f"power_penalty must be a finite number > 0, got {v}")
+        return v
+
+    @model_validator(mode="after")
+    def _check_amplitude(self) -> "GerchbergSaxtonConfig":
+        if self.amplitude == "descend" and self.amp_max is None:
+            raise ValueError(
+                "amplitude 'descend' needs amp_max: the cap on the descended "
+                "amplitude, in the units of the fixed solver's uniform amplitude 1")
+        if self.amplitude == "fixed" and self.amp_max is not None:
+            raise ValueError(
+                f"amp_max ({self.amp_max}) is set but amplitude is 'fixed', which "
+                "holds the amplitude and caps nothing: set amplitude: descend, or "
+                "remove amp_max")
+        if self.amplitude == "level" and self.amp_max is not None:
+            raise ValueError(
+                f"amp_max ({self.amp_max}) is set but amplitude is 'level', which has "
+                "no cap: its one level is fitted from the data alone. Remove amp_max, "
+                "or set amplitude: descend for a capped per-sample amplitude")
+        if self.amplitude == "fixed" and self.power_penalty is not None:
+            raise ValueError(
+                f"power_penalty ({self.power_penalty}) is set but amplitude is 'fixed': "
+                "the held amplitude radiates the same power from every solve, so the "
+                "penalty would only rescale the loss. It needs a fitted amplitude: set "
+                "amplitude: level or amplitude: descend, or remove power_penalty")
+        return self
+
+    @model_serializer(mode="wrap")
+    def _dump(self, handler):
+        # amplitude and amp_max are left out of a dump while the amplitude is fixed,
+        # for the reason given at SimSceneConfig._dump: every fixed-amplitude config
+        # dumps exactly as it did before the fields existed (config_snapshot.json,
+        # mgs-study's saved configs), and loading such a dump gives 'fixed' again
+        data = handler(self)
+        if self.amplitude == "fixed":
+            data.pop("amplitude", None)
+            data.pop("amp_max", None)
+        # power_penalty likewise, while it is off: a config without the penalty
+        # dumps exactly as it did before the field existed
+        if self.power_penalty is None:
+            data.pop("power_penalty", None)
+        return data
 
 
 class NoiseConfig(BaseModel):
@@ -348,17 +550,191 @@ class ExperimentalConfig(BaseModel):
     scene_z_max: float = Field(default=0.4, description="Scene ceiling (m)")
 
 
+class StagePoint(BaseModel):
+    """A point in the measurement STAGE frame, in millimetres. Named keys, not a
+    pair: the stage's (x, z) order is easy to write the wrong way round, and a
+    swapped pair would load without complaint."""
+    model_config = ConfigDict(extra="forbid")
+
+    x: float = Field(allow_inf_nan=False, description="Stage x (mm)")
+    z: float = Field(allow_inf_nan=False, description="Stage z (mm)")
+
+
+class StageSegment(BaseModel):
+    """A horizontal aperture in the stage frame: its two edge points, in either
+    order along x (the smaller x is the left edge). Both points must share one z:
+    the scene models every aperture as a constant-z line."""
+    model_config = ConfigDict(extra="forbid")
+
+    left: StagePoint
+    right: StagePoint
+
+    @model_validator(mode="after")
+    def _check(self) -> "StageSegment":
+        if self.left.z != self.right.z:
+            raise ValueError(
+                f"left.z ({self.left.z} mm) and right.z ({self.right.z} mm) differ: a "
+                "tilted aperture is not supported: both points need the same z")
+        if self.left.x == self.right.x:
+            raise ValueError(
+                f"left.x and right.x are both {self.left.x} mm: the aperture has no "
+                "width; give its two edges")
+        return self
+
+
+class MeasuredConfig(BaseModel):
+    """A measured THz-TDS raster used in place of the simulated RX measurement
+    (grid-search-mgs only; see rice_bend/measured.py).
+
+    The data is the spectra CSV that topt-parser writes from the folder of pulse
+    traces (rice_bend/topt_parser.py): one row per stage position, X and Z in mm,
+    one complex column per frequency. The apertures are given in the stage frame,
+    in mm, as on the bench; the TX and RX blocks of the simulation (tx_aperture,
+    rx_aperture, the grid's aperture width) are derived from them at run time, so
+    the config must not set them. `amplitude_scale` multiplies the CSV's raw
+    spectra: there is no automatic calibration, so the value written here is the
+    one used."""
+    # every field here changes what is read or where it is placed, so a typo
+    # (amplitude_scal) must not silently fall back to a default or be dropped
+    model_config = ConfigDict(extra="forbid")
+
+    # the keys of the retired pulse-folder input, refused with directions to the
+    # spectra CSV (_refuse_pulse_folder_keys) rather than as unknown keys
+    RETIRED_KEYS: ClassVar[tuple] = ("data_dir", "file_unit_mm")
+
+    data_file: Path = Field(
+        description="The spectra CSV written by `topt-parser <pulse folder>` "
+                    "(<pulse folder>/topt_spectra.csv by default); '~' is expanded. "
+                    "Its existence is checked when the data is read")
+    tx_aperture: StageSegment = Field(
+        description="TX plate edges in the stage frame (mm); the ground truth "
+                    "the search is scored against")
+    rx_aperture: StageSegment = Field(
+        description="RX edges in the stage frame (mm). Its z must be a row of the "
+                    "data file and both edges X values of that row; only the "
+                    "positions between them are used")
+    amplitude_scale: float = Field(
+        description="Multiplies the raw spectra (Signal 1, nA, summed over the "
+                    "samples) into the solver's units; finite and > 0")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _refuse_pulse_folder_keys(cls, data):
+        """A config written for the pulse-folder input (data_dir, file_unit_mm) is
+        refused with what to do instead: the grid search no longer reads pulse
+        files, and the file-name unit is topt-parser's --unit-mm."""
+        if not isinstance(data, dict):
+            return data
+        retired = [k for k in cls.RETIRED_KEYS if k in data]
+        if not retired:
+            return data
+        unit = data.get("file_unit_mm")
+        unit_flag = f" --unit-mm {unit}" if unit not in (None, 0.1) else ""
+        if "data_dir" not in data:
+            rewrite = (f", and write the CSV with `topt-parser <the pulse folder>"
+                       f"{unit_flag}`" if unit_flag else "")
+            raise ValueError(
+                "measured.file_unit_mm is no longer read: the file-name unit is "
+                "topt-parser's --unit-mm (default 0.1), applied when it writes the "
+                f"spectra CSV. Remove file_unit_mm{rewrite}")
+        folder = str(data["data_dir"] or "").rstrip("/") or "<the pulse folder>"
+        names = " and ".join(f"measured.{k}" for k in retired)
+        raise ValueError(
+            f"{names} {'is' if len(retired) == 1 else 'are'} no longer read: the grid "
+            "search reads the one spectra CSV that topt-parser writes from the pulse "
+            f"traces. Run `topt-parser {folder}{unit_flag}`, then set "
+            f"measured.data_file to its output ({folder}/topt_spectra.csv by "
+            f"default) and remove {' and '.join(retired)}")
+
+    @field_validator("data_file", mode="after")
+    @classmethod
+    def _expand_data_file(cls, v: Path) -> Path:
+        return v.expanduser()
+
+    @field_validator("amplitude_scale", mode="after")
+    @classmethod
+    def _check_amplitude_scale(cls, v: float) -> float:
+        # one message for 0, negatives, nan and inf alike (pydantic's gt and
+        # allow_inf_nan would give two different ones, and gt alone lets inf through)
+        if not (math.isfinite(v) and v > 0):
+            raise ValueError(
+                f"amplitude_scale must be a finite number > 0, got {v}: it multiplies "
+                "the raw spectra, and the run logs the raw max |V| of the RX row "
+                "(1 / that max puts the RX peak at 1.0)")
+        return v
+
+
+class PlotWindowConfig(BaseModel):
+    """The rectangle of the (x, z) plane that grid-search-mgs's plots show, in metres
+    in the SOLVER frame (RX centre at (0, 0), TX above it at +z). A view only: the
+    search, the manifest's numbers and analysis.json are the same with or without
+    it (see residual_plots and candidate_scenes for what it crops)."""
+    model_config = ConfigDict(extra="forbid")
+
+    x_min: float = Field(allow_inf_nan=False)
+    x_max: float = Field(allow_inf_nan=False)
+    z_min: float = Field(allow_inf_nan=False)
+    z_max: float = Field(allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def _check(self) -> "PlotWindowConfig":
+        problems = [f"{a}_max ({hi}) must be greater than {a}_min ({lo})"
+                    for a, lo, hi in (("x", self.x_min, self.x_max),
+                                      ("z", self.z_min, self.z_max)) if not hi > lo]
+        if problems:
+            raise ValueError("; ".join(problems))
+        return self
+
+    # A point exactly on an edge is inside: grid values are float sums (0.15 + 125 *
+    # 0.002 is not exactly 0.4), so the test carries a tolerance far below any step.
+    EDGE_TOL: ClassVar[float] = 1e-9
+
+    def contains(self, x: float, z: float) -> bool:
+        """True when the point (x, z) lies inside the window, edges included."""
+        tol = self.EDGE_TOL
+        return (self.x_min - tol <= x <= self.x_max + tol
+                and self.z_min - tol <= z <= self.z_max + tol)
+
+
 # the carrier every entry point falls back to when neither --freq nor the
 # config's `frequencies` names one
 DEFAULT_FREQ_HZ = 300e9
 
 
+def _default_tx_aperture(data: dict) -> TxApertureConfig:
+    """SimConfig.tx_aperture when the file has no tx_aperture block.
+
+    A simulated config gets TxApertureConfig(), which raises (the default caustic
+    beam has no trajectory), so such a file is refused exactly as it always was. A
+    measured config must not have the block, and gets a stand-in instead: its
+    window is overwritten by measured.apply_measured, which keeps its dx and beam,
+    and the beam is never synthesised on the measured path (the plate's profile is
+    the unknown). The beam is a flat plate, steered nowhere, only because a
+    BeamConfig has to validate. `measured` is missing from `data` when it failed
+    validation; the stand-in then lets that error be the one reported.
+
+    Takes the fields validated so far, which is why `measured` is declared before
+    tx_aperture (pydantic >= 2.10 passes them to a one-argument factory)."""
+    if "measured" in data and data["measured"] is None:
+        return TxApertureConfig()
+    return TxApertureConfig(beam=BeamConfig(type="directional", steer_angle_deg=0.0))
+
+
 class SimConfig(BaseModel):
     """Top-level simulation config."""
     sim_scene: SimSceneConfig
-    tx_aperture: TxApertureConfig = Field(default_factory=TxApertureConfig)
+    # before tx_aperture: _default_tx_aperture reads it
+    measured: Optional[MeasuredConfig] = Field(default=None,
+        description="Measured THz-TDS data in place of the simulated measurement "
+                    "(grid-search-mgs only). tx_aperture and rx_aperture are then "
+                    "derived from it and must not be set; null -> simulate")
+    tx_aperture: TxApertureConfig = Field(default_factory=_default_tx_aperture)
     rx_aperture: RxApertureConfig = Field(default_factory=RxApertureConfig)
     plot_path: Path = Field(description="Path that plot_scene() writes the output figure to")
+    plot_window: Optional[PlotWindowConfig] = Field(default=None,
+        description="grid-search-mgs only: the (x, z) rectangle its residual plots and "
+                    "candidate scenes show, in metres in the solver frame; "
+                    "--plot-window overrides it. null -> the whole grid / scene")
     gerchberg_saxton: GerchbergSaxtonConfig = Field(default_factory=GerchbergSaxtonConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
     noise: NoiseConfig = Field(default_factory=NoiseConfig,
@@ -381,10 +757,68 @@ class SimConfig(BaseModel):
             if len(self.frequencies) == 0:
                 raise ValueError("frequencies, if set, must be a non-empty list")
             if any(f <= 0 for f in self.frequencies):
-                raise ValueError(f"all frequencies must be positive (got {self.frequencies})")
+                raise ValueError(f"all frequencies must be positive (got {self.frequencies}): "
+                                 "0 Hz or below has no wavelength to propagate at")
             if len(set(self.frequencies)) != len(self.frequencies):
                 raise ValueError(f"frequencies must be unique (got {self.frequencies})")
         return self
+
+    # The two measured checks run at construction only: the models have no
+    # validate_assignment, and measured.apply_measured writes the derived
+    # tx_aperture / rx_aperture into a config that has passed them, so they must not
+    # (and do not) run again on those assignments.
+
+    @model_validator(mode="before")
+    @classmethod
+    def _check_measured_blocks(cls, data):
+        """A measured config writes no tx_aperture / rx_aperture block (in the file
+        or its base_config): both are derived. Checked on the input keys, which are
+        the keys model_fields_set would hold, BEFORE the fields are validated: a
+        partial block (a tx_aperture without its beam) is then refused for being
+        there rather than for what it lacks."""
+        if isinstance(data, dict) and data.get("measured") is not None:
+            written = [k for k in ("tx_aperture", "rx_aperture") if k in data]
+            if written:
+                raise ValueError(
+                    f"a `measured` config: remove {' and '.join(written)} (from this "
+                    "file and its base_config): with a measured block, tx_aperture and "
+                    "rx_aperture are derived from measured.tx_aperture / "
+                    "measured.rx_aperture (stage mm) and the data")
+        return data
+
+    @model_validator(mode="after")
+    def _check_measured(self) -> "SimConfig":
+        """A measured config's other cross-block rules, all reported at once."""
+        if self.measured is None:
+            return self
+        problems = []
+        if not self.sim_scene.exact_step:
+            problems.append(
+                "sim_scene.exact_step must be true: the measured elements sit at whole "
+                "multiples of the stage pitch, which only the exact-step axis samples")
+        if self.noise.snr_db is not None:
+            problems.append(
+                f"noise.snr_db must be null, got {self.noise.snr_db}: measured data "
+                "carries its own receiver noise")
+        if self.grid_search is None:
+            problems.append(
+                "grid_search must be set: measured data is searched with "
+                "grid-search-mgs, which needs the candidate grid")
+        if problems:
+            raise ValueError("a `measured` config: " + "; ".join(problems))
+        return self
+
+    @model_serializer(mode="wrap")
+    def _dump(self, handler):
+        # measured and plot_window are left out of a dump while they are null, for
+        # the reason given at SimSceneConfig._dump: every simulated config dumps
+        # exactly as before
+        data = handler(self)
+        if self.measured is None:
+            data.pop("measured", None)
+        if self.plot_window is None:
+            data.pop("plot_window", None)
+        return data
 
 
 def center_freq_index(freqs: List[float]) -> int:
@@ -457,8 +891,62 @@ def apply_noise_overrides(config: "SimConfig", snr_db: Union[float, str, None],
 DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "configs" / "caustic_config.yml"
 
 
+# The top-level key naming the config a file is laid over (see load_config).
+BASE_CONFIG_KEY = "base_config"
+
+
+def _deep_merge(base: dict, over: dict) -> dict:
+    """`over` laid over `base`, neither one modified. Where both hold a mapping
+    under a key, the two are merged the same way one level down; anything else
+    `over` holds (a list, a scalar, a null) replaces the base's value whole."""
+    out = dict(base)
+    for key, value in over.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _deep_merge(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
 def load_config(path: Path) -> SimConfig:
-    """Loads and validates a simulation config .yml into a SimConfig model."""
+    """Loads and validates a simulation config .yml into a SimConfig model.
+
+    A file with a top-level `base_config: <path>` is laid over that base before
+    validation (_deep_merge: mappings merge key by key at every depth; a list, a
+    scalar or a null replaces the base's value whole). The base path is relative
+    to the file's own directory, '~' expanded; every other path in either file
+    (plot_path, output.output_dir, measured.data_file) keeps its usual meaning.
+    One level only: a base that names a base of its own is refused, so what a
+    file contains is never more than two files away. A file without the key
+    loads exactly as before."""
     with open(path, "r") as f:
         raw = yaml.safe_load(f)
-    return SimConfig(**raw)
+    if not (isinstance(raw, dict) and BASE_CONFIG_KEY in raw):
+        return SimConfig(**raw)
+
+    path = Path(path)
+    raw = dict(raw)
+    ref = raw.pop(BASE_CONFIG_KEY)
+    if not isinstance(ref, str) or not ref.strip():
+        raise ValueError(
+            f"{path}: base_config must be the path of a config .yml (relative to "
+            f"{path.parent}), got {ref!r}")
+    base_path = Path(ref).expanduser()
+    if not base_path.is_absolute():
+        base_path = path.parent / base_path
+    if not base_path.is_file():
+        raise FileNotFoundError(
+            f"{path}: base_config {ref!r} resolves to {base_path}, which is not a file")
+    with open(base_path, "r") as f:
+        base = yaml.safe_load(f)
+    if not isinstance(base, dict):
+        raise ValueError(
+            f"{base_path} (the base_config of {path}) must hold a mapping of config "
+            f"blocks, got {type(base).__name__}")
+    if BASE_CONFIG_KEY in base:
+        raise ValueError(
+            f"{base_path} (the base_config of {path}) sets base_config "
+            f"{base[BASE_CONFIG_KEY]!r} itself, and base_config is one level only: "
+            f"copy what it needs from that file into {base_path.name}, or point "
+            f"{path.name} at a base that names none")
+    return SimConfig(**_deep_merge(base, raw))

@@ -101,3 +101,18 @@ pub fn np_unwrap(p: &[f64]) -> Vec<f64> {
     }
     out
 }
+
+/// `np.clip(x, lo, hi)` for one float64 (numpy 1.24 `um.clip`, clip.cpp's
+/// `_NPY_CLIP`): min(max(x, lo), hi), where numpy's float max/min return their
+/// FIRST operand when it is NaN and otherwise `a > b ? a : b` / `a < b ? a : b`.
+/// So a NaN passes through (`f64::max(NaN, 0.0)` would drop it to 0.0, and
+/// `f64::clamp` agrees on NaN but keeps -0.0 where numpy returns +lo), and an
+/// x equal to a bound returns that bound. `lo`/`hi` are never NaN here.
+pub fn np_clip(x: f64, lo: f64, hi: f64) -> f64 {
+    let m = if x.is_nan() || x > lo { x } else { lo };
+    if m.is_nan() || m < hi {
+        m
+    } else {
+        hi
+    }
+}

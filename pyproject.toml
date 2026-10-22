@@ -16,7 +16,9 @@ dependencies = [
     "coloredlogs",
     "h5py",
     "pyyaml",
-    "pydantic>=2",
+    # 2.10: config.py's tx_aperture default_factory takes the fields validated so
+    # far (a measured config's stand-in TX block)
+    "pydantic>=2.10",
 ]
 
 [project.scripts]
@@ -24,6 +26,8 @@ mgs = "rice_bend.mgs:main"
 mgs-animate = "rice_bend.animate:main"
 mgs-study = "rice_bend.study:main"
 grid-search-mgs = "rice_bend.grid_search:main"
+topt-parser = "rice_bend.topt_parser:main"
+topt-heatmap = "rice_bend.topt_heatmap:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

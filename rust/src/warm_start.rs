@@ -16,6 +16,23 @@
 //! random phase once from the resolved seed, and the recursive stage-1 solve
 //! reproduces exactly that draw (same seed => same array, mgs.py:68,207-216).
 //!
+//! ## Under `amplitude: descend` (and the support it solves on)
+//!
+//! The start stays a PHASE start (mgs._warm_start_phase): the stage-1 solve runs
+//! with AmplitudeMode::Fixed at the start amplitude `aper_amp` (a0), and the scan
+//! uses a0 too; only the joint descent after it moves the amplitude. Python's
+//! stage 1 is a child gs_reconstruct handed a0 as its `orig_aper_amp`, so ITS
+//! support is |a0| > 0 — not the parent's window when a0 is 0 at window samples.
+//! Stage 1 therefore derives its support from `aper_amp` (|a| > 0), which under
+//! Fixed is the parent's support anyway (amp = |orig_aper_amp|). The unwrap and
+//! the scan run over the parent's `support`, as in Python, and the field the
+//! unwrap reads the angle of is built with numpy's complex-multiply operand
+//! order (a + 0i)(c + is), which decides the angle where a == 0.
+//!
+//! `amplitude: level` never gets here with several tones: Python refuses it
+//! (mgs.check_amplitude_mode) and so does the boundary (py.rs), because the level
+//! the warm start would run at comes from the seeded random phase.
+//!
 //! ## Stage 2 — unwrap (mgs.py:74-76)
 //!
 //! psi0 = zeros(N);
@@ -69,7 +86,7 @@ use num_complex::Complex64;
 use crate::conv::Convolver;
 use crate::npmath::{np_mean_f64, np_unwrap};
 use crate::solve::gs_core;
-use crate::types::{ChannelData, KernelPair, SolveParams};
+use crate::types::{AmplitudeMode, ChannelData, KernelPair, SolveParams};
 
 /// WARM_START_SCAN_STEP (mgs.py:30), as the same expression.
 const SCAN_STEP: f64 = 2.0 * PI / 64.0;
@@ -164,24 +181,31 @@ pub fn warm_start_psi(
     }
     let mut ch_ref = channels[c_idx].clone();
     ch_ref.rho = 1.0; // freq / freq, which IEEE makes exactly 1.0
+    // phase-only, on the support the child gs_reconstruct derives from the
+    // amplitude it is handed (|aper_amp| > 0; see the module doc)
+    let stage1_params = SolveParams { amplitude: AmplitudeMode::Fixed, ..params.clone() };
+    let stage1_support: Vec<bool> = aper_amp.iter().map(|&a| a.abs() > 0.0).collect();
     let stage1 = gs_core(
         initial_phase,
         aper_amp,
-        support,
+        &stage1_support,
         std::slice::from_ref(&ch_ref),
         std::slice::from_ref(&kernels[c_idx]),
         dx,
-        params,
+        &stage1_params,
         conv,
     );
 
-    // 2. unwrap angle(amp * exp(i theta)) over the support, into psi units
+    // 2. unwrap angle(amp * exp(i theta)) over the support, into psi units. The
+    //    product in numpy's order, (a*c - 0*s, a*s + 0*c): equal to (a*c, a*s)
+    //    wherever a*c and a*s are nonzero, and numpy's signed zeros where a == 0
     let support_idx: Vec<usize> = (0..n).filter(|&j| support[j]).collect();
     let angles: Vec<f64> = support_idx
         .iter()
         .map(|&j| {
             let (s, c) = stage1.aper_phase[j].sin_cos();
-            (aper_amp[j] * s).atan2(aper_amp[j] * c)
+            let a = stage1.aper_amp[j];
+            (a * s + 0.0 * c).atan2(a * c - 0.0 * s)
         })
         .collect();
     let mut psi0 = vec![0.0; n];

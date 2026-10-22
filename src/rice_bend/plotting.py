@@ -16,7 +16,7 @@ from rice_bend import rs
 def draw_scene(fig, ax, field: np.ndarray, *,
                bounds: Tuple[float, float, float, float],
                rx_axis: np.ndarray, rx_z: float,
-               tx_axis: np.ndarray, tx_z: float,
+               tx_axis: Optional[np.ndarray], tx_z: float,
                title: str, vmax: Optional[float] = None,
                colorbar_label: str = "|field| (V/m)",
                legend_loc: str = "best") -> None:
@@ -27,6 +27,9 @@ def draw_scene(fig, ax, field: np.ndarray, *,
     rx.z = 0.35 - zvec[0]*1e-3. Assuming the scene floor would silently relocate the
     markers with no error raised.
 
+    `tx_axis=None` draws no TX aperture: a measured run's averaged scene has no TX
+    profile to place, and marks the measured TX window itself (candidate_scenes).
+
     `vmax=None` autoscales this panel independently. Pass a shared value to make two
     panels directly comparable.
     """
@@ -36,8 +39,9 @@ def draw_scene(fig, ax, field: np.ndarray, *,
     fig.colorbar(im, ax=ax, label=colorbar_label)
     ax.scatter(rx_axis, np.full(len(rx_axis), rx_z), s=10, c="red",
                label="RX aperture", zorder=5)
-    ax.scatter(tx_axis, np.full(len(tx_axis), tx_z), s=10, c="blue",
-               label="TX aperture", zorder=5)
+    if tx_axis is not None:
+        ax.scatter(tx_axis, np.full(len(tx_axis), tx_z), s=10, c="blue",
+                   label="TX aperture", zorder=5)
     ax.set_xlabel("x (m)")
     ax.set_ylabel("z (m)")
     ax.set_title(title)

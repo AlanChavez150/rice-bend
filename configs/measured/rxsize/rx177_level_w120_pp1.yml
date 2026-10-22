@@ -1,0 +1,25 @@
+# RECEIVER-SIZE STUDY, FULL pass (2 mm grid, base.yml), UNIFORM LEVEL + EXCESS-POWER
+# PENALTY, 120 mm RX. Identical to rx177_level_w120.yml except for the objective: the
+# descent minimizes  J = L * max(1, P_plate / P_rx) ** power_penalty  (L the weighted MSE,
+# P_plate the power leaving the candidate's uniform plate, P_rx the power measured on the
+# RX elements), so a plate that emits more power than the receiver collects pays for it
+# inside the solve, not only in a post-hoc re-score. power_penalty 1.0 = gamma 1.
+# final_loss in candidate_beams.json is J; final_mse is the plain L, power_ratio the R.
+#
+# Solver otherwise as rx177_level_w120.yml: level fitted with the phase, power-matched
+# start, no cap; 6000 iterations, one tone, backprop start (base.yml).
+
+base_config: ../base.yml
+
+measured:
+  data_file: ~/Desktop/experiments/topt_spectra.csv
+  tx_aperture: {left: {x: 85, z: -65}, right: {x: 185, z: -65}}
+  rx_aperture: {left: {x: 95, z: 177}, right: {x: 215, z: 177}}
+  amplitude_scale: 0.0081728    # 1 / max|V| on this RX (peak 122.356 at x = 209 mm)
+
+gerchberg_saxton:
+  amplitude: level
+  power_penalty: 1.0            # gamma of the excess-power factor in the objective
+  max_iters: 6000
+
+output: {run_name: rxsize_rx177_level_w120_pp1}

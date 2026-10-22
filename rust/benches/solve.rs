@@ -7,7 +7,7 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use num_complex::Complex64;
 use rice_bend_core::conv::Convolver;
 use rice_bend_core::solve::gs_core;
-use rice_bend_core::types::{ChannelData, KernelPair, SolveParams};
+use rice_bend_core::types::{AmplitudeMode, ChannelData, KernelPair, SolveParams};
 
 /// Deterministic synthetic values — benches measure speed, not physics.
 fn xorshift(state: &mut u64) -> f64 {
@@ -82,6 +82,8 @@ fn bench_solve(c: &mut Criterion) {
         lr0: 0.05,
         bt_shrink: 0.5,
         bt_tries: 8,
+        amplitude: AmplitudeMode::Fixed,
+        power_penalty: None,
     };
 
     let mut group = c.benchmark_group("solve");

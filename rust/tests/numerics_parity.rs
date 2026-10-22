@@ -4,7 +4,7 @@
 mod common;
 
 use common::Case;
-use rice_bend_core::npmath::{np_sum_f32, np_sum_f64, np_unwrap};
+use rice_bend_core::npmath::{np_clip, np_sum_f32, np_sum_f64, np_unwrap};
 
 /// Split a flat batch by its `<name>_lens` (f64-encoded counts).
 fn batches<T: Copy>(data: &[T], lens: &[f64]) -> Vec<Vec<T>> {
@@ -60,6 +60,31 @@ fn unwrap_bit_exact() {
         let got = np_unwrap(a);
         for (k, (g, w)) in got.iter().zip(want).enumerate() {
             assert_eq!(g.to_bits(), w.to_bits(), "batch {i}[{k}]: {g} vs numpy {w}");
+        }
+    }
+}
+
+/// np.clip(x, 0.0, 1.0) as numpy 1.24 returns it (checked on this project's numpy):
+/// NaN passes through, -0.0 and anything below clip to +0.0, a bound returns it.
+#[test]
+fn clip_matches_numpy() {
+    let cases: [(f64, f64); 9] = [
+        (f64::NAN, f64::NAN),
+        (-0.0, 0.0),
+        (0.0, 0.0),
+        (-1.0, 0.0),
+        (0.5, 0.5),
+        (2.0, 1.0),
+        (f64::INFINITY, 1.0),
+        (f64::NEG_INFINITY, 0.0),
+        (1.0, 1.0),
+    ];
+    for (x, want) in cases {
+        let got = np_clip(x, 0.0, 1.0);
+        if want.is_nan() {
+            assert!(got.is_nan(), "np_clip({x}) = {got}, numpy gives nan");
+        } else {
+            assert_eq!(got.to_bits(), want.to_bits(), "np_clip({x}) = {got:e}, numpy gives {want:e}");
         }
     }
 }

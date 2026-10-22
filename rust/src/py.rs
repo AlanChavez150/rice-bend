@@ -16,8 +16,27 @@
 //!     warm-start delta grid derives from freqs with the exact op sequence
 //!     pinned in warm_start.rs — recomputing from first principles in Rust
 //!     avoids every "computed slightly differently in two places" drift.
-//!   - support is DERIVED here as aper_amp > 0 (mgs.py:215,219 guarantee amp =
-//!     |orig_aper_amp|, so the two definitions coincide).
+//!   - the support: mgs.gs_reconstruct's `support = |orig_aper_amp| > 0`, passed
+//!     as the trailing `support` argument. Left out (None) it is DERIVED here as
+//!     aper_amp > 0, which is the same array under amplitude 'fixed' (amp =
+//!     |orig_aper_amp|) — the legacy callers rely on that. Under 'descend' it is
+//!     REQUIRED: aper_amp is then the start amplitude a0 (mgs._backprop_amplitude),
+//!     which can be 0 at window samples Python still descends, so a0 > 0 would
+//!     silently shrink the support. 'level' needs it too: its plate A0 * 1_support
+//!     has no support of its own when A0 == 0.
+//!   - the amplitude mode: trailing `amplitude` ('fixed' default | 'descend' |
+//!     'level') and `amp_max` (required with 'descend', finite and > 0; refused
+//!     with 'fixed' and 'level'). 'level' takes its start A0 the way 'descend'
+//!     takes a0: as aper_amp, here A0 on the support and 0 off it, which must be
+//!     one value on the support (checked). 'level' with several tones and
+//!     init_mode 'warm_start' is refused, as mgs.check_amplitude_mode refuses it.
+//!   - the excess-power penalty: trailing `power_penalty` (gamma) and `rx_power`
+//!     (P_rx), both or neither (default None: the plain loss, bit-identical to a
+//!     build without them). P_rx is computed IN PYTHON (mgs._received_power) and
+//!     crosses as a scalar, so both engines divide by the identical number rather
+//!     than each summing |rx|^2 over the elements its own way. Both must be finite
+//!     and > 0, and the penalty is refused with amplitude 'fixed' (R would be a
+//!     constant of the grid), as the config refuses it.
 //!
 //! Not crossing: capture/history (python engine only), the config object
 //! (scalars are exploded into arguments so the crate never parses pydantic),
@@ -37,8 +56,10 @@
 //!
 //!    then solve::gs_core(psi_start, ...). ALL of this stays inside
 //!    allow_threads — the GIL is held only for marshaling.
-//! 4. Compose curr_aper_f = amp * exp(i * phase) (mgs.py:302) and hand back
+//! 4. Compose curr_aper_f = amp * exp(i * phase) (mgs.py:302) from the solve's
+//!    final amplitude (the input one under 'fixed') and hand back
 //!    numpy arrays. loss_full_per_freq reshapes row-major to (n_iters_run, F).
+//!    final_mse and power_ratio (None when the penalty is off) trail the tuple.
 //!
 //! stop_reason strings are exactly "converged" / "max_iters" (types.rs::as_str).
 
@@ -53,7 +74,7 @@ use pyo3::prelude::*;
 
 use crate::conv::{fftconvolve_same as conv_fftconvolve_same, Convolver};
 use crate::solve::gs_core;
-use crate::types::{ChannelData, KernelPair, SolveParams};
+use crate::types::{AmplitudeMode, ChannelData, KernelPair, PowerPenalty, SolveParams};
 use crate::warm_start::warm_start_psi;
 
 fn vec1<T: numpy::Element + Copy>(a: &PyReadonlyArray1<'_, T>) -> Vec<T> {
@@ -71,8 +92,22 @@ fn rows<T: numpy::Element + Copy>(a: &PyReadonlyArray2<'_, T>) -> Vec<Vec<T>> {
 /// which builds h_fwd from it via rs.rs_kernel and passes the kernels in.
 ///
 /// Returns (curr_aper_f, final_loss, final_loss_per_freq, n_iters_run,
-/// stop_reason, loss_full, loss_full_per_freq).
+/// stop_reason, loss_full, loss_full_per_freq, final_mse, power_ratio). Under
+/// 'descend' curr_aper_f carries the descended amplitude. Under the power penalty
+/// final_loss (and loss_full) is the objective J = final_mse * power_ratio^gamma,
+/// final_mse the plain joint loss, final_loss_per_freq the plain per-tone losses;
+/// off, final_mse == final_loss and power_ratio is None.
+///
+/// The trailing `amplitude`, `amp_max`, `support`, `power_penalty`, `rx_power`
+/// default to the legacy behaviour (fixed amplitude, support = aper_amp > 0, no
+/// penalty), so positional callers that predate them run unchanged.
 #[pyfunction]
+#[pyo3(signature = (
+    initial_phase, aper_amp, freqs, ref_freq, rx_field, error_weighting, h_fwd, dx,
+    init_mode, max_iters, convergence_count, convergence_threshold, lr0, bt_shrink,
+    bt_tries, amplitude = "fixed", amp_max = None, support = None, power_penalty = None,
+    rx_power = None
+))]
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn gs_solve<'py>(
     py: Python<'py>,
@@ -91,6 +126,11 @@ pub fn gs_solve<'py>(
     lr0: f64,
     bt_shrink: f64,
     bt_tries: usize,
+    amplitude: &str,
+    amp_max: Option<f64>,
+    support: Option<PyReadonlyArray1<'py, bool>>,
+    power_penalty: Option<f64>,
+    rx_power: Option<f64>,
 ) -> PyResult<(
     Bound<'py, PyArray1<Complex64>>,
     f64,
@@ -99,6 +139,8 @@ pub fn gs_solve<'py>(
     String,
     Bound<'py, PyArray1<f32>>,
     Bound<'py, PyArray2<f32>>,
+    f64,
+    Option<f64>,
 )> {
     let warm = match init_mode {
         "warm_start" => true,
@@ -117,6 +159,81 @@ pub fn gs_solve<'py>(
     if aper_amp.len()? != n {
         return Err(PyValueError::new_err("aper_amp must have the same length as initial_phase"));
     }
+    let amplitude = match (amplitude, amp_max) {
+        ("fixed", None) => AmplitudeMode::Fixed,
+        ("fixed", Some(v)) => {
+            return Err(PyValueError::new_err(format!(
+                "amp_max ({v}) is set but amplitude is 'fixed', which caps nothing"
+            )))
+        }
+        ("descend", Some(v)) if v.is_finite() && v > 0.0 => AmplitudeMode::Descend { amp_max: v },
+        ("descend", v) => {
+            return Err(PyValueError::new_err(format!(
+                "amplitude 'descend' needs amp_max, a finite number > 0; got {v:?}"
+            )))
+        }
+        ("level", None) => AmplitudeMode::Level,
+        ("level", Some(v)) => {
+            return Err(PyValueError::new_err(format!(
+                "amp_max ({v}) is set but amplitude is 'level', which has no cap"
+            )))
+        }
+        (other, _) => {
+            return Err(PyValueError::new_err(format!(
+                "amplitude must be 'fixed', 'descend' or 'level', got {other:?}"
+            )))
+        }
+    };
+    if amplitude == AmplitudeMode::Level && warm && n_freq > 1 {
+        // mgs.check_amplitude_mode's refusal: the warm start's level would come
+        // from the seeded random phase, and lands on a wrong level
+        return Err(PyValueError::new_err(
+            "amplitude: level with several tones needs init: backprop",
+        ));
+    }
+    let power_penalty = match (power_penalty, rx_power) {
+        (None, None) => None,
+        (Some(gamma), Some(rx_power)) => {
+            if !(gamma.is_finite() && gamma > 0.0) {
+                return Err(PyValueError::new_err(format!(
+                    "power_penalty (gamma) must be a finite number > 0; got {gamma}"
+                )));
+            }
+            if !(rx_power.is_finite() && rx_power > 0.0) {
+                return Err(PyValueError::new_err(format!(
+                    "rx_power (the received power P_rx) must be a finite number > 0; got {rx_power}"
+                )));
+            }
+            if amplitude == AmplitudeMode::Fixed {
+                return Err(PyValueError::new_err(
+                    "power_penalty needs a fitted amplitude ('level' or 'descend'): under \
+                     'fixed' the plate power, and so the penalty, is a constant of the grid",
+                ));
+            }
+            Some(PowerPenalty { gamma, rx_power })
+        }
+        (gamma, rx_power) => {
+            return Err(PyValueError::new_err(format!(
+                "power_penalty and rx_power go together (both or neither); got \
+                 power_penalty={gamma:?}, rx_power={rx_power:?}"
+            )))
+        }
+    };
+    let support: Option<Vec<bool>> = match support {
+        Some(s) => {
+            if s.len()? != n {
+                return Err(PyValueError::new_err("support must have the same length as initial_phase"));
+            }
+            Some(vec1(&s))
+        }
+        None if amplitude != AmplitudeMode::Fixed => {
+            return Err(PyValueError::new_err(
+                "amplitude 'descend' and 'level' need the support (|orig_aper_amp| > 0): \
+                 the start amplitude can be 0 inside it, so aper_amp > 0 is not the support",
+            ))
+        }
+        None => None,
+    };
     for (name, dims) in [
         ("rx_field", rx_field.dims()),
         ("h_fwd", h_fwd.dims()),
@@ -132,6 +249,28 @@ pub fn gs_solve<'py>(
 
     let initial_phase = vec1(&initial_phase);
     let aper_amp = vec1(&aper_amp);
+    if let Some(s) = &support {
+        // u0 is built on the support only, so an amplitude off it would be dropped
+        // where Python's u0 = amp * exp(...) keeps it
+        if let Some(j) = (0..n).find(|&j| !s[j] && aper_amp[j] != 0.0) {
+            return Err(PyValueError::new_err(format!(
+                "aper_amp must be 0 off the support; aper_amp[{j}] = {}",
+                aper_amp[j]
+            )));
+        }
+        if amplitude == AmplitudeMode::Level {
+            // A0 * 1_support: one value on the support, which gs_core reads back
+            if let Some(j0) = (0..n).find(|&j| s[j]) {
+                if let Some(j) = (j0..n).find(|&j| s[j] && aper_amp[j].to_bits() != aper_amp[j0].to_bits()) {
+                    return Err(PyValueError::new_err(format!(
+                        "amplitude 'level' needs aper_amp to be one level on the support; \
+                         aper_amp[{j0}] = {} but aper_amp[{j}] = {}",
+                        aper_amp[j0], aper_amp[j]
+                    )));
+                }
+            }
+        }
+    }
     let freqs = vec1(&freqs);
     let rx_rows = rows(&rx_field);
     let w_rows = rows(&error_weighting);
@@ -143,10 +282,13 @@ pub fn gs_solve<'py>(
         lr0,
         bt_shrink,
         bt_tries,
+        amplitude,
+        power_penalty,
     };
 
     let (aper_f, res) = py.allow_threads(move || {
-        let support: Vec<bool> = aper_amp.iter().map(|&a| a > 0.0).collect();
+        let support: Vec<bool> =
+            support.unwrap_or_else(|| aper_amp.iter().map(|&a| a > 0.0).collect());
         let channels: Vec<ChannelData> = freqs
             .iter()
             .zip(rx_rows)
@@ -176,7 +318,8 @@ pub fn gs_solve<'py>(
             initial_phase
         };
         let res = gs_core(&start, &aper_amp, &support, &channels, &kernels, dx, &params, &mut conv);
-        let aper_f: Vec<Complex64> = aper_amp
+        let aper_f: Vec<Complex64> = res
+            .aper_amp
             .iter()
             .zip(&res.aper_phase)
             .map(|(&a, &p)| {
@@ -198,6 +341,8 @@ pub fn gs_solve<'py>(
         res.stop_reason.as_str().to_string(),
         PyArray1::from_vec_bound(py, res.loss_full),
         loss_pf.into_pyarray_bound(py),
+        res.final_mse,
+        res.power_ratio,
     ))
 }
 

@@ -1,0 +1,67 @@
+# MEASURED-DATA BASE CONFIG: what every measured THz-TDS acquisition shares. Not run
+# on its own: each configs/measured/<name>.yml names it as `base_config` and adds its
+# `measured` block (data_file: the spectra CSV topt-parser writes from the pulse
+# folder, the TX and RX edges in stage mm, amplitude_scale); anything else that file
+# sets is deep-merged over this one.
+#
+# There is no tx_aperture or rx_aperture block, and a measured config must not add
+# one: both are derived at run time from the measured block and the data
+# (rice_bend/measured.py), as is grid_search.aperture.width (the measured TX width).
+#
+# The solver is that of the 300 GHz campaign (configs/scenario_caustic_hit_1f_grid2l.yml).
+# The field is x -150..150 mm by z 0..400 mm in the solver frame (RX centre at 0, TX
+# above): the plot window, the scene's z range and the candidate grid. The
+# scene keeps x +-0.3 m (the propagation needs the lateral margin), its axes step by
+# exactly 0.25 mm (exact_step), and there is no simulated noise.
+
+sim_scene:
+  x_min: -0.3
+  x_max: 0.3
+  z_min: 0.0
+  z_max: 0.40              # (z_max - z_min) / spacing = 1600, whole as exact_step needs
+  spacing: 0.00025
+  exact_step: true         # axes at exactly k * 0.25 mm (x centred: x = 0 is a sample), so the
+                           # stage's 0.5 mm element positions are scene samples; the linspace
+                           # axis of the simulated configs steps by 0.250104 mm
+
+plot_path: measured.png
+
+# What the residual plots and --scenes show (metres, solver frame); --plot-window overrides.
+plot_window: {x_min: -0.15, x_max: 0.15, z_min: 0.0, z_max: 0.40}
+
+# A single tone: the joint solve reduces to the plain single-frequency MGS. Each
+# frequency must be a column of the data file (5 GHz steps up to 1 THz); 0 Hz is
+# refused (no wavelength).
+frequencies: [300.0e9]
+
+gerchberg_saxton:
+  init: backprop           # start every solve from the data: the measurement back-propagated to
+                           # the candidate plane (see scenario_caustic_hit_1f_grid2l.yml)
+  max_iters: 3000          # the cap of every solve; no grid_search.gs_overrides
+  convergence_count: 10
+  convergence_threshold: -1.0e-10
+  lr0: 0.05
+  bt_shrink: 0.5
+  bt_tries: 8
+  seed: 0
+  history_stride: 50
+
+output:
+  output_dir: results/measured
+  save_run: true
+  save_scene_fields: false
+  save_gs_history: false
+
+# The measured data carries its own receiver noise: none is added.
+noise:
+  snr_db: null
+  seed: 0
+
+# 201x151 = 30,351 grid points at exactly 2 mm in z and x, over the whole field (z 0..0.40 m).
+# The z = 0 row (the RX plane itself) and any row too close to the RX for the RS sampling
+# are skipped automatically (grid_sweep.enumerate_grid), with the reason in the log.
+grid_search:
+  z:        {min: 0.0, max: 0.40, num: 201}
+  x_center: {min: -0.15, max: 0.15, num: 151}
+  aperture: {width: 0.1, dx: 0.00025}   # width is overwritten by the measured TX width at load
+  seed: 0
