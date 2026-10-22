@@ -96,15 +96,15 @@
   "bt_shrink": 0.5,
   "bt_tries": 8,
   "level_start": 1.1273630252729268,
-  "final_loss": 0.06479217563094995,
+  "final_loss": 0.06454509186723428,
   "n_iters_run": 15,
   "stop_reason": "converged",
   "power_penalty": 1.0,
   "rx_power": 0.05693817861889654,
-  "final_mse": 0.06479217563094995,
+  "final_mse": 0.06454509186723428,
   "power_ratio": 1.0,
   "generated": "2026-10-22",
-  "commit": "70952912ab969a97bd911be6749ca1b1d925c750-dirty",
+  "commit": "998bb673bc049f651ab36306bc12254fec932bab-dirty",
   "numpy": "1.24.4",
   "scipy": "1.10.1"
  }

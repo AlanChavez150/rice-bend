@@ -995,9 +995,12 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
       same point as descend's start), moves by the MEAN over the support of the
       per-sample amplitude gradient, and takes the same joint backtracking step:
       each trial is psi - step*grad_psi with max(A - step*grad_A, 0) on the
-      support. Both engines (rust: RUST_AMPLITUDE_MODES); not with capture=True,
-      and not with several tones under init 'warm_start' (check_amplitude_mode:
-      it needs init: backprop).
+      support. That gradient back-propagates w^2 (prop - y), so its mean is the
+      exact slope of the weighted loss in A, where the phase and descend take
+      w (prop - y): under a tapered weighting the mean of the w-weighted one
+      can point the wrong way and stall the joint step. Both engines (rust:
+      RUST_AMPLITUDE_MODES); not with capture=True, and not with several tones
+      under init 'warm_start' (check_amplitude_mode: it needs init: backprop).
 
     The excess-power penalty (`params.power_penalty` = gamma, with 'descend' or
     'level'; refused with 'fixed'): the descent minimizes J = L * R**gamma, L the
@@ -1204,16 +1207,28 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
             # chain rule: d(theta_f)/d(psi) = rho_f
             grad_theta += rho[f] * (2.0 * np.imag(g_u0 * np.conj(u0)))
             if fit_amp:
-                # the amplitude's gradient from the SAME back-propagated residual:
-                # u0 = a * exp(1j*theta_f), so d/da takes the real part against the
-                # unit phasor where d/dtheta took the imaginary part against u0. No
-                # rho_f: the amplitude is one array shared by every tone. g_u0 carries
-                # ONE factor of the error weighting (r_cx = w*(prop - y)) where the
-                # exact gradient of the weighted loss has w^2; the amplitude keeps the
-                # phase's convention on purpose, so the two halves of the step stay
-                # scaled alike (with a 0/1 weighting both are exact, up to one constant)
-                grad_amp += 2.0 * np.real(
-                    g_u0 * np.conj(np.exp(1j * (rho[f] * curr_aper_phase))))
+                # the amplitude's gradient from a back-propagated residual: u0 =
+                # a * exp(1j*theta_f), so d/da takes the real part against the unit
+                # phasor where d/dtheta took the imaginary part against u0. No rho_f:
+                # the amplitude is one array shared by every tone. g_u0 carries ONE
+                # factor of the error weighting (r_cx = w*(prop - y)) where the exact
+                # gradient of the weighted loss has w^2 (with a 0/1 weighting the two
+                # agree). 'descend' keeps g_u0, the phase's convention, so the two
+                # halves of its step stay scaled alike. The level does not: it moves
+                # by ONE number, the mean of this gradient over the support, and under
+                # a tapered weighting (the measured data's, 0.40..1.77) the mean of the
+                # w*r gradient points against dL/dA in about half the cells; the joint
+                # step then raised the loss at every halving and the solve stalled,
+                # "converged", with the plate dimmed far below the power floor. So the
+                # level back-propagates w*r_cx (w^2 in all), whose mean is the exact
+                # slope (2N/n_sup) dL/dA: one more adjoint per tone, the phase as is
+                if level:
+                    g_w2 = rs.rs_apply(ch.error_weighting * r_cx, h_adj[f], dx)
+                    grad_amp += 2.0 * np.real(
+                        g_w2 * np.conj(np.exp(1j * (rho[f] * curr_aper_phase))))
+                else:
+                    grad_amp += 2.0 * np.real(
+                        g_u0 * np.conj(np.exp(1j * (rho[f] * curr_aper_phase))))
         # gradient of the MEAN loss: the divisor is n_freq, not 1. Summing instead
         # would silently rescale the effective lr0 by n_freq and change backtracking
         # accept rates, breaking step-size comparability with single-frequency runs.

@@ -95,12 +95,12 @@
   "lr0": 0.05,
   "bt_shrink": 0.5,
   "bt_tries": 8,
-  "level_start": 1.1359482519180621,
-  "final_loss": 0.07292682875870798,
+  "level_start": 1.1273630252729268,
+  "final_loss": 0.07295848423320128,
   "n_iters_run": 12,
   "stop_reason": "converged",
-  "generated": "2026-10-20",
-  "commit": "75e5255f9a1ec30d1eb0520430765a490c467ea4-dirty",
+  "generated": "2026-10-22",
+  "commit": "998bb673bc049f651ab36306bc12254fec932bab-dirty",
   "numpy": "1.24.4",
   "scipy": "1.10.1"
  }

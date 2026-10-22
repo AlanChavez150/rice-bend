@@ -1169,10 +1169,14 @@ elements of every tone, unweighted (a start that reaches no element falls back t
 The descent then moves A by the **mean** over the window of the per-sample amplitude
 gradient (the exact gradient is the sum, n_window times larger; the mean keeps A's steps
 the size of one sample's under `descend`), clamped at 0, in the same backtracking step as
-the phase. `aper_profile` carries the level, and the `gs` blocks record `amplitude:
-level` (no `amp_max`). It runs on both engines (rust is parity-checked against python,
-see rust/README.md), is refused where `descend` is (`mgs`), and its `--true-mgs` is the
-same candidate-style solve at the TX.
+the phase. That per-sample gradient back-propagates the residual weighted **twice**,
+w²(p − y), the exact slope of the weighted loss, where the phase and `descend` keep
+w(p − y): under a tapered weighting (the measured data's) the mean of the singly
+weighted gradient points the wrong way in about half the cells, and the joint step
+stalled with the plate dimmed far below the power floor. `aper_profile` carries the
+level, and the `gs` blocks record `amplitude: level` (no `amp_max`). It runs on both
+engines (rust is parity-checked against python, see rust/README.md), is refused where
+`descend` is (`mgs`), and its `--true-mgs` is the same candidate-style solve at the TX.
 With several tones it needs `init: backprop`: the legacy warm start would match A0 to
 the seeded random phase, which lands it on a wrong level (8.33 against a true 3.7), so
 `grid-search-mgs` refuses that pairing before the sweep. One tone under `warm_start`

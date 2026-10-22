@@ -66,14 +66,32 @@
 //! ONE level A >= 0 over the support, shared by every tone. The plate is always
 //! A * 1_support; its start A0 (mgs._power_matched_level, computed in Python)
 //! arrives as aper_amp = A0 on the support, and A is read back from any support
-//! sample (A0 * 1.0 is A0 exactly). The per-sample grad_a is built exactly as for
-//! Descend (/= F, zeroed off the support), then
+//! sample (A0 * 1.0 is A0 exactly). The per-sample grad_a is built as for Descend
+//! (/= F, zeroed off the support), but from the residual weighted TWICE: per
+//! channel f, after g (which the phase gradient keeps),
+//!
+//!   r2[j]       = w[f][j] * r[j]                // whole axis; numpy real * complex
+//!   g2          = rs_apply(r2, h_adj[f])        // QUANTIZED c64, as g
+//!   grad_a[j]  += 2.0 * Re(g2[j] * conj(e[j]))
+//!
+//! then
 //!
 //!   grad_A  = np.mean(grad_a[support])         // np_mean_f64, support in order
 //!   A_trial = np.clip(A - step * grad_A, 0, inf)   // NaN passes through
 //!   a_trial = A_trial on the support, 0 off it
 //!
 //! and an accepted trial sets A = A_trial and a = a_trial along with psi.
+//!
+//! Why w^2 r: g carries ONE factor of the error weighting (the solver's convention,
+//! the exact slope only for a 0/1 weighting, where w = w^2), and the phase and
+//! descend's per-sample amplitude keep it. The level is one scalar, the mean of that
+//! gradient over the support, and under a tapered weighting (the measured row's
+//! w = sqrt(2)(|y|/max + 0.25), 0.40..1.77) the mean of the w r gradient has the
+//! wrong sign against dL/dA in about half the cells: the joint step then raised L at
+//! every halving, nothing was accepted, and the flatness rule stopped the solve
+//! "converged" with the plate dimmed far below the power floor. With w^2 r,
+//! grad_A = (2N / n_sup) dL/dA exactly. The cost is one more adjoint per tone per
+//! iteration, under 'level' only.
 //!
 //! ## Excess-power penalty (`power_penalty`, SolveParams::power_penalty)
 //!
@@ -102,9 +120,10 @@
 //!   descend:  coef = (4.0 * gamma * L * N * dx) / P_plate
 //!             grad_a[j] += coef * a[j]                      // support samples
 //!
-//! with N = conv.n_signal. (grad_a is 2N * dL/da_j in the solver's convention,
-//! and (gamma L / R) dR/da_j = 2 gamma L a_j dx / P_plate; grad_A is
-//! (2N / n_sup) dL/dA, and (gamma L / R) dR/dA = 2 gamma L / A.) Each trial
+//! with N = conv.n_signal. (descend's grad_a is 2N * dL/da_j in the solver's
+//! one-w convention, and (gamma L / R) dR/da_j = 2 gamma L a_j dx / P_plate; the
+//! level's grad_A is (2N / n_sup) dL/dA exactly, from w^2 r, and (gamma L / R) dR/dA
+//! = 2 gamma L / A, so the clamp's d_minus and t below are on one scale.) Each trial
 //! computes trial_plain = mean(trial_pf), R_trial from ITS amplitude (a_trial /
 //! A_trial) and J_trial = trial_plain * R_trial^gamma; accept iff J_trial < J
 //! (strict, first win), and the accept also carries trial_plain and R_trial over
@@ -182,19 +201,30 @@ use crate::conv::{Convolver, KernelSpectrum};
 use crate::npmath::{np_clip, np_mean_f64, np_sum_f32, np_sum_f64};
 use crate::types::{AmplitudeMode, ChannelData, CoreResult, KernelPair, SolveParams, StopReason};
 
-/// Preallocated per-solve work buffers: the loop body allocates nothing.
+/// Preallocated per-solve work buffers: the loop body allocates nothing. r2 / g2
+/// are the level's w * r and its back-propagation (written under 'level' only).
 struct Work {
     u0: Vec<Complex64>,
     prop: Vec<Complex64>,
     r: Vec<Complex64>,
     abs2: Vec<f64>,
     g: Vec<Complex64>,
+    r2: Vec<Complex64>,
+    g2: Vec<Complex64>,
 }
 
 impl Work {
     fn new(n: usize) -> Self {
         let z = Complex64::new(0.0, 0.0);
-        Work { u0: vec![z; n], prop: vec![z; n], r: vec![z; n], abs2: vec![0.0; n], g: vec![z; n] }
+        Work {
+            u0: vec![z; n],
+            prop: vec![z; n],
+            r: vec![z; n],
+            abs2: vec![0.0; n],
+            g: vec![z; n],
+            r2: vec![z; n],
+            g2: vec![z; n],
+        }
     }
 }
 
@@ -359,9 +389,22 @@ pub fn gs_core(
                 grad[j] += ch.rho * (2.0 * im);
             }
             if fit_amp {
+                if level {
+                    // the level's gradient back-propagates w * r (w^2 on the residual,
+                    // the exact slope; the module doc), over the WHOLE axis as numpy
+                    // multiplies the whole array: real * complex is (w re, w im)
+                    for j in 0..n {
+                        let w = ch.error_weighting[j];
+                        let r = work.r[j];
+                        work.r2[j] = Complex64::new(w * r.re, w * r.im);
+                    }
+                    conv.rs_apply_into(&work.r2, &kp.adj, dx, &mut work.g2);
+                }
+                // descend keeps g (one w, the phase's convention)
+                let g_src: &[Complex64] = if level { &work.g2 } else { &work.g };
                 for &j in &support_idx {
                     // real(g * conj(e)), in numpy's complex-multiply operand order
-                    let (g, e) = (work.g[j], phasor[j]);
+                    let (g, e) = (g_src[j], phasor[j]);
                     let re = g.re * e.re - g.im * (-e.im);
                     grad_amp[j] += 2.0 * re;
                 }

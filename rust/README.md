@@ -75,11 +75,17 @@ call.
 **The uniform level** (`gerchberg_saxton.amplitude: level`, no cap; added
 2026-10-20) runs on both engines too (`AmplitudeMode::Level`). The plate is ONE
 level A ≥ 0 on the support, shared by every tone. The per-sample amplitude
-gradient is built as under 'descend'; A moves by its mean over the support
-(`np_mean_f64`, support samples in order), clipped at 0 with no upper bound
-(`np_clip(A − step·∇A, 0, ∞)`), in the same joint backtracking step as psi. The
-start A0 (`mgs._power_matched_level`) is computed in Python before the dispatch
-and crosses exactly as a0 does, as `aper_amp`: A0 on the support and 0 off it.
+gradient is built as under 'descend', but from the residual weighted twice (below);
+A moves by its mean over the support (`np_mean_f64`, support samples in order),
+clipped at 0 with no upper bound (`np_clip(A − step·∇A, 0, ∞)`), in the same joint
+backtracking step as psi. The level back-propagates w·r = w²(prop − y) (one more
+adjoint per tone, `Work::r2` / `g2`), whose mean is the exact slope
+(2N/n_sup)·dL/dA, where the phase and 'descend' keep r: under the measured row's
+tapered weighting the mean of the singly weighted gradient points against dL/dA in
+about half the cells, and the joint step stalled with the plate far below the power
+floor (2026-10-22). The start A0 (`mgs._power_matched_level`) is computed in
+Python before the dispatch and crosses exactly as a0 does, as `aper_amp`: A0 on
+the support and 0 off it.
 Rust reads A0 back from any support sample, since A0·1.0 is A0 bit for bit, and
 the boundary checks that the plate is one value there. It also needs the support,
 as 'descend' does. **Several tones under `init: warm_start` are refused** on both
