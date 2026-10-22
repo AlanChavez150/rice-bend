@@ -1192,10 +1192,17 @@ the receiver is not rewarded (an unfloored L · R would collapse onto dark plate
 the penalty only charges the excess. It needs a fitted amplitude and runs with
 `amplitude: level` and `amplitude: descend`; with `fixed` (where P_plate is the same
 for every solve) it is refused. The descent direction is ∇J / R^gamma: the phase
-gradient is unchanged and the amplitude gradient gains one term where R > 1. Both
-engines run it with the same recipe (python computes P_rx and hands it to rust; parity
-in rust/README.md). `final_loss` (and the loss curve) is then J, the number that ranks
-candidates, while `per_freq_losses` stay the plain per-tone losses;
+gradient is unchanged and the amplitude gradient gains one term where R > 1. Under
+`level` that makes the floor (P_plate = P_rx) a kink of J in A, and where the slopes on
+its two sides bracket zero the kink is J's minimum: a plain step for the level crossed
+it from either side, the joint step was rejected at every halving, and the flat loss
+stopped the solve as "converged" with J 1.5-4.5x too high (96% of the row-177 / 120 mm
+cells). There the level's step is stopped at the floor, from above or below, so the
+level can sit on the floor while the phase keeps descending (`level` only; `descend`
+keeps the plain term). Both engines run it with the same recipe (python computes P_rx
+and hands it to rust; parity in rust/README.md). `final_loss` (and the loss curve) is
+then J, the number that ranks candidates, while `per_freq_losses` stay the plain
+per-tone losses;
 `candidate_beams.json`'s `gs` block records `power_penalty` (only when set), and
 every candidate entry, `cand_####.json` and `true_mgs.json`'s `solve` block carry
 `final_mse` (the plain L) and `power_ratio` (R; null without the penalty). Residual

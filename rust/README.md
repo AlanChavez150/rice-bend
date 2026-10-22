@@ -111,7 +111,16 @@ phase gradient is untouched. The amplitude gradient gains one term when R > 1,
 added after the mean over the tones (and, for the level, after the mean over the
 support); the expressions and their evaluation order are in the `src/solve.rs`
 module doc. Each backtracking trial takes R from its own amplitude and is accepted
-on a strict decrease of J. `loss_full` and `final_loss` are then J, while
+on a strict decrease of J. Under 'level' J has a kink in A at the floor
+A_floor = √(P_rx/(n_sup·dx)), where R leaves 1; on the measured row-177 grid the
+level reached it in 96% of the cells within a few iterations, after which its
+step kept crossing the floor, the joint step was rejected at every halving and
+the flatness rule reported a false "converged" with J 1.5–4.5× too high. So
+when J's one-sided slopes in A bracket zero (∇A < 0 < ∇A plus the penalty's
+term), the level's step is stopped at the floor from the side it is on, and the
+level can sit there while the phase keeps descending; elsewhere the gradient is
+the one above, bit for bit. This clamp is part of the penalty under 'level'
+(no flag); 'descend' keeps the plain penalty. `loss_full` and `final_loss` are then J, while
 `final_loss_per_freq` and `loss_full_per_freq` stay the plain per-tone losses.
 The return tuple grows by two at the end: `final_mse`, the post-accept L (equal
 to `final_loss` with the penalty off), and `power_ratio`, the post-accept R (None

@@ -1012,8 +1012,11 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
     the final iterate. The descent direction is grad J scaled by 1/R**gamma: the
     phase gradient as without the penalty, the amplitude gradient with one more
     term, (gamma L / R) dR/da in the solver's gradient convention, added only
-    where R > 1. Both engines; rust receives P_rx as computed here. Off (None),
-    not one operation of the loop changes.
+    where R > 1. Under `level` the floor is a kink of J in A; where its two
+    one-sided slopes bracket zero the level's step is stopped AT the floor
+    instead (the clamp in the loop), so the level can hold there while the
+    phase keeps descending. Both engines; rust receives P_rx as computed here.
+    Off (None), not one operation of the loop changes.
     """
     check_amplitude_mode(params, capture=capture, n_tones=len(channels))
     if capture and params.engine == "rust":
@@ -1116,7 +1119,8 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
     # once HERE and handed to rust as it is, so both engines charge against the one
     # number. n_scene / n_sup are the convention constants of the amplitude
     # gradient (grad_amp_j = 2N dL/da_j; the level's mean over the support adds
-    # 1/n_sup), cast once
+    # 1/n_sup), cast once. a_floor is the level at which P_plate = P_rx, where R
+    # leaves 1 (the level clamp in the loop stops the level's step there)
     gamma = params.power_penalty
     penalized = gamma is not None
     rx_power = None
@@ -1129,6 +1133,8 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
                 "non-finite measurement there)")
         n_scene = float(size)
         n_sup = float(np.count_nonzero(support))
+        if level:
+            a_floor = math.sqrt(rx_power / (n_sup * dx))
 
     if params.engine == "rust":
         # the backprop start goes over as the phase to descend from ('random': used
@@ -1173,6 +1179,7 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
     n_iters_run = max_iters
     hist_error = np.zeros(max_iters, np.float32)
     hist_error_pf = np.zeros((max_iters, n_freq), np.float32)
+    aim_floor = False  # the level clamp (penalty under 'level'); never set otherwise
     for iter_idx in range(max_iters):
         # propogate aperature guess to measurement plane, once per frequency. A
         # python loop over channels, NOT a batched 2D fftconvolve: rs() benchmarked
@@ -1230,20 +1237,40 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
             # direction is grad J / R**gamma: the phase's gradient unchanged, the
             # amplitude's plus (gamma L / R) dR/da in the convention above, which is
             # 2 gamma L / A (level) and 2 gamma L a_j dx / P_plate (descend), times
-            # 2N (and 1/n_sup for the level's mean). Nothing to add where R == 1:
-            # the floor is flat. Evaluated in this order on both engines
+            # 2N (and 1/n_sup for the level's mean); nothing where R == 1.
+            # Evaluated in this order on both engines.
+            #
+            # Under 'level' that makes a_floor a KINK of J in A: slope d_minus (the
+            # plain gradient) just below it, d_plus = d_minus + t_pen just above.
+            # When the two bracket zero the kink is J's minimum in A, and a plain
+            # step for the level crosses it from either side; J rises on both, the
+            # JOINT step is rejected at every halving, and the flat loss reads as
+            # "converged" with J well above what the phase alone could still reach.
+            # So there the level's step is stopped AT the floor (aim_floor, in the
+            # trial) and the phase keeps descending; anywhere else t_pen is added as
+            # above. t_pen is guarded at A == 0 (no kink below it)
             loss_plain = loss_pf.mean()
             if level:
                 p_plate = (amp_level * amp_level) * float(n_sup) * dx
             else:
                 p_plate = np.add.reduce(curr_aper_amp[support] ** 2) * dx
             ratio = max(1.0, p_plate / rx_power)
-            if ratio > 1.0:
-                if level:
-                    grad_level += (4.0 * gamma * loss_plain * n_scene) / (amp_level * n_sup)
+            aim_floor = False
+            if level:
+                if amp_level > 0.0:
+                    t_pen = (4.0 * gamma * loss_plain * n_scene) / (amp_level * n_sup)
                 else:
-                    coef = (4.0 * gamma * loss_plain * n_scene * dx) / p_plate
-                    grad_amp[support] += coef * curr_aper_amp[support]
+                    t_pen = math.inf
+                d_minus = grad_level
+                d_plus = grad_level + t_pen
+                if d_minus < 0.0 < d_plus:
+                    aim_floor = True
+                    above = p_plate > rx_power  # the side of the floor the level is on
+                elif ratio > 1.0:
+                    grad_level += t_pen
+            elif ratio > 1.0:
+                coef = (4.0 * gamma * loss_plain * n_scene * dx) / p_plate
+                grad_amp[support] += coef * curr_aper_amp[support]
             loss = loss_plain * ratio ** gamma
         else:
             loss = loss_pf.mean()
@@ -1264,8 +1291,18 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
                 amp_trial[~support] = 0.0
             elif level:
                 # the level takes the same step, kept >= 0 by descend's clip with no
-                # upper bound (numpy's clip: a NaN passes through, as in descend)
-                level_trial = float(np.clip(amp_level - step * grad_level, 0.0, np.inf))
+                # upper bound (numpy's clip: a NaN passes through, as in descend).
+                # At the kink (aim_floor) it steps down the slope of its own side and
+                # stops AT a_floor, never across it: a halved step that falls short
+                # of the floor is an ordinary one, and on the floor the level holds
+                # while the phase steps
+                if aim_floor:
+                    if above:
+                        level_trial = float(max(amp_level - step * d_plus, a_floor))
+                    else:
+                        level_trial = float(min(amp_level - step * d_minus, a_floor))
+                else:
+                    level_trial = float(np.clip(amp_level - step * grad_level, 0.0, np.inf))
                 amp_trial = level_trial * unit_support
             trial_pf = np.empty(n_freq, dtype=np.float64)
             for f, ch in enumerate(channels):

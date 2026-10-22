@@ -110,6 +110,28 @@
 //! (strict, first win), and the accept also carries trial_plain and R_trial over
 //! as the current L and R.
 //!
+//! The level at the floor. Under 'level' J has a kink in A at the floor
+//! a_floor = (rx_power / (n_sup as f64 * dx)).sqrt() (computed once per solve),
+//! where R leaves 1. J's one-sided slopes there are d_minus = grad_A (below) and
+//! d_plus = grad_A + t, t the level's term above (+inf at A == 0, which has no
+//! kink below it). When d_minus < 0 < d_plus the kink is J's minimum in A, and a
+//! plain step for A keeps crossing it: J rises on either side by more than the
+//! phase step brings it down, every halving is rejected, and the flatness rule
+//! stops the solve as "converged" with J far above its value at the floor. So,
+//! when the slopes bracket zero, t is NOT added and the level's trial is stopped
+//! AT the floor from the side it is on:
+//!
+//!   above   = P_plate > rx_power
+//!   A_trial = if above { (A - step * d_plus).max(a_floor) }
+//!             else       { (A - step * d_minus).min(a_floor) }
+//!
+//! At the floor (A == a_floor, not above) the trial is a_floor: the level holds
+//! and the phase alone steps. A halved step that falls short of the floor is an
+//! ordinary gradient step, and a clamped trial is accepted or rejected on J like
+//! any other. Otherwise t is added when R > 1, as above, the same expression, so
+//! the gradient is bit-identical wherever the rule does not fire. Descend keeps
+//! the plain penalty (no clamp).
+//!
 //! Off (None): not one operation added or reordered. The loop branches on the
 //! Option; it never multiplies by a factor of 1.0. Under AmplitudeMode::Fixed the
 //! penalty is ignored: the boundary refuses it there (R would be a constant of the
@@ -283,6 +305,17 @@ pub fn gs_core(
     let mut power_sq = Vec::with_capacity(if penalty.is_some() && !level { n_sup } else { 0 });
     let mut loss_plain = f64::NAN;
     let mut ratio = f64::NAN;
+    // the level's floor under the penalty, where R leaves 1 (the module doc's "level
+    // at the floor"), and the per-iteration state of its clamp: whether this
+    // iteration's trial aims at the floor, from which side, and J's slopes in A
+    // below / above it. Untouched (aim_floor stays false) without level && penalty
+    let a_floor = match penalty {
+        Some(pp) if level => (pp.rx_power / (n_sup as f64 * dx)).sqrt(),
+        _ => f64::NAN,
+    };
+    let mut aim_floor = false;
+    let mut above = false;
+    let (mut d_minus, mut d_plus) = (f64::NAN, f64::NAN);
     // the fitted modes' buffers (empty under Fixed). amp_trial is never written off
     // the support, so it stays 0 there: a_trial[!support] = 0, as in mgs.py
     let (mut grad_amp, mut amp_trial, mut phasor) = if fit_amp {
@@ -361,14 +394,31 @@ pub fn gs_core(
                 descend_power(&amp, &support_idx, &mut power_sq, dx)
             };
             ratio = (p_plate / pp.rx_power).max(1.0);
-            if ratio > 1.0 {
-                if level {
-                    grad_level += (4.0 * pp.gamma * loss_plain * n_scene) / (amp_level * n_sup as f64);
+            aim_floor = false;
+            if level {
+                // J's slopes in A just below the floor (the plain gradient) and just
+                // above it (plus the penalty's term; A == 0 has no kink below it).
+                // When they bracket zero the kink is the minimum in A, and a plain
+                // step keeps jumping across it: the joint step is then rejected at
+                // every halving and the solve stalls into a false "converged". The
+                // trial below stops the level AT the floor instead, and no term is added
+                let t_pen = if amp_level > 0.0 {
+                    (4.0 * pp.gamma * loss_plain * n_scene) / (amp_level * n_sup as f64)
                 } else {
-                    let coef = (4.0 * pp.gamma * loss_plain * n_scene * dx) / p_plate;
-                    for &j in &support_idx {
-                        grad_amp[j] += coef * amp[j];
-                    }
+                    f64::INFINITY
+                };
+                d_minus = grad_level;
+                d_plus = grad_level + t_pen;
+                if d_minus < 0.0 && 0.0 < d_plus {
+                    aim_floor = true;
+                    above = p_plate > pp.rx_power;
+                } else if ratio > 1.0 {
+                    grad_level += t_pen;
+                }
+            } else if ratio > 1.0 {
+                let coef = (4.0 * pp.gamma * loss_plain * n_scene * dx) / p_plate;
+                for &j in &support_idx {
+                    grad_amp[j] += coef * amp[j];
                 }
             }
             loss = loss_plain * ratio.powf(pp.gamma);
@@ -393,8 +443,19 @@ pub fn gs_core(
                     amp_trial[j] = np_clip(amp[j] - step * grad_amp[j], 0.0, cap);
                 }
             } else if level {
-                // the level's step, kept >= 0 with no cap (level_trial * 1_support)
-                level_trial = np_clip(amp_level - step * grad_level, 0.0, f64::INFINITY);
+                // the level's step, kept >= 0 with no cap (level_trial * 1_support).
+                // Aiming at the floor, the step on the level's side of it (d_plus
+                // above, d_minus below) is stopped AT the floor, never across it: at
+                // the floor the level holds and the phase alone steps
+                level_trial = if aim_floor {
+                    if above {
+                        (amp_level - step * d_plus).max(a_floor)
+                    } else {
+                        (amp_level - step * d_minus).min(a_floor)
+                    }
+                } else {
+                    np_clip(amp_level - step * grad_level, 0.0, f64::INFINITY)
+                };
                 for &j in &support_idx {
                     amp_trial[j] = level_trial;
                 }
