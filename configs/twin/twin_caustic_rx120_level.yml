@@ -1,0 +1,14 @@
+# TWIN of the measured 120 mm receiver run (twin_caustic_rx120.yml: ideal caustic, rx_peak
+# amplitude, 30 dB), solved with ONE uniform plate level fitted with the phase
+# (gerchberg_saxton.amplitude: level), the plain weighted-MSE objective: the control for
+# twin_caustic_rx120_level_pp1.yml (the same solve with the excess-power penalty inside the
+# descent), the twin of the measured pair rx177_level_w120.yml / rx177_level_w120_pp1.yml.
+# Everything else (scene, TX, RX, noise, grid, 6000 iterations, backprop start) is the base's.
+
+base_config: twin_caustic_rx120.yml
+
+gerchberg_saxton:
+  amplitude: level
+  amp_max: null                 # the level has no cap (refused with one)
+
+output: {run_name: twin_caustic_rx120_level}

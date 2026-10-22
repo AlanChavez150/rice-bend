@@ -1,0 +1,16 @@
+# TWIN of the measured 120 mm receiver run (twin_caustic_rx120.yml: ideal caustic, rx_peak
+# amplitude, 30 dB), UNIFORM LEVEL + EXCESS-POWER PENALTY: identical to
+# twin_caustic_rx120_level.yml except for the objective, J = L * max(1, P_plate / P_rx) **
+# power_penalty (L the weighted MSE, P_plate the power leaving the candidate's uniform plate,
+# P_rx the power on the RX elements), so a plate that emits more power than the receiver
+# collects pays for it inside the solve. power_penalty 1.0 = gamma 1, as the measured
+# rx177_level_w120_pp1.yml. final_loss is J; final_mse the plain L; power_ratio the R.
+
+base_config: twin_caustic_rx120.yml
+
+gerchberg_saxton:
+  amplitude: level
+  amp_max: null                 # the level has no cap (refused with one)
+  power_penalty: 1.0            # gamma of the excess-power factor in the objective
+
+output: {run_name: twin_caustic_rx120_level_pp1}
