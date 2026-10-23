@@ -1,0 +1,22 @@
+# RECEIVER-SIZE STUDY, FULL pass (2 mm grid, base.yml), UNIFORM LEVEL + EXCESS-POWER PENALTY,
+# WHOLE SCANNED ROW as the receiver: stage x 50..250 (200 mm, 401 elements), still ONE row.
+# The twin of rx177_level_w120_pp1.yml with the receiver widened from 95..215 to the full row,
+# so the fit also has to match the pass-through under the plate (stage 85..95) and the dark
+# far side, which the 120 mm receiver never sees. Frame: x_sim = (x - 150) mm, so the plate's
+# radiating region 89..189 is centred at x_sim -11 mm and the nominal 85..185 at -15 mm.
+# amplitude_scale is the row's 1 / max|V| (the peak is at x = 209 mm, inside both receivers).
+
+base_config: ../base.yml
+
+measured:
+  data_file: ~/Desktop/experiments/topt_spectra.csv
+  tx_aperture: {left: {x: 85, z: -65}, right: {x: 185, z: -65}}
+  rx_aperture: {left: {x: 50, z: 177}, right: {x: 250, z: 177}}
+  amplitude_scale: 0.0081728    # 1 / max|V| on this row (peak 122.356 at x = 209 mm)
+
+gerchberg_saxton:
+  amplitude: level
+  power_penalty: 1.0            # gamma of the excess-power factor in the objective
+  max_iters: 6000
+
+output: {run_name: rxsize_rx177_level_w200_pp1}
