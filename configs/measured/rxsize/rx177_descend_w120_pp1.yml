@@ -1,0 +1,22 @@
+# RECEIVER-SIZE STUDY, FULL pass (2 mm grid, base.yml), FREE AMPLITUDE (descend, cap 10) +
+# EXCESS-POWER PENALTY, 120 mm RX: rx177_w120.yml's solve (the per-sample amplitude fitted
+# with the phase) with the objective J = L * max(1, P_plate / P_rx) ** power_penalty, gamma 1,
+# as rx177_level_w120_pp1.yml has for the uniform level. Asks whether the uniform-level
+# constraint is what keeps the measured truth cell 24x above the best cell: the real plate
+# is not uniform (bright right edge, straight-through leak), a free amplitude can be.
+
+base_config: ../base.yml
+
+measured:
+  data_file: ~/Desktop/experiments/topt_spectra.csv
+  tx_aperture: {left: {x: 85, z: -65}, right: {x: 185, z: -65}}
+  rx_aperture: {left: {x: 95, z: 177}, right: {x: 215, z: 177}}
+  amplitude_scale: 0.0081728    # 1 / max|V| on this RX (peak 122.356 at x = 209 mm)
+
+gerchberg_saxton:
+  amplitude: descend
+  amp_max: 10.0
+  power_penalty: 1.0            # gamma of the excess-power factor in the objective
+  max_iters: 6000
+
+output: {run_name: rxsize_rx177_descend_w120_pp1}
