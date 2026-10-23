@@ -59,6 +59,7 @@ pub struct SolveParams {
     /// Window of recent losses checked for flatness (`convergence_count`).
     pub convergence_count: usize,
     /// Converged when mean(diff(recent f32 losses)) > this value (compared in f64).
+    /// Ignored when `convergence_rel` is set.
     pub convergence_threshold: f64,
     /// Initial backtracking step size.
     pub lr0: f64,
@@ -71,6 +72,14 @@ pub struct SolveParams {
     /// `power_penalty` (+ the received power); None (the default) is the plain
     /// joint loss, every operation of the solve bit-identical to a build without it.
     pub power_penalty: Option<PowerPenalty>,
+    /// `convergence_rel`, the relative stop rule (finite and > 0, checked at the
+    /// boundary). When set it REPLACES the absolute test and convergence_threshold
+    /// is ignored: on an f64 history of the same pre-step objective, converged when
+    /// the window's last value r <= 0 or mean(diff(window)) / r > -convergence_rel
+    /// (solve.rs, "Convergence test"). An absolute threshold has units of loss and
+    /// means a different thing in every cell. None (the default) is the absolute
+    /// rule, every operation of the solve bit-identical to a build without it.
+    pub convergence_rel: Option<f64>,
 }
 
 /// Why the solve stopped. String forms must match mgs.py exactly: the values land

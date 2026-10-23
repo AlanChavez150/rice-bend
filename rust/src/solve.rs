@@ -172,6 +172,24 @@
 //! complex exp/abs are not mirrored (1-2 ulp) — so the parity bar keeps n_iters
 //! report-only.
 //!
+//! The relative variant (`convergence_rel`, SolveParams::convergence_rel). The
+//! threshold above has units of loss: on a valley floor (J ~ 2e-5) it stops cells
+//! before the ranking is decided, on a wall (J ~ 7e-3) f32 spacing (~5e-10) makes it
+//! fire on quantization. With Some(tol) the absolute test is REPLACED
+//! (convergence_threshold ignored), run at the same place under the same
+//! iter_idx > convergence_count, on an f64 history `hist64` of the same pre-step
+//! objective the f32 history records (stored beside it, never read back at f32):
+//!
+//!   w         = hist64[iter_idx - convergence_count .. iter_idx]  // current excluded
+//!   mean_diff = np_mean_f64(diff(w))     // p[1] - p[0]; numpy's pairwise sum / n
+//!   r         = hist64[iter_idx - 1]     // w[-1]
+//!   converged iff r <= 0.0 || mean_diff / r > -tol
+//!
+//! with the same Converged / n_iters_run = iter_idx + 1. A NaN fails both
+//! comparisons and runs to max_iters, as under the absolute rule. Off (None): the
+//! loop branches on the Option and runs the absolute block verbatim; hist64 stays
+//! empty and no floating-point operation is added or reordered.
+//!
 //! ## What is returned
 //!
 //! final_loss / final_loss_per_freq are the POST-accept values of the last
@@ -363,6 +381,11 @@ pub fn gs_core(
     let mut hist = vec![0.0f32; params.max_iters];
     let mut hist_pf = vec![0.0f32; params.max_iters * n_freq];
     let mut diffs = Vec::with_capacity(params.convergence_count);
+    // the relative stop rule's f64 history of the same pre-step objective and its
+    // window diffs, both empty when the rule is off (the absolute rule reads hist)
+    let rel = params.convergence_rel.is_some();
+    let mut hist64 = vec![0.0f64; if rel { params.max_iters } else { 0 }];
+    let mut diffs64: Vec<f64> = Vec::with_capacity(if rel { params.convergence_count } else { 0 });
 
     let mut stop_reason = StopReason::MaxIters;
     let mut n_iters_run = params.max_iters;
@@ -467,6 +490,9 @@ pub fn gs_core(
             loss = loss_plain * ratio.powf(pp.gamma);
         }
         hist[iter_idx] = loss as f32;
+        if rel {
+            hist64[iter_idx] = loss;
+        }
         for f in 0..n_freq {
             hist_pf[iter_idx * n_freq + f] = loss_pf[f] as f32;
         }
@@ -552,16 +578,35 @@ pub fn gs_core(
             step *= params.bt_shrink;
         }
 
-        // convergence: mean(diff(recent f32 losses)), in f32, current index excluded
+        // convergence: the absolute rule, or the relative one when convergence_rel is set
         let count = params.convergence_count;
         if iter_idx > count {
-            diffs.clear();
-            diffs.extend(hist[iter_idx - count..iter_idx].windows(2).map(|p| p[1] - p[0]));
-            let flatness = np_sum_f32(&diffs) / diffs.len() as f32;
-            if f64::from(flatness) > params.convergence_threshold {
-                stop_reason = StopReason::Converged;
-                n_iters_run = iter_idx + 1;
-                break;
+            match params.convergence_rel {
+                None => {
+                    // convergence: mean(diff(recent f32 losses)), in f32, current index excluded
+                    diffs.clear();
+                    diffs.extend(hist[iter_idx - count..iter_idx].windows(2).map(|p| p[1] - p[0]));
+                    let flatness = np_sum_f32(&diffs) / diffs.len() as f32;
+                    if f64::from(flatness) > params.convergence_threshold {
+                        stop_reason = StopReason::Converged;
+                        n_iters_run = iter_idx + 1;
+                        break;
+                    }
+                }
+                Some(tol) => {
+                    // the relative rule (module doc): the same window on the f64
+                    // history, its mean drop per iteration against the window's last
+                    // value. r <= 0 has nothing left to descend
+                    diffs64.clear();
+                    diffs64.extend(hist64[iter_idx - count..iter_idx].windows(2).map(|p| p[1] - p[0]));
+                    let mean_diff = np_mean_f64(&diffs64);
+                    let r = hist64[iter_idx - 1];
+                    if r <= 0.0 || mean_diff / r > -tol {
+                        stop_reason = StopReason::Converged;
+                        n_iters_run = iter_idx + 1;
+                        break;
+                    }
+                }
             }
         }
     }

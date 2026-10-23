@@ -1238,6 +1238,21 @@ experimental paths, which have no simulated plate.
 `configs/twin/twin_caustic_rx120.yml` is the measured 120 mm run's simulated twin with
 `rx_peak` and `amplitude: descend`.
 
+**Relative stop rule (`gerchberg_saxton.convergence_rel`).** The default test stops a
+solve when the mean step of its last `convergence_count` losses rises above
+`convergence_threshold`, a number in units of loss: on a deep valley floor (J ~ 2e-5 on
+measured row 177) it stops cells before the ranking is decided, and on a high wall
+(J ~ 7e-3) float32 spacing makes it fire on quantization. With `convergence_rel: tol`
+(finite, > 0; default null = off) the same window is judged relative to its latest loss
+r, on a float64 copy of the history: converged when r <= 0 or mean(diff(window)) / r >
+-tol, i.e. the loss falls by less than the fraction tol per iteration. It replaces the
+absolute test (`convergence_threshold` is then ignored), the test itself does not care
+about the loss's scale (the absolute one does: see `tx_aperture.amplitude` above), and
+both engines run it.
+`candidate_beams.json`, `true_mgs.json` and `run.json` record `convergence_rel` in
+their `gs` / `gerchberg_saxton` block only when set. Runs under different stop rules
+are not comparable: they stop the same cell at different iterations.
+
 **Only the RX aperture's data is used**, for the solve and for anything computed from
 the data (the logged |V| statistics). The rest of the CSV is only scanned for its rows'
 `Z`, to check the RX row against.

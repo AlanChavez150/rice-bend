@@ -90,6 +90,15 @@ radiates less than P_rx, the ratio never leaves its floor at 1 (0 iterations
 above it, measured) and the slice would be the unpenalized one to the bit.
 final_loss is then the objective J = L * R, which is what the bar compares.
 
+The RELATIVE STOP RULE slice (gerchberg_saxton.convergence_rel 1e-6, set in
+memory; it replaces the absolute convergence_threshold) crosses as one scalar
+more. The measured row's simulated twin
+(configs/twin/twin_caustic_rx120_level_pp1.yml as written: backprop, level,
+power_penalty 1, 6000 iterations, 30 dB noise) at four candidates near its true TX
+-- (z, x_center) = (0.242, -0.020), (0.230, -0.020), (0.206, -0.012), (0.280,
+-0.016) m: the true cell, two neighbours, and a cell on the valley wall whose loss
+is ~50x the true cell's, so the one tolerance is tried at two loss scales.
+
 Pass criteria (the settled parity bar — python stays the golden reference), per slice:
   - every candidate's final_loss within rtol 1e-3;
   - identical argmin index over the slice;
@@ -139,8 +148,11 @@ def rust_solve(tx_z, amp, x_axis, rx_z, channels, params, ref_freq):
     `level` take the same path for the same reason: their start amplitude (a0, or
     the level A0) is built in mgs.py; so does the excess-power penalty, which
     needs one of them. gs_solve's tuple has grown two (final_mse, power_ratio)
-    since; the hand-marshaled path is cut back to the seven both callers read."""
-    if params.init == "backprop" or params.amplitude != "fixed":
+    since; the hand-marshaled path is cut back to the seven both callers read.
+    The relative stop rule (convergence_rel) takes it too: the hand-marshaled call
+    predates it and would run the absolute rule."""
+    if (params.init == "backprop" or params.amplitude != "fixed"
+            or params.convergence_rel is not None):
         r = gs_reconstruct(tx_z=tx_z, orig_aper_amp=amp, x_axis=x_axis, rx_z=rx_z,
                            channels=channels,
                            params=params.model_copy(update={"engine": "rust"}),
@@ -163,7 +175,7 @@ def rust_solve(tx_z, amp, x_axis, rx_z, channels, params, ref_freq):
 
 
 def sweep_setup(cfg_path, freqs, *, snr_db=None, noise_seed=0, init=None,
-                amplitude=None, amp_max=None, power_penalty=None):
+                amplitude=None, amp_max=None, power_penalty=None, convergence_rel=None):
     """Steps 1-4 of grid_sweep.run_grid_search (the measurement, the grid-only GS
     overrides, the enumeration, the shared payload), without persistence: a slice
     calls the solver directly, one solve per candidate.
@@ -174,10 +186,10 @@ def sweep_setup(cfg_path, freqs, *, snr_db=None, noise_seed=0, init=None,
     config's): the start is a property of the solve, not of the measurement, so a
     slice can put another start on a shipped config without a copy of the file.
     `amplitude` / `amp_max` override gerchberg_saxton's the same way (both or
-    neither), and `power_penalty` likewise (None keeps the config's). A measured
-    config (a `measured` block) is built the way grid-search-mgs builds it —
-    apply_measured, then MGS.from_measured — with `freqs` None for the config's
-    own; it takes no noise override."""
+    neither), and `power_penalty` and `convergence_rel` likewise (None keeps the
+    config's). A measured config (a `measured` block) is built the way
+    grid-search-mgs builds it — apply_measured, then MGS.from_measured — with
+    `freqs` None for the config's own; it takes no noise override."""
     cfg = load_config(cfg_path)
     if cfg.measured is not None:
         freqs = resolve_frequencies(cfg, freqs)
@@ -195,6 +207,8 @@ def sweep_setup(cfg_path, freqs, *, snr_db=None, noise_seed=0, init=None,
         update.update(amplitude=amplitude, amp_max=amp_max)
     if power_penalty is not None:
         update["power_penalty"] = power_penalty
+    if convergence_rel is not None:
+        update["convergence_rel"] = convergence_rel
     if update:
         # rebuilt through the constructor so the mode is validated (attribute
         # assignment is not: the models have no validate_assignment)
@@ -212,15 +226,16 @@ def sweep_setup(cfg_path, freqs, *, snr_db=None, noise_seed=0, init=None,
 
 
 def run_slice(tag, cfg_path, freqs, limit, *, snr_db=None, noise_seed=0, init=None,
-              amplitude=None, amp_max=None, power_penalty=None, stride=1, spread=None,
-              near=None):
+              amplitude=None, amp_max=None, power_penalty=None, convergence_rel=None,
+              stride=1, spread=None, near=None):
     """`stride` spreads the candidates: every stride-th usable point, `limit` of them.
     `spread` (instead) picks `spread` candidates evenly over all the usable ones.
     `near` (instead of both) is a list of (z, x_center) in m: for each, the usable
     candidate nearest to it, for a slice that must sit where something happens."""
     x_axis, rx_z, channels, params, ref_freq, points = sweep_setup(
         cfg_path, freqs, snr_db=snr_db, noise_seed=noise_seed, init=init,
-        amplitude=amplitude, amp_max=amp_max, power_penalty=power_penalty)
+        amplitude=amplitude, amp_max=amp_max, power_penalty=power_penalty,
+        convergence_rel=convergence_rel)
     # the reference side is the PYTHON engine whatever the config's `engine` says:
     # a config that named rust would otherwise be compared with itself
     py_params = params.model_copy(update={"engine": "python"})
@@ -243,6 +258,8 @@ def run_slice(tag, cfg_path, freqs, limit, *, snr_db=None, noise_seed=0, init=No
                     "" if params.amp_max is None else f" (amp_max {params.amp_max:g})"))
     if params.power_penalty is not None:
         amp_note += f", power_penalty {params.power_penalty:g}"
+    if params.convergence_rel is not None:
+        amp_note += f", convergence_rel {params.convergence_rel:g}"
     print(f"\n== {tag}: {len(usable)} candidates, F={len(channels)}, "
           f"init={params.init}, max_iters={params.max_iters}, seed={params.seed}, "
           f"noise {noise}{amp_note}")
@@ -418,6 +435,16 @@ def main():
                               (0.320, -0.014)])
     else:
         print(f"\n== rx177_w120 power_penalty: SKIPPED ({data_file} not found)")
+    # the RELATIVE STOP RULE (convergence_rel 1e-6, set in memory), on the measured
+    # row's simulated twin as configured (backprop, level, power_penalty 1, 6000
+    # iterations): the true cell, two neighbours and a valley-wall cell (~50x the
+    # loss), the one tolerance at two loss scales
+    ok &= run_slice("twin_caustic_rx120_level_pp1, level + power_penalty as configured, "
+                    "convergence_rel 1e-6, 4 near the true TX",
+                    REPO / "configs" / "twin" / "twin_caustic_rx120_level_pp1.yml",
+                    [300e9], limit=4, convergence_rel=1e-6,
+                    near=[(0.242, -0.020), (0.230, -0.020), (0.206, -0.012),
+                          (0.280, -0.016)])
     print(f"\nPARITY: {'PASS' if ok else 'FAIL'} (rtol {RTOL}, argmin exact)")
     sys.exit(0 if ok else 1)
 

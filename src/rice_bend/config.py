@@ -316,6 +316,17 @@ class GerchbergSaxtonConfig(BaseModel):
         description="Window of recent losses checked for flatness")
     convergence_threshold: float = Field(default=-1e-10,
         description="Converged when mean(diff(recent loss)) exceeds this value")
+    convergence_rel: Optional[float] = Field(default=None,
+        description="The relative stop rule (null = off). When set it REPLACES "
+                    "convergence_threshold, which is then ignored: converged when the "
+                    "recent loss is <= 0, or when mean(diff(recent loss)) / (the "
+                    "latest recent loss) exceeds -convergence_rel, i.e. the loss falls "
+                    "by less than this fraction per iteration (on a float64 copy of the "
+                    "loss history). The absolute threshold has units of loss, so it "
+                    "stops a cell on a deep valley floor too early and a cell on a high "
+                    "wall on float32 quantization; the relative drop means the same "
+                    "thing in every cell. Finite and > 0; both engines. Runs with "
+                    "different stop rules are not comparable")
     lr0: float = Field(default=0.05, gt=0, description="Initial backtracking step size")
     bt_shrink: float = Field(default=0.5, gt=0, lt=1, description="Backtracking shrink factor")
     bt_tries: int = Field(default=8, gt=0, description="Max backtracking reductions per iteration")
@@ -379,6 +390,15 @@ class GerchbergSaxtonConfig(BaseModel):
             raise ValueError(f"power_penalty must be a finite number > 0, got {v}")
         return v
 
+    @field_validator("convergence_rel", mode="after")
+    @classmethod
+    def _check_convergence_rel(cls, v: Optional[float]) -> Optional[float]:
+        # one message for 0, negatives, nan and inf alike (as power_penalty): a
+        # tolerance <= 0 would never stop a descending solve
+        if v is not None and not (math.isfinite(v) and v > 0):
+            raise ValueError(f"convergence_rel must be a finite number > 0, got {v}")
+        return v
+
     @model_validator(mode="after")
     def _check_amplitude(self) -> "GerchbergSaxtonConfig":
         if self.amplitude == "descend" and self.amp_max is None:
@@ -417,6 +437,9 @@ class GerchbergSaxtonConfig(BaseModel):
         # dumps exactly as it did before the field existed
         if self.power_penalty is None:
             data.pop("power_penalty", None)
+        # convergence_rel likewise, while it is off (the absolute rule)
+        if self.convergence_rel is None:
+            data.pop("convergence_rel", None)
         return data
 
 

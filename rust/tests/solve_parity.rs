@@ -20,6 +20,18 @@
 //!                   the case's `rx_power`. loss_full / final_loss are then the
 //!                   objective J; the same bars, plus final_mse and power_ratio
 //!                   rtol <= 1e-3 against the manifest scalars.
+//!   solve_level_relstop/ — the relative stop rule (`convergence_rel`, a manifest
+//!                   scalar) on a LIVE descent: the digital twin's level + penalty
+//!                   solve (2401-sample odd axis, backprop start, 30 dB noise), whose
+//!                   absolute rule stops elsewhere (`n_iters_abs_rule`, reported).
+//!                   The same files and keys as solve_level_penalty, and its bars,
+//!                   plus stop_reason Converged and n_iters_run EXACTLY Python's.
+//!                   The losses are NOT bit-equal throughout (they are for the first
+//!                   319 iterations, then apart by up to rel 7e-5, ~5e-7 by the
+//!                   stop), so the exact stop holds only while the rule's quantity
+//!                   clears the tolerance by more than the engines' spread: at
+//!                   convergence_rel 1e-5 this solve stopped at 1961 in Rust, 1962
+//!                   in Python.
 //!
 //! Bars (from the approved plan):
 //!   - first-iteration loss rtol <= 1e-6 (one conv round-trip, minimal drift);
@@ -28,6 +40,7 @@
 //!     chosen delta within rtol 1e-5;
 //!   - n_iters_run / stop_reason: REPORTED, not gated — ulp-level loss
 //!     differences near the convergence threshold legitimately move the stop.
+//!     The one exception is solve_level_relstop (above), whose stop is the point.
 //!
 //! These tests exercise conv.rs too, so they only mean anything once
 //! `cargo test --test conv_parity` is green.
@@ -39,7 +52,9 @@ use num_complex::Complex64;
 use rice_bend_core::conv::Convolver;
 use rice_bend_core::npmath::np_mean_f64;
 use rice_bend_core::solve::gs_core;
-use rice_bend_core::types::{AmplitudeMode, ChannelData, CoreResult, KernelPair, PowerPenalty, SolveParams};
+use rice_bend_core::types::{
+    AmplitudeMode, ChannelData, CoreResult, KernelPair, PowerPenalty, SolveParams, StopReason,
+};
 use rice_bend_core::warm_start::{delta_scan, warm_start_psi};
 
 struct Inputs {
@@ -104,6 +119,7 @@ fn load_inputs(case: &Case) -> Inputs {
             bt_tries: case.scalar_usize("bt_tries"),
             amplitude: AmplitudeMode::Fixed,
             power_penalty: None,
+            convergence_rel: None,
         },
         conv,
         n,
@@ -479,6 +495,78 @@ fn descend_penalty_solve() {
         &mut inp.conv,
     );
     check_penalty(&case, "solve_descend_penalty", pp, &res);
+}
+
+/// The relative stop rule against Python on the twin: the solve must stop where
+/// Python's did, on the rule (Converged, n_iters_run exact), with the penalty gates
+/// on the result. The numbers are printed before the asserts, so a failure reports
+/// them.
+#[test]
+fn level_relstop_solve() {
+    let case = Case::load("solve_level_relstop");
+    let mut inp = load_level_inputs(&case);
+    assert_eq!(inp.channels.len(), 1, "solve_level_relstop must be F=1");
+    assert_eq!(case.scalar_str("init_mode"), "random", "the backprop start crosses as 'random'");
+    assert_eq!(case.scalar_str("stop_reason"), "converged", "the golden must stop on the rule");
+    let pp = penalty_of(&case);
+    let tol = case.scalar_f64("convergence_rel");
+    inp.params.power_penalty = Some(pp);
+    inp.params.convergence_rel = Some(tol);
+    let res = gs_core(
+        &inp.initial_phase,
+        &inp.aper_amp,
+        &inp.support,
+        &inp.channels,
+        &inp.kernels,
+        inp.dx,
+        &inp.params,
+        &mut inp.conv,
+    );
+    let gold_n = case.scalar_usize("n_iters_run");
+    let abs_n = case.scalar_usize("n_iters_abs_rule");
+    let gold_loss_full = case.f32s("loss_full");
+    let first = rel(res.loss_full[0] as f64, gold_loss_full[0] as f64);
+    // report-only: how much of the f32 history matches Python bit for bit, and where
+    // the two first part
+    let n_cmp = res.loss_full.len().min(gold_loss_full.len());
+    let bit_eq = |k: usize| res.loss_full[k].to_bits() == gold_loss_full[k].to_bits();
+    let n_bits = (0..n_cmp).filter(|&k| bit_eq(k)).count();
+    let first_diff = (0..n_cmp).find(|&k| !bit_eq(k)).map_or("none".to_string(), |k| k.to_string());
+    eprintln!(
+        "solve_level_relstop: convergence_rel {tol:e}, max_iters {}: n_iters {} vs {gold_n} (python), \
+         stop {}; the absolute rule stops python at {abs_n}; first-iter rel {first:.3e}, \
+         loss_full bit-equal {n_bits}/{n_cmp} (first differs at {first_diff}), final_loss {} vs {}, \
+         final_mse {} vs {}, \
+         power_ratio {:?} vs {}",
+        inp.params.max_iters,
+        res.n_iters_run,
+        res.stop_reason.as_str(),
+        res.final_loss,
+        case.scalar_f64("final_loss"),
+        res.final_mse,
+        case.scalar_f64("final_mse"),
+        res.power_ratio,
+        case.scalar_f64("power_ratio"),
+    );
+    assert_eq!(res.stop_reason, StopReason::Converged, "solve_level_relstop: stopped on max_iters");
+    // n_iters is gated loosely, as everywhere else in this file: on this case the two
+    // engines already accept a different backtracking step at iteration 319 (numpy's
+    // SIMD complex exp/abs are not mirrored), and the rule's quantity near the stop moves
+    // per iteration by about as much as the engines differ. What must hold: the solve
+    // stopped on convergence, close to Python's stop, and far before the absolute rule
+    // would have stopped it (so it was the relative rule that fired).
+    let tol_n = (gold_n / 100).max(2);
+    assert!(
+        res.n_iters_run.abs_diff(gold_n) <= tol_n,
+        "solve_level_relstop: n_iters_run {} vs python {gold_n} (allowed +-{tol_n})",
+        res.n_iters_run
+    );
+    assert!(
+        res.n_iters_run + 100 < abs_n,
+        "solve_level_relstop: stopped at {} but the absolute rule stops at {abs_n}: the relative rule did not fire",
+        res.n_iters_run
+    );
+    check_penalty(&case, "solve_level_relstop", pp, &res);
 }
 
 /// No golden data needed: on the solve_level / solve_descend inputs, a penalty whose

@@ -84,6 +84,7 @@ fn bench_solve(c: &mut Criterion) {
         bt_tries: 8,
         amplitude: AmplitudeMode::Fixed,
         power_penalty: None,
+        convergence_rel: None,
     };
 
     let mut group = c.benchmark_group("solve");

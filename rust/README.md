@@ -136,7 +136,24 @@ stage 1 runs unpenalized on both engines. Python drops the penalty from its chil
 solve, and `gs_core` ignores it under `AmplitudeMode::Fixed`, which is what
 `warm_start.rs` hands stage 1.
 
-`python/parity.py` runs sixteen slices under the same bar:
+**The relative stop rule** (`gerchberg_saxton.convergence_rel`, added 2026-10-23;
+`SolveParams::convergence_rel`) replaces the absolute flatness test when set, and
+`convergence_threshold` is then ignored. The absolute threshold has units of loss,
+so it means a different thing in every cell: on the measured valley floor
+(J ~ 2e-5) it stops cells before the ranking is decided, on the walls (J ~ 7e-3)
+f32 spacing (~5e-10) makes it fire on quantization. The relative rule runs at the
+same place, under the same `iter_idx > convergence_count`, on an f64 history of the
+same pre-step objective the f32 `loss_full` records. With w the window
+`hist64[iter_idx − count .. iter_idx]` (current index excluded) and r its last
+value, the solve converges when r ≤ 0 or mean(diff(w))/r > −`convergence_rel`. The
+mean is `np_mean_f64`, numpy's pairwise sum over n (bit-equal to `np.mean` on the
+9-element windows of the default count 10). `gs_solve` takes it as one more
+trailing keyword, `convergence_rel` (None by default, else finite and > 0). Off,
+`gs_core` branches on the Option and runs the absolute block verbatim, with no
+floating-point operation added. Runs under different stop rules are not
+comparable.
+
+`python/parity.py` runs seventeen slices under the same bar:
 
 | Slice | Config | Tones (GHz) | Noise | Receiver | Start |
 |---|---|---|---|---|---|
@@ -156,13 +173,14 @@ solve, and `gs_core` ignores it under `AmplitudeMode::Fixed`, which is what
 | 14 | `measured/rxsize/rx177_level_w200_coarse.yml` as written (level, 6000 iterations), 6 candidates spread over its 4 mm grid; skipped without its data file | 300 | measured | measured row, 401 elements | `backprop` |
 | 15 | slice 5's config, `amplitude: level`, `power_penalty` 1, 6 candidates spread over the grid | 300 | the config's 30 dB | on-grid, λ/2 | `backprop` |
 | 16 | the same, `amplitude: descend`, `amp_max` 2, `power_penalty` 1 | 300 | the config's 30 dB | on-grid, λ/2 | `backprop` |
+| 17 | `twin/twin_caustic_rx120_level_pp1.yml` (level + `power_penalty` 1, as configured), `convergence_rel` 1e-6, 4 cells around the true TX | 300 | the config's 30 dB | the twin's 120 mm RX | `backprop` |
 
 Results (2026-10-20, with the level port; slice 11 at 6000 iterations): all
 fourteen pass, and n_iters_run and stop_reason are identical on every candidate
 of every slice. The worst rel Δloss is 1.2e-10 on slices 8-11 (on the measured
 slice) and 2.5e-10 on slices 12-14 (on the measured slice; 1.8e-14 on the
 simulated ones). Slices 15 and 16 came with the power penalty (2026-10-22) and
-are not in these results.
+slice 17 with the relative stop rule (2026-10-23); they are not in these results.
 
 The scenario configs carry a 30 dB noise block of their own, so the noiseless
 slices force the noise off explicitly (`SNR_OFF`, what `--snr-db off` passes)
@@ -192,12 +210,13 @@ cd rust && cargo build && cargo test
 .venv/bin/python rust/python/gen_golden.py solve_descend solve_descend_joint
 .venv/bin/python rust/python/gen_golden.py solve_level solve_level_joint
 .venv/bin/python rust/python/gen_golden.py solve_level_penalty solve_descend_penalty
+.venv/bin/python rust/python/gen_golden.py solve_level_relstop
 
 # extension module into the project venv (Python 3.8.10). Rebuild after any
-# change under src/: mgs._gs_solve_rust passes amplitude=/amp_max=/support= and
-# power_penalty=/rx_power= by keyword and unpacks a 9-tuple, which a build older
-# than the penalty port refuses (a TypeError, under 'fixed' and with the penalty
-# off too):
+# change under src/: mgs._gs_solve_rust passes amplitude=/amp_max=/support=,
+# power_penalty=/rx_power= and convergence_rel= by keyword and unpacks a 9-tuple,
+# which a build older than the relative stop rule refuses (a TypeError, with the
+# rule off too):
 uv pip install maturin
 VIRTUAL_ENV=$PWD/.venv .venv/bin/maturin develop --release -m rust/Cargo.toml
 
@@ -240,6 +259,19 @@ these bars. `penalty_floor_is_the_plain_solve` needs no new data. On the
 (R = 1 throughout) reproduces the unpenalized solve bit for bit. A P_rx at a
 quarter of the start plate's power, γ 2, raises the first objective above L, moves
 the solve and keeps the same identities.
+`solve_level_relstop` (2026-10-23) is a live descent, unlike the tiny_check cases,
+which never accept a step: the digital twin (`twin_caustic_rx120_level_pp1.yml`,
+2401-sample odd axis, level + `power_penalty` 1, backprop start, 30 dB noise) with
+one candidate behind a 100 mm 0/1 window, stopped by `convergence_rel`. Its files
+and keys are those of `solve_level_penalty`, plus the scalars `convergence_rel` and
+`n_iters_abs_rule`, where the absolute rule stops the same solve in Python (Rust's
+absolute rule stops it at the same iteration). The test keeps the penalty bars and
+gates the stop loosely, as the other solve tests do: Converged, n_iters_run within
+1% of Python's, and far below `n_iters_abs_rule` (so the relative rule is what
+fired). An exact gate would be tighter than the losses: they are bit-equal for the
+first 319 iterations, then differ by up to rel 7e-5 (about 5e-7 by the stop), and at
+`convergence_rel` 1e-5 this solve stopped at 1961 in Rust and 1962 in Python. The
+golden uses 4e-5 (stop 1237 in both; the absolute rule 2687).
 
 Version pins: **pyo3 0.22 + numpy(rust) 0.22, abi3-py38, maturin ≥1.4,<2** — the
 verified pairing for CPython 3.8.10. Do not bump without revisiting the floor.
@@ -262,7 +294,9 @@ the source of truth. The load-bearing traps, in one place:
 - **Adjoint spectrum from the time-domain conjugate** (`FFT(pad(conj(h)))`),
   never `conj(FFT(pad(h)))`.
 - **f32 convergence window**: losses stored f32, diff/mean at f32, strictly
-  `iter_idx > convergence_count`, window excludes the current index.
+  `iter_idx > convergence_count`, window excludes the current index. The
+  relative rule (`convergence_rel`) is the exception: it reads an f64 history of
+  the same values, never the f32 one.
 - **`loss_full` holds PRE-step losses**; `final_loss` is the last iteration's
   POST-accept loss — they differ whenever the last iteration accepted a step.
 - **Under the power penalty the "loss" is J = L·R^γ**: the accept test,
@@ -295,7 +329,7 @@ the source of truth. The load-bearing traps, in one place:
 > forced off. That config is kept as the benchmark's input and keeps the legacy
 > start for it: workload A times the engine's own warm start, which a config with
 > `init: backprop` would replace by a start computed in Python for both engines.
-> `python/parity.py` runs the sixteen slices listed above.
+> `python/parity.py` runs the seventeen slices listed above.
 
 ## Amplitude descend on the measured row (2026-10-20)
 

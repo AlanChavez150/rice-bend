@@ -37,6 +37,11 @@
 //!     than each summing |rx|^2 over the elements its own way. Both must be finite
 //!     and > 0, and the penalty is refused with amplitude 'fixed' (R would be a
 //!     constant of the grid), as the config refuses it.
+//!   - the relative stop rule: trailing `convergence_rel` (default None: the
+//!     absolute convergence_threshold rule, bit-identical to a build without it).
+//!     When set it must be finite and > 0, and it replaces the absolute test
+//!     (solve.rs, "Convergence test"); convergence_threshold still crosses and is
+//!     then ignored.
 //!
 //! Not crossing: capture/history (python engine only), the config object
 //! (scalars are exploded into arguments so the crate never parses pydantic),
@@ -98,15 +103,16 @@ fn rows<T: numpy::Element + Copy>(a: &PyReadonlyArray2<'_, T>) -> Vec<Vec<T>> {
 /// final_mse the plain joint loss, final_loss_per_freq the plain per-tone losses;
 /// off, final_mse == final_loss and power_ratio is None.
 ///
-/// The trailing `amplitude`, `amp_max`, `support`, `power_penalty`, `rx_power`
-/// default to the legacy behaviour (fixed amplitude, support = aper_amp > 0, no
-/// penalty), so positional callers that predate them run unchanged.
+/// The trailing `amplitude`, `amp_max`, `support`, `power_penalty`, `rx_power`,
+/// `convergence_rel` default to the legacy behaviour (fixed amplitude, support =
+/// aper_amp > 0, no penalty, the absolute stop rule), so positional callers that
+/// predate them run unchanged.
 #[pyfunction]
 #[pyo3(signature = (
     initial_phase, aper_amp, freqs, ref_freq, rx_field, error_weighting, h_fwd, dx,
     init_mode, max_iters, convergence_count, convergence_threshold, lr0, bt_shrink,
     bt_tries, amplitude = "fixed", amp_max = None, support = None, power_penalty = None,
-    rx_power = None
+    rx_power = None, convergence_rel = None
 ))]
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn gs_solve<'py>(
@@ -131,6 +137,7 @@ pub fn gs_solve<'py>(
     support: Option<PyReadonlyArray1<'py, bool>>,
     power_penalty: Option<f64>,
     rx_power: Option<f64>,
+    convergence_rel: Option<f64>,
 ) -> PyResult<(
     Bound<'py, PyArray1<Complex64>>,
     f64,
@@ -219,6 +226,16 @@ pub fn gs_solve<'py>(
             )))
         }
     };
+    if let Some(tol) = convergence_rel {
+        // a relative drop per iteration: tol <= 0 never stops a falling loss, and
+        // NaN never stops at all
+        if !(tol.is_finite() && tol > 0.0) {
+            return Err(PyValueError::new_err(format!(
+                "convergence_rel must be a finite number > 0 (or None for the absolute \
+                 convergence_threshold rule); got {tol}"
+            )));
+        }
+    }
     let support: Option<Vec<bool>> = match support {
         Some(s) => {
             if s.len()? != n {
@@ -284,6 +301,7 @@ pub fn gs_solve<'py>(
         bt_tries,
         amplitude,
         power_penalty,
+        convergence_rel,
     };
 
     let (aper_f, res) = py.allow_threads(move || {

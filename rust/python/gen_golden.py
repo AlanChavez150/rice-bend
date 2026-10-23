@@ -10,6 +10,7 @@ note the commit recorded in tests/data/meta.json.
     .venv/bin/python rust/python/gen_golden.py solve_descend solve_descend_joint
     .venv/bin/python rust/python/gen_golden.py solve_level solve_level_joint
     .venv/bin/python rust/python/gen_golden.py solve_level_penalty solve_descend_penalty
+    .venv/bin/python rust/python/gen_golden.py solve_level_relstop
 
 Naming cases regenerates those alone and leaves meta.json as it is; each such case
 records its own provenance (generated / commit) in its manifest's scalars.
@@ -46,6 +47,19 @@ Cases produced (names are pinned by rust/tests/conv_parity.rs / solve_parity.rs)
                           lifts off its floor at 1, the solve is solve_descend's
                           to the bit and the case would pin nothing of the
                           penalty. Scaled, the start plate radiates ~2x P_rx
+  solve_level_relstop     the relative stop rule (convergence_rel 4e-5) on a
+                          LIVE descent: the tiny_check cases accept few or no
+                          steps (even scene axis), so their stop pins no
+                          descent. The twin instead
+                          (configs/twin/twin_caustic_rx120_level_pp1.yml: odd
+                          2401-sample axis, rx_peak, 30 dB noise seed 0, level +
+                          power_penalty 1, backprop start), F=1 at 300 GHz, the
+                          100 mm candidate at the true TX (z 0.242, x -0.020),
+                          max_iters 3000: every iteration accepts a step, the
+                          rule stops it at 1237 and the absolute rule at 2687.
+                          solve_level_penalty's files and keys, plus
+                          convergence_rel and n_iters_abs_rule (the same solve's
+                          stop under convergence_threshold, the absolute rule)
 
 The frequencies and sizes above are what a regeneration produces NOW, from the
 retargeted configs (300 GHz carrier, tiny_check.yml at 0.75 mm scene spacing). The
@@ -66,7 +80,7 @@ import scipy.signal
 from rice_bend import mgs as mgs_module
 from rice_bend import rs
 from rice_bend.config import GerchbergSaxtonConfig, center_freq_index, load_config
-from rice_bend.grid_sweep import enumerate_grid
+from rice_bend.grid_sweep import GridPoint, enumerate_grid, window_samples
 from rice_bend.mgs import (MGS, WARM_START_MAX_SAMPLES, WARM_START_SCAN_STEP,
                            gs_reconstruct)
 
@@ -154,6 +168,36 @@ def _candidate_setup(freqs):
     x_axis = np.asarray(m.scene.x_axis).copy()
     support = (x_axis >= point.x_min) & (x_axis <= point.x_max)
     amp = np.where(support, 1.0, 0.0)
+    channels = m.measurement_channels()
+    ref_freq = float(m.freqs[center_freq_index(m.freqs)])
+    rx_z = float(m.scene.rx_ap.z)
+    return x_axis, point, support, amp, channels, params, ref_freq, rx_z
+
+
+def _twin_setup(freqs):
+    """_candidate_setup's tuple for solve_level_relstop: the twin (MGS + measure, its
+    30 dB noise and rx_peak scale included) and ONE candidate, RELSTOP_CELL's 100 mm
+    window as the sweep builds it (grid_sweep.window_samples: a run of scene samples
+    centred on the sample nearest x_center), a 0/1 box. The config's solver block,
+    with max_iters RELSTOP_MAX_ITERS and seed 0 on the python engine."""
+    cfg = load_config(REPO / "configs" / "twin" / "twin_caustic_rx120_level_pp1.yml")
+    m = MGS(freqs, cfg)
+    m.measure()
+    params = cfg.gerchberg_saxton.model_copy(
+        update={"max_iters": RELSTOP_MAX_ITERS, "seed": 0, "engine": "python"})
+
+    x_axis = np.asarray(m.scene.x_axis).copy()
+    assert len(x_axis) % 2 == 1, "the twin's axis is odd (bit-level parity)"
+    z, x_center = RELSTOP_CELL
+    width = 0.1
+    i_lo, i_hi = window_samples(x_axis, x_center, width)
+    assert 0 <= i_lo and i_hi < len(x_axis)
+    support = np.zeros(len(x_axis), dtype=bool)
+    support[i_lo:i_hi + 1] = True
+    amp = np.where(support, 1.0, 0.0)
+    point = GridPoint(index=-1, z=z, x_center=x_center, x_min=float(x_axis[i_lo]),
+                      x_max=float(x_axis[i_hi]), dx=float(x_axis[1] - x_axis[0]),
+                      freq_ok=[True] * len(freqs))
     channels = m.measurement_channels()
     ref_freq = float(m.freqs[center_freq_index(m.freqs)])
     rx_z = float(m.scene.rx_ap.z)
@@ -397,17 +441,38 @@ def _gen_descend(name, freqs, init, power_penalty=None, start_scale=None):
     save_case(name, arrays, scalars)
 
 
-def _gen_level(name, freqs, power_penalty=None):
-    x_axis, point, support, amp, channels, params, ref_freq, rx_z = _candidate_setup(freqs)
+def _gen_level(name, freqs, power_penalty=None, setup=_candidate_setup,
+               convergence_rel=None):
+    """`setup` builds the candidate (_candidate_setup: tiny_check; _twin_setup: the
+    twin). `convergence_rel` (None: the absolute rule) solves under the relative
+    stop rule, and the same solve is then run again under the absolute rule, whose
+    stop is recorded beside it (n_iters_abs_rule): the case must tell them apart."""
+    x_axis, point, support, amp, channels, params, ref_freq, rx_z = setup(freqs)
     if len(freqs) == 1:
         ref_freq = float(freqs[0])
     params = GerchbergSaxtonConfig(**{**params.model_dump(), "init": "backprop",
                                       "amplitude": "level", "amp_max": None,
-                                      "power_penalty": power_penalty})
+                                      "power_penalty": power_penalty,
+                                      "convergence_rel": convergence_rel})
     solve_kwargs = dict(tx_z=point.z, orig_aper_amp=amp, x_axis=x_axis, rx_z=rx_z,
                         channels=channels, ref_freq=ref_freq, capture=False, log=None)
     result = gs_reconstruct(params=params.model_copy(update={"engine": "python"}),
                             **solve_kwargs)
+    rel_scalars = {}
+    if convergence_rel is not None:
+        abs_result = gs_reconstruct(
+            params=params.model_copy(update={"engine": "python", "convergence_rel": None}),
+            **solve_kwargs)
+        n_accepted = int(np.count_nonzero(np.diff(result.loss_full) < 0))
+        print(f"  {name}: relative rule {result.stop_reason} at {result.n_iters_run} "
+              f"({n_accepted} steps accepted), absolute rule {abs_result.stop_reason} "
+              f"at {abs_result.n_iters_run}, max_iters {params.max_iters}")
+        assert result.stop_reason == "converged"
+        assert result.n_iters_run < params.max_iters
+        assert abs_result.n_iters_run != result.n_iters_run
+        assert n_accepted > result.n_iters_run // 2, "not a live descent"
+        rel_scalars = {"convergence_rel": float(convergence_rel),
+                       "n_iters_abs_rule": int(abs_result.n_iters_run)}
     crossing = _rust_boundary_inputs(solve_kwargs, params)
     assert np.array_equal(crossing["support"], support)
     a0 = crossing["aper_amp"]
@@ -424,6 +489,7 @@ def _gen_level(name, freqs, power_penalty=None):
     arrays.update(out_a)
     scalars.update(out_s)
     scalars.update(_penalty_scalars(crossing, result, power_penalty))
+    scalars.update(rel_scalars)
     scalars.update(_provenance())
     save_case(name, arrays, scalars)
 
@@ -459,6 +525,22 @@ def gen_solve_level_penalty():
 def gen_solve_descend_penalty():
     _gen_descend("solve_descend_penalty", [300e9], "backprop",
                  power_penalty=PENALTY_GAMMA, start_scale=DESCEND_PENALTY_START_SCALE)
+
+
+# solve_level_relstop: the twin's true TX cell (z, x_center), the cap and the
+# tolerance. Every iteration accepts a step; the absolute rule (-1e-10) stops at 2687
+# and 4e-5 at 1237. The tolerance is picked for its MARGIN, since the rust test asks
+# for the stop iteration exactly: no checked window up to the stop has its ratio
+# mean(diff)/loss within 0.1% of -tol (1e-5, which stops at 1962, has one within
+# 0.02%, so a loss off by ~1e-8 relative would move the stop)
+RELSTOP_CELL = (0.242, -0.020)
+RELSTOP_MAX_ITERS = 3000
+RELSTOP_TOL = 4e-5
+
+
+def gen_solve_level_relstop():
+    _gen_level("solve_level_relstop", [300e9], power_penalty=PENALTY_GAMMA,
+               setup=_twin_setup, convergence_rel=RELSTOP_TOL)
 
 
 def _provenance():
@@ -526,6 +608,7 @@ CASES = {
     "solve_level_joint": gen_solve_level_joint,
     "solve_level_penalty": gen_solve_level_penalty,
     "solve_descend_penalty": gen_solve_descend_penalty,
+    "solve_level_relstop": gen_solve_level_relstop,
 }
 
 

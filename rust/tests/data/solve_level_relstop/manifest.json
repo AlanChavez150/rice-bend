@@ -1,0 +1,113 @@
+{
+ "arrays": {
+  "initial_phase": {
+   "file": "initial_phase.bin",
+   "dtype": "f64",
+   "shape": [
+    2401
+   ]
+  },
+  "aper_amp": {
+   "file": "aper_amp.bin",
+   "dtype": "f64",
+   "shape": [
+    2401
+   ]
+  },
+  "freqs": {
+   "file": "freqs.bin",
+   "dtype": "f64",
+   "shape": [
+    1
+   ]
+  },
+  "rx_field": {
+   "file": "rx_field.bin",
+   "dtype": "c128",
+   "shape": [
+    1,
+    2401
+   ]
+  },
+  "error_weighting": {
+   "file": "error_weighting.bin",
+   "dtype": "f64",
+   "shape": [
+    1,
+    2401
+   ]
+  },
+  "h_fwd": {
+   "file": "h_fwd.bin",
+   "dtype": "c128",
+   "shape": [
+    1,
+    2401
+   ]
+  },
+  "support": {
+   "file": "support.bin",
+   "dtype": "f64",
+   "shape": [
+    2401
+   ]
+  },
+  "curr_aper_f": {
+   "file": "curr_aper_f.bin",
+   "dtype": "c128",
+   "shape": [
+    2401
+   ]
+  },
+  "final_loss_per_freq": {
+   "file": "final_loss_per_freq.bin",
+   "dtype": "f64",
+   "shape": [
+    1
+   ]
+  },
+  "loss_full": {
+   "file": "loss_full.bin",
+   "dtype": "f32",
+   "shape": [
+    1237
+   ]
+  },
+  "loss_full_per_freq": {
+   "file": "loss_full_per_freq.bin",
+   "dtype": "f32",
+   "shape": [
+    1237,
+    1
+   ]
+  }
+ },
+ "scalars": {
+  "ref_freq": 300000000000.0,
+  "dx": 0.00024999999999997247,
+  "seed": 0,
+  "tx_z": 0.242,
+  "rx_z": 0.0,
+  "init_mode": "random",
+  "max_iters": 3000,
+  "convergence_count": 10,
+  "convergence_threshold": -1e-10,
+  "lr0": 0.05,
+  "bt_shrink": 0.5,
+  "bt_tries": 8,
+  "level_start": 0.379456918463243,
+  "final_loss": 2.663807989335743e-05,
+  "n_iters_run": 1237,
+  "stop_reason": "converged",
+  "power_penalty": 1.0,
+  "rx_power": 0.014102484912286453,
+  "final_mse": 2.5880500793828457e-05,
+  "power_ratio": 1.0292721962980573,
+  "convergence_rel": 4e-05,
+  "n_iters_abs_rule": 2687,
+  "generated": "2026-10-23",
+  "commit": "d6220e950aef7b3eb78c702c619e573eb446dbe3-dirty",
+  "numpy": "1.24.4",
+  "scipy": "1.10.1"
+ }
+}

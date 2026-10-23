@@ -315,6 +315,9 @@ class GridSearchRun:
     # gerchberg_saxton.power_penalty (gamma) of every solve; None when off. Recorded
     # in the manifest's gs block only when set
     power_penalty: Optional[float] = None
+    # gerchberg_saxton.convergence_rel (the relative stop rule) of every solve; None
+    # under the absolute rule. Recorded in the manifest's gs block only when set
+    convergence_rel: Optional[float] = None
     # MGS.tx_amplitude_report: tx_aperture.amplitude as applied to the simulated
     # plate ({setting, scale, clean_rx_peak_unscaled}); None at the default 1.0
     # and on a measured run. The manifest's top-level tx_amplitude, only when set
@@ -471,6 +474,7 @@ def run_grid_search(config: SimConfig, freqs: List[float], *, limit: Optional[in
         amplitude=str(mgs.gs_cfg.amplitude),
         amp_max=mgs.gs_cfg.amp_max,
         power_penalty=mgs.gs_cfg.power_penalty,
+        convergence_rel=mgs.gs_cfg.convergence_rel,
         tx_amplitude=mgs.tx_amplitude_report,
     )
 
@@ -555,6 +559,10 @@ def solve_at_measured_tx(run: GridSearchRun, params: GerchbergSaxtonConfig
         # likewise only when the penalty is on (it needs a fitted amplitude)
         if params.power_penalty is not None:
             report["gs"]["power_penalty"] = float(params.power_penalty)
+    if params.convergence_rel is not None:
+        # only under the relative stop rule, so a report under the absolute one is
+        # what it always was
+        report["gs"]["convergence_rel"] = float(params.convergence_rel)
     if not point.ok:
         return None, report
 
@@ -652,7 +660,9 @@ def save_grid_run(run: GridSearchRun, run_dir: Path, config: SimConfig,
     (the plain joint residual) and `power_ratio` (null without the penalty).
     With gerchberg_saxton.power_penalty on, the manifest's gs block gains
     `power_penalty` and each `final_loss` is the penalized objective
-    final_mse * power_ratio**power_penalty that ranks the candidates.
+    final_mse * power_ratio**power_penalty that ranks the candidates. With
+    gerchberg_saxton.convergence_rel set (the relative stop rule) the gs block
+    gains `convergence_rel`; a run under the absolute rule writes no such key.
 
     A measured run (run.measured set) writes the same layout with two differences:
     measurement.npz has no real_tx_aper_axis / real_tx_aper_profile (the plate's
@@ -782,6 +792,10 @@ def save_grid_run(run: GridSearchRun, run_dir: Path, config: SimConfig,
         # candidates' final_loss is then J, and their final_mse the plain residual
         if run.power_penalty is not None:
             manifest["gs"]["power_penalty"] = run.power_penalty
+    if run.convergence_rel is not None:
+        # only under the relative stop rule, likewise: its candidates stopped on a
+        # different rule, so their losses do not compare with an absolute-rule run's
+        manifest["gs"]["convergence_rel"] = run.convergence_rel
     if run.measured is not None:
         # only on a measured run, so a simulated manifest is what it always was
         manifest["measured"] = run.measured

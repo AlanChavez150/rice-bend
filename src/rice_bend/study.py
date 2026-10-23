@@ -326,11 +326,12 @@ def _check_resume_noise(study: StudyDef, base_cfg: SimConfig, root: Path, log) -
 
 # the gerchberg_saxton fields that decide what a solve produces. Left out:
 # engine (python and rust are parity-checked implementations of one solver) and
-# history_stride (it only thins what a capturing solve records). power_penalty is
-# left out of a dump while off, and a missing key reads as null: off, as it was
+# history_stride (it only thins what a capturing solve records). power_penalty and
+# convergence_rel are left out of a dump while off, and a missing key reads as
+# null: off, as it was
 _GS_IDENTITY_FIELDS = ("init", "max_iters", "seed", "convergence_count",
                        "convergence_threshold", "lr0", "bt_shrink", "bt_tries",
-                       "amplitude", "amp_max", "power_penalty")
+                       "amplitude", "amp_max", "power_penalty", "convergence_rel")
 # what a gerchberg_saxton field missing from a dump stands for, where that is not
 # null: a fixed-amplitude config dumps without amplitude / amp_max (config.py's
 # GerchbergSaxtonConfig._dump), as every snapshot saved before they existed does,

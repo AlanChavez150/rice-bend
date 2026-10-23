@@ -432,6 +432,10 @@ def _collect_metadata(mgs, run_dir: Path,
             "npz_keys": sorted(npz_keys),
         },
     }
+    if gs_cfg.convergence_rel is not None:
+        # the relative stop rule, only when set: a run under the absolute rule
+        # (convergence_threshold above) writes the run.json it always did
+        meta["gerchberg_saxton"]["convergence_rel"] = float(gs_cfg.convergence_rel)
     if getattr(mgs, "tx_amplitude_report", None) is not None:
         # tx_aperture.amplitude as applied to the simulated plate (setting, factor,
         # rx_peak's unscaled clean peak); only when it is not the default 1.0, so a

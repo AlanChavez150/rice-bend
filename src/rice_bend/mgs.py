@@ -901,7 +901,9 @@ def _gs_solve_rust(channels, params, ref_freq, seed, initial_phase, curr_aper_am
         support=None if support is None else np.ascontiguousarray(support, dtype=bool),
         power_penalty=(None if params.power_penalty is None
                        else float(params.power_penalty)),
-        rx_power=None if rx_power is None else float(rx_power))
+        rx_power=None if rx_power is None else float(rx_power),
+        convergence_rel=(None if params.convergence_rel is None
+                         else float(params.convergence_rel)))
     if log is not None:
         if stop_reason == "converged":
             log.info(f"MGS has converged after {n_iters_run} iterations")
@@ -1066,6 +1068,7 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
     bt_shrink = params.bt_shrink
     bt_tries = params.bt_tries
     conv_threshold = params.convergence_threshold
+    conv_rel = params.convergence_rel  # the relative stop rule; None = the absolute one
 
     # seeded initial phase for reproducibility; draw + record a seed if none given
     seed = params.seed
@@ -1182,6 +1185,12 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
     n_iters_run = max_iters
     hist_error = np.zeros(max_iters, np.float32)
     hist_error_pf = np.zeros((max_iters, n_freq), np.float32)
+    # the relative rule divides by the loss itself, so it reads a float64 copy of the
+    # history: float32's spacing on a deep valley floor (J ~ 1e-5) is a sizeable
+    # fraction of the per-iteration drop it measures. Never allocated (nor written)
+    # under the absolute rule, which reads the float32 history as it always did
+    if conv_rel is not None:
+        hist64 = np.zeros(max_iters, np.float64)
     aim_floor = False  # the level clamp (penalty under 'level'); never set otherwise
     for iter_idx in range(max_iters):
         # propogate aperature guess to measurement plane, once per frequency. A
@@ -1290,6 +1299,8 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
         else:
             loss = loss_pf.mean()
         hist_error[iter_idx] = loss
+        if conv_rel is not None:
+            hist64[iter_idx] = loss
         hist_error_pf[iter_idx] = loss_pf
         if history is not None:
             history.record_iter(iter_idx, loss, loss_pf, curr_aper_phase, prop_fields)
@@ -1357,14 +1368,30 @@ def gs_reconstruct(tx_z: float, orig_aper_amp: np.ndarray, x_axis: np.ndarray,
 
         # if the last x iterations did not improve the error, GS has "converged"
         if iter_idx > cvrg_count:
-            recent_err = hist_error[iter_idx-cvrg_count: iter_idx]
-            recent_err_flatness = np.mean(np.diff(recent_err))
-            if recent_err_flatness > conv_threshold:
-                if log is not None:
-                    log.info(f"MGS has converged after {iter_idx+1} iterations")
-                stop_reason = "converged"
-                n_iters_run = iter_idx + 1
-                break
+            if conv_rel is None:
+                recent_err = hist_error[iter_idx-cvrg_count: iter_idx]
+                recent_err_flatness = np.mean(np.diff(recent_err))
+                if recent_err_flatness > conv_threshold:
+                    if log is not None:
+                        log.info(f"MGS has converged after {iter_idx+1} iterations")
+                    stop_reason = "converged"
+                    n_iters_run = iter_idx + 1
+                    break
+            else:
+                # the same window, judged RELATIVE to the latest loss in it: the
+                # absolute threshold has units of loss, so it stops a deep valley
+                # floor before the ranking is decided and fires on float32
+                # quantization on a high wall. A loss <= 0 has nothing left to
+                # descend; a NaN fails both tests and runs on to max_iters, as above
+                recent64 = hist64[iter_idx-cvrg_count: iter_idx]
+                mean_diff = np.mean(np.diff(recent64))
+                ref_loss = recent64[-1]
+                if ref_loss <= 0.0 or mean_diff / ref_loss > -conv_rel:
+                    if log is not None:
+                        log.info(f"MGS has converged after {iter_idx+1} iterations")
+                    stop_reason = "converged"
+                    n_iters_run = iter_idx + 1
+                    break
 
     if stop_reason == "max_iters" and log is not None:
         log.error(f"MGS did not converge after {max_iters} iterations")
